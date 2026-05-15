@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.QA</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.QA.Abstractions</PackageId>
+    <Description>Abstractions and contracts for FsVoice QA providers, sources, tools, and sessions.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;QA;Abstractions;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Types.fs" />
+    <Compile Include="UseCase.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Tools</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Tools</PackageId>
+    <Description>Tool provider helpers for FsVoice QA workflows.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;QA;Tools;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="QaCurrentTimeProvider.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.QA.Abstractions\FsVoice.QA.Abstractions.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

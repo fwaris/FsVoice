@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="456" height="456" viewBox="0 0 456 456" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <linearGradient id="voiceGradient" x1="124" y1="128" x2="332" y2="328" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#7CF7D4" />
+            <stop offset="0.52" stop-color="#5EB7FF" />
+            <stop offset="1" stop-color="#C8A6FF" />
+        </linearGradient>
+        <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="8" result="blur" />
+            <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.31 0 0 0 0 0.73 0 0 0 0 1 0 0 0 0.55 0" result="glow" />
+            <feMerge>
+                <feMergeNode in="glow" />
+                <feMergeNode in="SourceGraphic" />
+            </feMerge>
+        </filter>
+    </defs>
+
+    <circle cx="228" cy="228" r="104" fill="url(#voiceGradient)" opacity="0.16" />
+    <circle cx="228" cy="228" r="80" fill="none" stroke="url(#voiceGradient)" stroke-width="10" opacity="0.96" />
+    <circle cx="228" cy="228" r="54" fill="#512BD4" opacity="0.92" />
+
+    <g filter="url(#softGlow)">
+        <path d="M143 228H173" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+        <path d="M283 228H313" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+
+        <path d="M180 250V206" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+        <path d="M204 274V182" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+        <path d="M228 288V168" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+        <path d="M252 274V182" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+        <path d="M276 250V206" fill="none" stroke="#F7FCFF" stroke-width="14" stroke-linecap="round" />
+    </g>
+
+    <path d="M188 147L158 177L188 207" fill="none" stroke="#7CF7D4" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" opacity="0.92" />
+    <path d="M268 147L298 177L268 207" fill="none" stroke="#C8A6FF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" opacity="0.92" />
+    <path d="M201 315H255" fill="none" stroke="#7CF7D4" stroke-width="12" stroke-linecap="round" opacity="0.78" />
+</svg>

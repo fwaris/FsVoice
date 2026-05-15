@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.QA</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.QA</PackageId>
+    <Description>Retrieval, memory, tools, and hybrid PDF QA processing for FsVoice.</Description>
+    <PackageLicenseExpression>MIT AND Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;QA;Retrieval;PDF;Docling;ONNX;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="UseCases.fs" />
+    <Compile Include="Text.fs" />
+    <Compile Include="MemoryTypes.fs" />
+    <Compile Include="DoclingHybrid.fs" />
+    <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="ContextProviders.fs" />
+    <Compile Include="DurableMemory.fs" />
+    <Compile Include="MemoryService.fs" />
+    <Compile Include="Tools.fs" />
+    <Compile Include="QaSession.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Models\pp-doclayout-m.onnx" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="PackageNotices\PP-DocLayout-M-NOTICE.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.QA.Abstractions\FsVoice.QA.Abstractions.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" />
+    <PackageReference Include="FSharp.SystemTextJson" />
+    <PackageReference Include="FsColbert" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="SkiaSharp" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <BuildInParallel>false</BuildInParallel>
+    <Authors>Faisal Waris</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/fwaris/FsVoice</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/fwaris/FsVoice</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>PackageReadme.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;QA;Retrieval;AI</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'FsVoice.QA'">
+    <None Include="$(MSBuildThisFileDirectory)PackageReadme.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+</Project>
