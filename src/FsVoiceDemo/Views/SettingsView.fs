@@ -215,7 +215,9 @@ module SettingsView =
                             .isEnabled(canEditSettings && model.useHybridPdfParsing)
                             .centerVertical ()
 
-                        Label(if model.useLayoutAnalysis then "On" else "Off").font(size = 13.).centerVertical ()
+                        Label(if model.useLayoutAnalysis then "On - slower" else "Off")
+                            .font(size = 13.)
+                            .centerVertical ()
                     })
                         .gridRow(2)
                         .gridColumn(1)
@@ -234,7 +236,13 @@ module SettingsView =
             )
 
             sectionBorder (
-                (Grid(columns, [ Dimension.Absolute 34.; Dimension.Absolute 48.; Dimension.Absolute 48. ]) {
+                (Grid(
+                    columns,
+                    [ Dimension.Absolute 34.
+                      Dimension.Absolute 48.
+                      Dimension.Absolute 48.
+                      Dimension.Absolute 48. ]
+                ) {
                     sectionTitle "Links"
 
                     ViewControls.formLabel "Privacy" 1
@@ -251,6 +259,15 @@ module SettingsView =
                     Button("Third-Party Notices", OpenAppLink ThirdPartyNotices)
                         .font(size = 13.)
                         .gridRow(2)
+                        .gridColumn(1)
+                        .gridColumnSpan(2)
+                        .margin (2.)
+
+                    ViewControls.formLabel "Settings" 3
+
+                    Button("Help", OpenAppLink SettingsHelp)
+                        .font(size = 13.)
+                        .gridRow(3)
                         .gridColumn(1)
                         .gridColumnSpan(2)
                         .margin (2.)

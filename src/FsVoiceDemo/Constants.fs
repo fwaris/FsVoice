@@ -10,6 +10,8 @@ module C =
     let THIRD_PARTY_NOTICES_URL =
         "https://fwaris.github.io/docs/fsvoice/third-party-notices.html"
 
+    let SETTINGS_HELP_URL = "https://fwaris.github.io/docs/fsvoice/settings.html"
+
     let SETTINGS_OPENAI_KEY = "FsVoice.OpenAIKey"
     let SETTINGS_PDF_LIBRARY = "FsVoice.PdfLibrary"
     let SETTINGS_ORACLE_MODEL = "FsVoice.OracleModel"

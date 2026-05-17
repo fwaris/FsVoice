@@ -17,6 +17,7 @@ type ConnectionBundle =
 type AppLink =
     | PrivacyPolicy
     | ThirdPartyNotices
+    | SettingsHelp
 
 type StartParams =
     { apiKey: string

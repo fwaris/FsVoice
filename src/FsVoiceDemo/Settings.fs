@@ -393,9 +393,9 @@ module Settings =
 
     let useLayoutAnalysis () =
         if Preferences.Default.ContainsKey(C.SETTINGS_USE_LAYOUT_ANALYSIS) then
-            Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, false)
+            Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, true)
         else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS, false)
+            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS, true)
 
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)

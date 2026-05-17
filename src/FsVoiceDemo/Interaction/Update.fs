@@ -94,7 +94,7 @@ module Update =
     let private savePdfLibraryWithLog docs log =
         let saveLog =
             match Settings.setPdfLibrary docs with
-            | Ok path -> $"Saved document library manifest: {docs.Length} document(s) at {path}."
+            | Ok _ -> $"Saved document library manifest: {docs.Length} document(s)."
             | Error error -> $"Document library manifest was not saved: {error}"
 
         saveLog :: log |> List.truncate C.MAX_LOG
@@ -267,6 +267,7 @@ module Update =
         match link with
         | PrivacyPolicy -> C.PRIVACY_POLICY_URL
         | ThirdPartyNotices -> C.THIRD_PARTY_NOTICES_URL
+        | SettingsHelp -> C.SETTINGS_HELP_URL
 
     let private openAppLink link : Async<Result<unit, exn>> =
         async {
