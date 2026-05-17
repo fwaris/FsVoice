@@ -74,17 +74,28 @@ module KnowledgeSources =
     type PdfParsingMode =
         | Legacy
         | Hybrid
+        | HybridWithoutLayout
 
     module PdfParsingModes =
         let displayName mode =
             match mode with
             | PdfParsingMode.Legacy -> "Legacy"
             | PdfParsingMode.Hybrid -> "Hybrid"
+            | PdfParsingMode.HybridWithoutLayout -> "Hybrid without layout analysis"
 
         let fingerprint mode =
             match mode with
             | PdfParsingMode.Legacy -> "legacy"
             | PdfParsingMode.Hybrid -> "hybrid"
+            | PdfParsingMode.HybridWithoutLayout -> "hybrid-no-layout"
+
+        [<Literal>]
+        let parserQualityVersion = "layout-sparse-fallback-v1"
+
+        let indexFingerprint mode =
+            [ $"pdfParsingMode={fingerprint mode}"
+              $"pdfParserQuality={parserQualityVersion}" ]
+            |> String.concat "\n"
 
     [<CLIMutable>]
     type InstalledPrebuiltIndex =
@@ -100,6 +111,7 @@ module KnowledgeSources =
           sourceLocation: string
           sourceDisplayName: string
           sourceKind: string
+          parserFingerprint: string option
           pdfParsingMode: string option
           keywordFingerprint: string
           createdAtUtc: DateTimeOffset }
@@ -120,7 +132,7 @@ module KnowledgeSources =
 
     type private PassageLoadMode =
         | LegacyPdf
-        | HybridPdf of storageRoot: string * report: (string -> unit)
+        | HybridPdf of storageRoot: string * report: (string -> unit) * enableLayoutAnalysis: bool
 
     [<AllowNullLiteral>]
     type JsonKnowledgeDocumentDto() =
@@ -273,8 +285,13 @@ module KnowledgeSources =
             match mode with
             | LegacyPdf ->
                 checkedRead (FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location)
-            | HybridPdf(storageRoot, report) ->
-                DoclingHybrid.readPdfPassagesWithFallbackAndCancellation
+            | HybridPdf(storageRoot, report, enableLayoutAnalysis) ->
+                let options =
+                    { DoclingHybrid.currentDefaultOptions () with
+                        enableLayoutAnalysis = enableLayoutAnalysis }
+
+                DoclingHybrid.readPdfPassagesWithOptionsWithFallbackAndCancellation
+                    options
                     storageRoot
                     report
                     fsKameChunkOptions
@@ -295,7 +312,9 @@ module KnowledgeSources =
         match pdfParsingMode with
         | PdfParsingMode.Legacy -> sourcePassagesWithCancellation LegacyPdf source cancellationToken
         | PdfParsingMode.Hybrid ->
-            sourcePassagesWithCancellation (HybridPdf(storageRoot, report)) source cancellationToken
+            sourcePassagesWithCancellation (HybridPdf(storageRoot, report, true)) source cancellationToken
+        | PdfParsingMode.HybridWithoutLayout ->
+            sourcePassagesWithCancellation (HybridPdf(storageRoot, report, false)) source cancellationToken
 
     let loadPassagesForIndexing storageRoot report pdfParsingMode source =
         loadPassagesForIndexingWithCancellation storageRoot report pdfParsingMode source CancellationToken.None
@@ -1627,7 +1646,7 @@ Passages:
 
     let private sourceParsingFingerprint pdfParsingMode (source: KnowledgeSource) =
         match source.kind with
-        | Pdf -> $"pdfParsingMode={PdfParsingModes.fingerprint pdfParsingMode}"
+        | Pdf -> PdfParsingModes.indexFingerprint pdfParsingMode
         | Markdown -> "parser=markdown"
         | Json -> "parser=json"
 
@@ -1674,6 +1693,7 @@ Passages:
                   sourceLocation = source.location
                   sourceDisplayName = source.DisplayName
                   sourceKind = sourceKindFingerprint source
+                  parserFingerprint = Some(sourceParsingFingerprint pdfParsingMode source)
                   pdfParsingMode =
                     match source.kind with
                     | Pdf -> Some(PdfParsingModes.fingerprint pdfParsingMode)
@@ -1757,9 +1777,9 @@ Passages:
             let parserMatches =
                 match source.kind, metadata with
                 | Pdf, Some metadata ->
-                    metadata.pdfParsingMode
+                    metadata.parserFingerprint
                     |> Option.exists (fun value ->
-                        String.Equals(value, PdfParsingModes.fingerprint pdfParsingMode, StringComparison.Ordinal))
+                        String.Equals(value, sourceParsingFingerprint pdfParsingMode source, StringComparison.Ordinal))
                 | Pdf, None -> false
                 | Markdown, _
                 | Json, _ -> true
@@ -1808,15 +1828,21 @@ Passages:
 
     let private loadPersistedIndexWithoutParsing storageRoot report pdfParsingMode source =
         match tryLoadBestPersistedIndex storageRoot pdfParsingMode source "" with
-        | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches || not candidate.hasMetadata ->
-            if source.kind = Pdf && not candidate.hasMetadata then
-                report
-                    $"Loaded legacy FsColbert index for {source.DisplayName} without parser metadata; reprocess this source to pin it to the selected {PdfParsingModes.displayName pdfParsingMode} PDF parser."
-            else
-                report $"Loaded FsColbert index for {source.DisplayName}; indexKeywords={candidate.keywordCount}."
+        | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches ->
+            report $"Loaded FsColbert index for {source.DisplayName}; indexKeywords={candidate.keywordCount}."
 
             Ok(Some candidate.index)
-        | Ok(Some _) -> Ok None
+        | Ok(Some candidate) ->
+            let metadataDescription =
+                if candidate.hasMetadata then
+                    "older or different parser metadata"
+                else
+                    "no parser metadata"
+
+            report
+                $"Ignoring persisted FsColbert index for {source.DisplayName} because it has {metadataDescription}; reprocess this source to rebuild with the current {PdfParsingModes.displayName pdfParsingMode} PDF parser quality checks."
+
+            Ok None
         | Ok None -> Ok None
         | Error err -> Error err
 

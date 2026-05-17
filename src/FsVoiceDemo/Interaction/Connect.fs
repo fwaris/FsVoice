@@ -41,6 +41,7 @@ module Connect =
                                 parms.useLexicalFilter
                                 parms.elaborateIndexKeywords
                                 parms.useHybridPdfParsing
+                                parms.useLayoutAnalysis
 
                         flow.PostToFlow Fl_Start
 

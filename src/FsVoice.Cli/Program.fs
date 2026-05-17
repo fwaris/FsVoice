@@ -6,6 +6,8 @@ open System.Diagnostics
 open System.IO
 open System.IO.Compression
 open System.Net.Http
+open System.Reflection
+open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Text.RegularExpressions
@@ -62,6 +64,7 @@ FsVoice.Cli
 
 Commands:
   ask --question "..." --source path [--source path] [--use-case-profile path] [--json]
+  index-folder --input docs --output bundle-dir-or.zip --bundle-id id [--bundle-version 1.0.0]
   insuranceqa-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert] [--no-judge]
   insuranceqa-search-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert]
   insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-nano]
@@ -81,6 +84,13 @@ Common options:
   --fusion-mode value      Search eval fusion mode: standard|direct-local|direct-llm|rrf|tail.
   --candidate-limit value  Search eval candidate pool size for direct/fusion modes. Defaults to 256.
   --no-index-elaboration  Do not generate missing index-time keyword metadata with the small model.
+
+Index-folder options:
+  --index-keywords       Generate index-time keyword metadata with OpenAI.
+  --keyword-model value  Keyword enrichment model. Defaults to --small-model or gpt-5-nano.
+  --layout-model value   Built-in Docling layout model: heron|pp-doclayout-m. Defaults to heron.
+  --layout-plugin path   Trusted .NET assembly containing an IDoclingLayoutModelProvider.
+  --layout-plugin-type value  Full provider type name in --layout-plugin.
 """
 
     let parseArgs (argv: string array) =
@@ -226,6 +236,221 @@ Common options:
         | KnowledgeSourceKind.Pdf -> "pdf"
         | KnowledgeSourceKind.Markdown -> "markdown"
         | KnowledgeSourceKind.Json -> "json"
+
+    let private supportedDocumentPath (path: string) =
+        match Path.GetExtension(path).TrimStart('.').ToLowerInvariant() with
+        | "pdf"
+        | "json"
+        | "md"
+        | "markdown" -> true
+        | _ -> false
+
+    let private normalizedRelativePath root path =
+        Path.GetRelativePath(root, path).Replace('\\', '/')
+
+    let private sha256Text (value: string) =
+        use sha = SHA256.Create()
+        let bytes = System.Text.Encoding.UTF8.GetBytes value
+
+        sha.ComputeHash bytes
+        |> Convert.ToHexString
+        |> fun hash -> hash.ToLowerInvariant()
+
+    let private ensureCleanDirectory path =
+        if Directory.Exists path then
+            Directory.Delete(path, true)
+
+        Directory.CreateDirectory path |> ignore
+
+    let private ensureParentDirectory path =
+        let parent = Path.GetDirectoryName(Path.GetFullPath path)
+
+        if not (String.IsNullOrWhiteSpace parent) then
+            Directory.CreateDirectory parent |> ignore
+
+    let private copyFile source target =
+        ensureParentDirectory target
+        File.Copy(source, target, true)
+
+    let private loadLayoutProvider parsed =
+        match optionValues "layout-plugin" parsed |> List.tryLast with
+        | Some pluginPath when not (String.IsNullOrWhiteSpace pluginPath) ->
+            let providerTypeName = optionValue "layout-plugin-type" "" parsed
+
+            if String.IsNullOrWhiteSpace providerTypeName then
+                Error "--layout-plugin-type is required when --layout-plugin is supplied."
+            else
+                try
+                    let assembly = Assembly.LoadFrom(Path.GetFullPath pluginPath)
+
+                    match assembly.GetType(providerTypeName, false, true) |> Option.ofObj with
+                    | None -> Error $"Layout plugin type '{providerTypeName}' was not found in {pluginPath}."
+                    | Some providerType ->
+                        match Activator.CreateInstance providerType with
+                        | :? IDoclingLayoutModelProvider as provider -> Ok provider
+                        | _ ->
+                            Error
+                                $"Layout plugin type '{providerTypeName}' does not implement {nameof IDoclingLayoutModelProvider}."
+                with ex ->
+                    Error $"Unable to load layout plugin '{pluginPath}': {ex.Message}"
+        | _ ->
+            let modelId = optionValue "layout-model" "heron" parsed
+
+            match DoclingHybrid.tryBuiltInLayoutProvider modelId with
+            | Some provider -> Ok provider
+            | None -> Error $"Unknown built-in layout model '{modelId}'. Use heron or pp-doclayout-m."
+
+    let private keywordOptionsForIndexFolder parsed =
+        if not (hasFlag "index-keywords" parsed) then
+            Ok KnowledgeSources.KeywordGenerationOptions.disabled
+        else
+            match apiKey parsed with
+            | None -> Error "--index-keywords requires --api-key or OPENAI_API_KEY."
+            | Some key ->
+                let modelId =
+                    optionValueAny [ "keyword-model"; "small-model" ] QaDefaults.nanoModel parsed
+
+                Ok
+                    { KnowledgeSources.KeywordGenerationOptions.defaults with
+                        enabled = true
+                        client = Some(createClient key modelId)
+                        modelId = modelId
+                        useCaseProfile = useCaseProfile parsed }
+
+    let private documentBundlePath (outputRoot: string) (relativePath: string) =
+        Path.Combine(outputRoot, "documents", relativePath.Replace('/', Path.DirectorySeparatorChar))
+
+    let private indexBundlePath (outputRoot: string) (indexFile: string) =
+        Path.Combine(outputRoot, "indexes", indexFile)
+
+    let private runIndexFolderAsync parsed =
+        async {
+            let input = optionValue "input" "" parsed |> Path.GetFullPath
+            let output = optionValue "output" "" parsed
+            let bundleId = optionValue "bundle-id" "" parsed |> Text.normalizeWhitespace
+
+            let bundleVersion =
+                optionValue "bundle-version" "1.0.0" parsed |> Text.normalizeWhitespace
+
+            let report (msg: string) = Console.Error.WriteLine msg
+
+            if String.IsNullOrWhiteSpace input || not (Directory.Exists input) then
+                return Error $"Input folder does not exist: {input}"
+            elif String.IsNullOrWhiteSpace output then
+                return Error "Missing --output."
+            elif String.IsNullOrWhiteSpace bundleId then
+                return Error "Missing --bundle-id."
+            else
+                match loadLayoutProvider parsed, keywordOptionsForIndexFolder parsed with
+                | Error err, _ -> return Error err
+                | _, Error err -> return Error err
+                | Ok layoutProvider, Ok keywordOptions ->
+                    let outputFull = Path.GetFullPath output
+                    let outputIsZip = outputFull.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+
+                    let workOutput =
+                        if outputIsZip then
+                            Path.Combine(Path.GetTempPath(), $"fsvoice-index-bundle-{Guid.NewGuid():N}")
+                        else
+                            outputFull
+
+                    let sources =
+                        Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories)
+                        |> Seq.filter supportedDocumentPath
+                        |> Seq.sort
+                        |> Seq.map sourceFromPath
+                        |> Seq.toList
+
+                    if List.isEmpty sources then
+                        return Error $"No supported documents were found in {input}."
+                    else
+                        try
+                            ensureCleanDirectory workOutput
+                            Directory.CreateDirectory(Path.Combine(workOutput, "documents")) |> ignore
+                            Directory.CreateDirectory(Path.Combine(workOutput, "indexes")) |> ignore
+                            Directory.CreateDirectory(storageRoot parsed) |> ignore
+
+                            DoclingHybrid.setDefaultOptions
+                                { DoclingHybrid.defaults with
+                                    enableLayoutAnalysis = true
+                                    layoutModelProvider = Some layoutProvider }
+
+                            report
+                                $"Indexing {sources.Length} document(s) with layout model {layoutProvider.DisplayName}; indexKeywords={keywordOptions.enabled}."
+
+                            let! retrieval, errors =
+                                KnowledgeSources.loadIndex
+                                    (storageRoot parsed)
+                                    report
+                                    keywordOptions
+                                    KnowledgeSources.PdfParsingMode.Hybrid
+                                    true
+                                    sources
+
+                            if not (List.isEmpty errors) then
+                                return Error(String.concat Environment.NewLine errors)
+                            elif retrieval.colbertIndices.Length <> sources.Length then
+                                return
+                                    Error
+                                        $"Indexed {retrieval.colbertIndices.Length}/{sources.Length} document(s); refusing to write incomplete bundle."
+                            else
+                                let entries =
+                                    retrieval.colbertIndices
+                                    |> List.map (fun (source, index) ->
+                                        let relativeSource = normalizedRelativePath input source.location
+                                        let targetSource = documentBundlePath workOutput relativeSource
+                                        copyFile source.location targetSource
+                                        let indexFile = $"{sha256Text relativeSource}.fsci"
+                                        let targetIndex = indexBundlePath workOutput indexFile
+                                        FsColbert.IndexPersistence.save targetIndex index
+
+                                        ({ sourceId = relativeSource
+                                           sourceDisplayName = Path.GetFileName source.location
+                                           sourceLocation = Some $"documents/{relativeSource}"
+                                           sourceKind = Some(sourceKindName source.kind)
+                                           indexFile = $"indexes/{indexFile}" }
+                                        : FsColbert.IndexBundleSource))
+
+                                FsColbert.IndexBundle.create
+                                    bundleId
+                                    bundleVersion
+                                    FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+                                    FsColbert.ChunkOptions.fsKameDefaults
+                                    FsColbert.TfidfOptions.defaults
+                                    entries
+                                |> FsColbert.IndexBundle.writeManifest (Path.Combine(workOutput, "index-bundle.json"))
+
+                                if outputIsZip then
+                                    if File.Exists outputFull then
+                                        File.Delete outputFull
+
+                                    ensureParentDirectory outputFull
+                                    ZipFile.CreateFromDirectory(workOutput, outputFull, CompressionLevel.Optimal, false)
+                                    Directory.Delete(workOutput, true)
+
+                                printJson
+                                    {| bundleId = bundleId
+                                       bundleVersion = bundleVersion
+                                       documentCount = sources.Length
+                                       output = outputFull
+                                       layoutModel = layoutProvider.Id
+                                       indexKeywords = keywordOptions.enabled |}
+
+                                return Ok()
+                        with ex ->
+                            return Error $"Unable to build index bundle: {ex.Message}"
+        }
+
+    let runIndexFolder parsed =
+        task {
+            let! result = runIndexFolderAsync parsed |> Async.StartAsTask
+
+            match result with
+            | Ok() -> return 0
+            | Error err ->
+                Console.Error.WriteLine err
+                return 2
+        }
 
     let answerJson (answer: QaAnswer) =
         {| turnId = answer.turnId
@@ -1625,6 +1850,7 @@ Answers:
         let task =
             match parsed.command with
             | "ask" -> runAsk parsed
+            | "index-folder" -> runIndexFolder parsed
             | "insuranceqa-elaborate-index" -> runInsuranceQaElaborateIndex parsed
             | "insuranceqa-eval" -> runInsuranceQaEval parsed
             | "insuranceqa-search-eval" -> runInsuranceQaSearchEval parsed

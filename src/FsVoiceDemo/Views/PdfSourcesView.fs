@@ -31,6 +31,20 @@ module PdfSourcesView =
             .alignEndHorizontal()
             .centerVertical ()
 
+    let private importBundleButton model =
+        Button(Icons.archive, PickIndexBundle)
+            .font(size = 22., fontFamily = C.FONT_SYMBOLS)
+            .background(Colors.DarkSlateBlue)
+            .textColor(Colors.White)
+            .cornerRadius(17)
+            .width(34.)
+            .height(34.)
+            .padding(0.)
+            .margin(0, -2, 2, 0)
+            .isEnabled(canMutateDocuments model)
+            .alignEndHorizontal()
+            .centerVertical ()
+
     let private statusColor doc =
         match doc.status with
         | Ready -> Colors.SeaGreen
@@ -52,6 +66,8 @@ module PdfSourcesView =
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
     let private row processingActive canMutateDocuments canChangeSourceSelection (doc: PdfDocumentSource) =
+        let isBuiltIn = PdfDocuments.isBuiltIn doc
+
         let deleteIcon =
             if processingActive then
                 Icons.deleteForever
@@ -99,10 +115,18 @@ module PdfSourcesView =
                         .gridColumn(2)
                         .gridRowSpan (2)
 
-                (ViewControls.compactDangerIconButton deleteIcon deleteMessage)
-                    .isEnabled(processingActive || canMutateDocuments)
-                    .gridColumn(3)
-                    .gridRowSpan (2)
+                if isBuiltIn && not processingActive then
+                    Label("Built-in")
+                        .font(size = 11.)
+                        .textColor(Colors.DimGray)
+                        .centerVertical()
+                        .gridColumn(3)
+                        .gridRowSpan (2)
+                else
+                    (ViewControls.compactDangerIconButton deleteIcon deleteMessage)
+                        .isEnabled(processingActive || canMutateDocuments)
+                        .gridColumn(3)
+                        .gridRowSpan (2)
             })
                 .padding (8.)
         )
@@ -117,7 +141,10 @@ module PdfSourcesView =
         let processingActive = model.documentProcessingCancellation.IsSome
 
         Border(
-            (Grid([ Dimension.Star; Dimension.Absolute 40. ], [ Dimension.Absolute 44.; Dimension.Star ]) {
+            (Grid(
+                [ Dimension.Star; Dimension.Absolute 40.; Dimension.Absolute 40. ],
+                [ Dimension.Absolute 44.; Dimension.Star ]
+            ) {
                 Label("Document Sources")
                     .font(size = 15., attributes = FontAttributes.Bold)
                     .centerVertical()
@@ -125,14 +152,15 @@ module PdfSourcesView =
                     .gridRow (0)
 
                 (addPdfButton model).gridColumn(1).gridRow (0)
+                (importBundleButton model).gridColumn(2).gridRow (0)
 
                 if List.isEmpty model.pdfDocuments then
-                    emptyView.gridColumnSpan(2).gridRow (1)
+                    emptyView.gridColumnSpan(3).gridRow (1)
                 else
                     (CollectionView
                         (model.pdfDocuments)
                         (row processingActive canMutateDocuments canChangeSourceSelection))
-                        .gridColumnSpan(2)
+                        .gridColumnSpan(3)
                         .gridRow (1)
             })
                 .padding (10.)

@@ -2,6 +2,7 @@ namespace FsVoiceDemo
 
 open System
 open System.IO
+open System.IO.Compression
 open System.Text.Json
 open System.Threading
 open FsVoiceDemo.WorkFlow
@@ -85,22 +86,26 @@ module PdfLibrary =
                 return Error $"Unable to read JSON knowledge source '{path}': {ex.Message}"
         }
 
-    let private pdfParsingMode useHybridPdfParsing =
-        if useHybridPdfParsing then
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+        if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Hybrid
+        elif useHybridPdfParsing then
+            FsVoice.QA.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Legacy
 
-    let private readPassages report useHybridPdfParsing (doc: PdfDocumentSource) cancellationToken =
+    let private readPassages report useHybridPdfParsing useLayoutAnalysis (doc: PdfDocumentSource) cancellationToken =
         let source: FsVoice.QA.KnowledgeSource =
             { FsVoice.QA.KnowledgeSource.kind = qaSourceKind doc.kind
               location = doc.storedPath
               enabled = true }
 
+        KnowledgeSources.configurePdfParser useLayoutAnalysis
+
         FsVoice.QA.KnowledgeSources.loadPassagesForIndexingWithCancellation
             FileSystem.AppDataDirectory
             report
-            (pdfParsingMode useHybridPdfParsing)
+            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
             source
             cancellationToken
 
@@ -182,7 +187,7 @@ module PdfLibrary =
                         return []
         }
 
-    let private readPrebuiltBundleManifest () =
+    let private readPrebuiltBundleManifest () : Async<FsColbert.IndexBundleManifest option> =
         async {
             match! tryOpenPackageFile prebuiltBundleManifestAsset with
             | None -> return None
@@ -210,30 +215,80 @@ module PdfLibrary =
         else
             $"FsColbertIndexes/{value}"
 
+    let private prebuiltOriginalPath (asset: PrebuiltKnowledgeAsset) =
+        $"app://{asset.documentAsset.Replace('\\', '/')}"
+
+    let private originalPathsEqual left right =
+        match PdfDocuments.normalizeBuiltInOriginalPath left, PdfDocuments.normalizeBuiltInOriginalPath right with
+        | Some normalizedLeft, Some normalizedRight -> normalizedLeft = normalizedRight
+        | _ -> String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+
     let private prebuiltIndexFolder () =
         let path = KnowledgeSources.prebuiltFolder ()
         Directory.CreateDirectory path |> ignore
         path
 
-    let private writeInstalledPrebuiltManifest entries =
+    let private prebuiltBundleManifestPath () =
+        Path.Combine(prebuiltIndexFolder (), "index-bundle.json")
+
+    let private installedPrebuiltManifestPath () =
         let path = KnowledgeSources.prebuiltManifestPath ()
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath path))
         |> ignore
 
+        path
+
+    let private readInstalledPrebuiltManifest () =
+        let path = installedPrebuiltManifestPath ()
+
+        if File.Exists path then
+            try
+                JsonSerializer.Deserialize<InstalledPrebuiltIndex array>(File.ReadAllText path)
+                |> Option.ofObj
+                |> Option.map Array.toList
+                |> Option.defaultValue []
+            with _ ->
+                []
+        else
+            []
+
+    let private writeInstalledPrebuiltManifestEntries entries =
+        let path = installedPrebuiltManifestPath ()
         let json = entries |> List.toArray |> JsonSerializer.Serialize
         File.WriteAllText(path, json)
 
-    let private writeInstalledBundleManifest manifest =
-        let path = Path.Combine(prebuiltIndexFolder (), "index-bundle.json")
+    let private writeInstalledPrebuiltManifest entries =
+        let existing = readInstalledPrebuiltManifest ()
+        let merged = existing @ entries |> List.rev |> List.distinctBy _.id |> List.rev
+
+        writeInstalledPrebuiltManifestEntries merged
+
+    let private writeInstalledBundleManifest (manifest: FsColbert.IndexBundleManifest) =
+        let path = prebuiltBundleManifestPath ()
+
+        let manifest =
+            if File.Exists path then
+                match FsColbert.IndexBundle.readManifest path with
+                | Ok existing ->
+                    { manifest with
+                        sources =
+                            existing.sources @ manifest.sources
+                            |> List.rev
+                            |> List.distinctBy _.sourceId
+                            |> List.rev }
+                | Error _ -> manifest
+            else
+                manifest
+
         FsColbert.IndexBundle.writeManifest path manifest
 
     let private existingPrebuiltDoc (asset: PrebuiltKnowledgeAsset) docs =
-        let originalPath = $"app://{asset.documentAsset}"
+        let originalPath = prebuiltOriginalPath asset
 
         docs
         |> List.tryFind (fun doc ->
-            String.Equals(doc.originalPath, originalPath, StringComparison.OrdinalIgnoreCase)
+            originalPathsEqual doc.originalPath originalPath
             || String.Equals(doc.id, $"prebuilt-{asset.id}", StringComparison.OrdinalIgnoreCase))
 
     let private prebuiltKind value =
@@ -252,166 +307,421 @@ module PdfLibrary =
         with _ ->
             0
 
+    let private deleteExistingFile (errors: ResizeArray<string>) path =
+        if String.IsNullOrWhiteSpace path || not (File.Exists path) then
+            0
+        else
+            try
+                File.Delete path
+                1
+            with ex ->
+                errors.Add $"Unable to delete prebuilt FsColbert index '{path}': {ex.Message}"
+                0
+
+    let private deleteStoredDocumentFile (doc: PdfDocumentSource) =
+        if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
+            false
+        else
+            File.Delete doc.storedPath
+            true
+
+    let private installedPrebuiltEntryMatches (doc: PdfDocumentSource) (entry: InstalledPrebuiltIndex) =
+        String.Equals(entry.id, doc.id, StringComparison.OrdinalIgnoreCase)
+        || String.Equals(entry.storedPath, doc.storedPath, StringComparison.OrdinalIgnoreCase)
+
+    let private installedBundleSourceMatches (doc: PdfDocumentSource) (source: FsColbert.IndexBundleSource) =
+        seq {
+            yield source.sourceId
+            yield source.sourceDisplayName
+
+            match source.sourceLocation with
+            | Some location -> yield location
+            | None -> ()
+        }
+        |> Seq.exists (fun candidate ->
+            String.Equals(candidate, doc.id, StringComparison.OrdinalIgnoreCase)
+            || String.Equals(candidate, doc.displayName, StringComparison.OrdinalIgnoreCase)
+            || String.Equals(candidate, doc.storedPath, StringComparison.OrdinalIgnoreCase))
+
+    let private removeInstalledBundleSource (doc: PdfDocumentSource) (errors: ResizeArray<string>) =
+        let path = prebuiltBundleManifestPath ()
+
+        if File.Exists path then
+            match FsColbert.IndexBundle.readManifest path with
+            | Error err -> errors.Add $"Unable to read installed FsColbert bundle manifest '{path}': {err}"
+            | Ok manifest ->
+                let kept =
+                    manifest.sources
+                    |> List.filter (fun source -> not (installedBundleSourceMatches doc source))
+
+                if kept.Length <> manifest.sources.Length then
+                    try
+                        if List.isEmpty kept then
+                            File.Delete path
+                        else
+                            FsColbert.IndexBundle.writeManifest path { manifest with sources = kept }
+                    with ex ->
+                        errors.Add $"Unable to update installed FsColbert bundle manifest '{path}': {ex.Message}"
+
+    let private cleanupPrebuiltStorageForDocument (doc: PdfDocumentSource) =
+        let errors = ResizeArray<string>()
+        let entries = readInstalledPrebuiltManifest ()
+        let removed, kept = entries |> List.partition (installedPrebuiltEntryMatches doc)
+
+        if not (List.isEmpty removed) then
+            writeInstalledPrebuiltManifestEntries kept
+
+        let indexPaths =
+            seq {
+                for entry in removed do
+                    yield entry.indexPath
+
+                yield Path.Combine(prebuiltIndexFolder (), $"{doc.id}.fsci")
+            }
+            |> Seq.choose Text.notEmpty
+            |> Seq.distinctBy _.ToLowerInvariant()
+            |> Seq.toList
+
+        let removedIndexCount = indexPaths |> List.sumBy (deleteExistingFile errors)
+
+        removeInstalledBundleSource doc errors
+        removedIndexCount, List.ofSeq errors
+
+    let private currentPackagedOriginalPaths
+        (assets: PrebuiltKnowledgeAsset list)
+        (bundleManifest: FsColbert.IndexBundleManifest option)
+        =
+        seq {
+            for asset in assets do
+                yield prebuiltOriginalPath asset
+
+            match bundleManifest with
+            | Some manifest ->
+                for source in manifest.sources do
+                    match source.sourceLocation |> Option.bind Text.notEmpty with
+                    | None -> ()
+                    | Some sourceLocation ->
+                        let documentAsset = packageIndexAssetPath sourceLocation
+                        yield $"app://{documentAsset.Replace('\\', '/')}"
+            | None -> ()
+        }
+        |> Seq.choose PdfDocuments.normalizeBuiltInOriginalPath
+        |> Set.ofSeq
+
     let installPrebuiltDocuments (existing: PdfDocumentSource list) =
         async {
             let! assets = readPrebuiltManifest ()
             let! bundleManifest = readPrebuiltBundleManifest ()
+            let packagedOriginalPaths = currentPackagedOriginalPaths assets bundleManifest
+            let docs = ResizeArray<PdfDocumentSource>(existing)
+            let installed = ResizeArray<InstalledPrebuiltIndex>()
+            let logs = ResizeArray<string>()
 
-            if List.isEmpty assets && Option.isNone bundleManifest then
-                return existing, []
-            else
-                let docs = ResizeArray<PdfDocumentSource>(existing)
-                let installed = ResizeArray<InstalledPrebuiltIndex>()
-                let logs = ResizeArray<string>()
+            let staleBuiltInDocs =
+                docs
+                |> Seq.toList
+                |> List.filter (fun doc ->
+                    match PdfDocuments.normalizeBuiltInOriginalPath doc.originalPath with
+                    | Some originalPath -> not (packagedOriginalPaths.Contains originalPath)
+                    | None -> false)
 
-                for asset in assets do
-                    let id = $"prebuilt-{safeId asset.id}"
-                    let documentName = Path.GetFileName asset.documentAsset |> sanitizeFileName
-                    let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
-                    let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
+            for doc in staleBuiltInDocs do
+                docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
 
-                    let! documentCopied =
-                        if File.Exists storedPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.documentAsset storedPath
+                let removedFile =
+                    try
+                        deleteStoredDocumentFile doc
+                    with _ ->
+                        false
 
-                    let! indexCopied =
-                        if File.Exists indexPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.indexAsset indexPath
+                let _, cleanupErrors = cleanupPrebuiltStorageForDocument doc
 
-                    let chunkCount = prebuiltChunkCount indexPath
+                logs.Add $"Removed stale built-in source no longer shipped with app: {doc.displayName}."
 
-                    let doc =
-                        match existingPrebuiltDoc asset (List.ofSeq docs) with
-                        | Some current ->
-                            { current with
-                                storedPath = storedPath
-                                status = Ready
-                                chunkCount = chunkCount
-                                error = None }
-                        | None ->
-                            { id = id
-                              kind = prebuiltKind asset.kind
-                              displayName = asset.displayName |> Text.notEmpty |> Option.defaultValue documentName
-                              storedPath = storedPath
-                              originalPath = $"app://{asset.documentAsset}"
-                              selected = asset.selected
-                              status = Ready
-                              chunkCount = chunkCount
-                              error = None }
+                if removedFile then
+                    logs.Add $"Deleted stale built-in document copy: {doc.displayName}."
 
-                    docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
-                    docs.Add doc
+                cleanupErrors |> List.iter logs.Add
 
-                    installed.Add
+            for asset in assets do
+                let originalPath = prebuiltOriginalPath asset
+                let id = $"prebuilt-{safeId asset.id}"
+                let documentName = Path.GetFileName asset.documentAsset |> sanitizeFileName
+                let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
+                let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
+
+                let! documentCopied =
+                    if File.Exists storedPath then
+                        async.Return false
+                    else
+                        copyPackageFile asset.documentAsset storedPath
+
+                let! indexCopied =
+                    if File.Exists indexPath then
+                        async.Return false
+                    else
+                        copyPackageFile asset.indexAsset indexPath
+
+                let chunkCount = prebuiltChunkCount indexPath
+
+                let doc =
+                    match existingPrebuiltDoc asset (List.ofSeq docs) with
+                    | Some current ->
+                        { current with
+                            storedPath = storedPath
+                            status = Ready
+                            chunkCount = chunkCount
+                            error = None }
+                    | None ->
                         { id = id
-                          kind =
-                            match doc.kind with
-                            | PdfFile -> "pdf"
-                            | MarkdownFile -> "markdown"
-                            | JsonFile -> "json"
-                          displayName = doc.displayName
+                          kind = prebuiltKind asset.kind
+                          displayName = asset.displayName |> Text.notEmpty |> Option.defaultValue documentName
                           storedPath = storedPath
-                          indexPath = indexPath }
+                          originalPath = originalPath
+                          selected = asset.selected
+                          status = Ready
+                          chunkCount = chunkCount
+                          error = None }
 
-                    if documentCopied || indexCopied then
-                        logs.Add $"Installed prebuilt knowledge index: {doc.displayName}."
+                docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
+                docs.Add doc
 
-                match bundleManifest with
-                | None -> ()
-                | Some manifest ->
+                installed.Add
+                    { id = id
+                      kind =
+                        match doc.kind with
+                        | PdfFile -> "pdf"
+                        | MarkdownFile -> "markdown"
+                        | JsonFile -> "json"
+                      displayName = doc.displayName
+                      storedPath = storedPath
+                      indexPath = indexPath }
+
+                if documentCopied || indexCopied then
+                    logs.Add $"Installed prebuilt knowledge index: {doc.displayName}."
+
+            match bundleManifest with
+            | None -> ()
+            | Some manifest ->
+                let installedBundleSources = ResizeArray<FsColbert.IndexBundleSource>()
+
+                for source in manifest.sources do
+                    match source.sourceLocation |> Option.bind Text.notEmpty with
+                    | None -> ()
+                    | Some sourceLocation ->
+                        let documentAsset = packageIndexAssetPath sourceLocation
+                        let indexAsset = packageIndexAssetPath source.indexFile
+                        let sourceKind = source.sourceKind |> Option.defaultValue ""
+
+                        let asset =
+                            { id = source.sourceId
+                              kind = sourceKind
+                              displayName = source.sourceDisplayName
+                              documentAsset = documentAsset
+                              indexAsset = indexAsset
+                              selected = false }
+
+                        let originalPath = prebuiltOriginalPath asset
+                        let id = $"prebuilt-{safeId asset.id}"
+                        let documentName = Path.GetFileName asset.documentAsset |> sanitizeFileName
+                        let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
+                        let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
+
+                        let! documentCopied =
+                            if File.Exists storedPath then
+                                async.Return false
+                            else
+                                copyPackageFile asset.documentAsset storedPath
+
+                        let! indexCopied =
+                            if File.Exists indexPath then
+                                async.Return false
+                            else
+                                copyPackageFile asset.indexAsset indexPath
+
+                        let chunkCount = prebuiltChunkCount indexPath
+
+                        let doc =
+                            match existingPrebuiltDoc asset (List.ofSeq docs) with
+                            | Some current ->
+                                { current with
+                                    kind = prebuiltKind asset.kind
+                                    storedPath = storedPath
+                                    status = Ready
+                                    chunkCount = chunkCount
+                                    error = None }
+                            | None ->
+                                { id = id
+                                  kind = prebuiltKind asset.kind
+                                  displayName = asset.displayName |> Text.notEmpty |> Option.defaultValue documentName
+                                  storedPath = storedPath
+                                  originalPath = originalPath
+                                  selected = asset.selected
+                                  status = Ready
+                                  chunkCount = chunkCount
+                                  error = None }
+
+                        docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
+                        docs.Add doc
+
+                        installed.Add
+                            { id = id
+                              kind =
+                                match doc.kind with
+                                | PdfFile -> "pdf"
+                                | MarkdownFile -> "markdown"
+                                | JsonFile -> "json"
+                              displayName = doc.displayName
+                              storedPath = storedPath
+                              indexPath = indexPath }
+
+                        installedBundleSources.Add
+                            { source with
+                                sourceLocation = Some storedPath
+                                sourceKind = Some asset.kind
+                                indexFile = Path.GetFileName indexPath }
+
+                        if documentCopied || indexCopied then
+                            logs.Add $"Installed bundled FsColbert index: {doc.displayName}."
+
+                if installedBundleSources.Count > 0 then
+                    writeInstalledBundleManifest
+                        { manifest with
+                            sources = List.ofSeq installedBundleSources }
+
+            if installed.Count > 0 then
+                writeInstalledPrebuiltManifest (List.ofSeq installed)
+
+            return List.ofSeq docs, List.ofSeq logs
+        }
+
+    let private safeCombine (root: string) (relativePath: string) =
+        let rootFull = Path.GetFullPath root
+
+        let combined =
+            Path.GetFullPath(Path.Combine(rootFull, relativePath.Replace('/', Path.DirectorySeparatorChar)))
+
+        if combined.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) then
+            Some combined
+        else
+            None
+
+    let private copyExtractedFile root relativePath target =
+        match safeCombine root relativePath with
+        | None -> false
+        | Some sourcePath when not (File.Exists sourcePath) -> false
+        | Some sourcePath ->
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath target))
+            |> ignore
+
+            File.Copy(sourcePath, target, true)
+            true
+
+    let importPrebuiltBundle (existing: PdfDocumentSource list) (bundleName: string) (bundleStream: Stream) =
+        async {
+            let importRoot =
+                Path.Combine(prebuiltIndexFolder (), "Imports", $"{safeId bundleName}-{Guid.NewGuid():N}")
+
+            Directory.CreateDirectory importRoot |> ignore
+
+            let zipPath = Path.Combine(importRoot, "bundle.zip")
+
+            use target = File.Create zipPath
+            do! bundleStream.CopyToAsync(target) |> Async.AwaitTask
+            target.Dispose()
+
+            ZipFile.ExtractToDirectory(zipPath, importRoot, true)
+
+            let manifestPath = Path.Combine(importRoot, "index-bundle.json")
+
+            if not (File.Exists manifestPath) then
+                return existing, [ $"Index bundle '{bundleName}' did not contain index-bundle.json." ]
+            else
+                match
+                    FsColbert.IndexBundle.loadCompatible FsColbert.IndexBundleCompatibility.fsKameDefaults manifestPath
+                with
+                | Error errors -> return existing, errors
+                | Ok bundle ->
+                    let docs = ResizeArray<PdfDocumentSource>(existing)
+                    let installed = ResizeArray<InstalledPrebuiltIndex>()
                     let installedBundleSources = ResizeArray<FsColbert.IndexBundleSource>()
+                    let logs = ResizeArray<string>()
 
-                    for source in manifest.sources do
-                        match source.sourceLocation |> Option.bind Text.notEmpty with
-                        | None -> ()
+                    for entry in bundle.indexes do
+                        match entry.source.sourceLocation |> Option.bind Text.notEmpty with
+                        | None -> logs.Add $"Bundle source {entry.source.sourceId} has no sourceLocation."
                         | Some sourceLocation ->
-                            let documentAsset = packageIndexAssetPath sourceLocation
-                            let indexAsset = packageIndexAssetPath source.indexFile
-                            let sourceKind = source.sourceKind |> Option.defaultValue ""
-
-                            let asset =
-                                { id = source.sourceId
-                                  kind = sourceKind
-                                  displayName = source.sourceDisplayName
-                                  documentAsset = documentAsset
-                                  indexAsset = indexAsset
-                                  selected = false }
-
-                            let id = $"prebuilt-{safeId asset.id}"
-                            let documentName = Path.GetFileName asset.documentAsset |> sanitizeFileName
+                            let id = $"bundle-{safeId bundle.manifest.bundleId}-{safeId entry.source.sourceId}"
+                            let documentName = Path.GetFileName sourceLocation |> sanitizeFileName
                             let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
                             let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
 
-                            let! documentCopied =
-                                if File.Exists storedPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.documentAsset storedPath
+                            let sourceCopied = copyExtractedFile importRoot sourceLocation storedPath
+                            let indexCopied = copyExtractedFile importRoot entry.source.indexFile indexPath
 
-                            let! indexCopied =
-                                if File.Exists indexPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.indexAsset indexPath
+                            if not sourceCopied then
+                                logs.Add $"Bundle source file was not found: {sourceLocation}."
+                            elif not indexCopied then
+                                logs.Add $"Bundle index file was not found: {entry.source.indexFile}."
+                            else
+                                let sourceKind = entry.source.sourceKind |> Option.defaultValue ""
+                                let chunkCount = prebuiltChunkCount indexPath
 
-                            let chunkCount = prebuiltChunkCount indexPath
+                                let doc =
+                                    match docs |> Seq.tryFind (fun item -> item.id = id) with
+                                    | Some current ->
+                                        { current with
+                                            kind = prebuiltKind sourceKind
+                                            displayName = entry.source.sourceDisplayName
+                                            storedPath = storedPath
+                                            status = Ready
+                                            chunkCount = chunkCount
+                                            error = None }
+                                    | None ->
+                                        { id = id
+                                          kind = prebuiltKind sourceKind
+                                          displayName =
+                                            entry.source.sourceDisplayName
+                                            |> Text.notEmpty
+                                            |> Option.defaultValue documentName
+                                          storedPath = storedPath
+                                          originalPath = $"bundle://{bundle.manifest.bundleId}/{entry.source.sourceId}"
+                                          selected = false
+                                          status = Ready
+                                          chunkCount = chunkCount
+                                          error = None }
 
-                            let doc =
-                                match existingPrebuiltDoc asset (List.ofSeq docs) with
-                                | Some current ->
-                                    { current with
-                                        kind = prebuiltKind asset.kind
-                                        storedPath = storedPath
-                                        status = Ready
-                                        chunkCount = chunkCount
-                                        error = None }
-                                | None ->
+                                docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
+                                docs.Add doc
+
+                                installed.Add
                                     { id = id
-                                      kind = prebuiltKind asset.kind
-                                      displayName =
-                                        asset.displayName |> Text.notEmpty |> Option.defaultValue documentName
+                                      kind =
+                                        match doc.kind with
+                                        | PdfFile -> "pdf"
+                                        | MarkdownFile -> "markdown"
+                                        | JsonFile -> "json"
+                                      displayName = doc.displayName
                                       storedPath = storedPath
-                                      originalPath = $"app://{asset.documentAsset}"
-                                      selected = asset.selected
-                                      status = Ready
-                                      chunkCount = chunkCount
-                                      error = None }
+                                      indexPath = indexPath }
 
-                            docs.RemoveAll(fun item -> item.id = doc.id) |> ignore
-                            docs.Add doc
-
-                            installed.Add
-                                { id = id
-                                  kind =
-                                    match doc.kind with
-                                    | PdfFile -> "pdf"
-                                    | MarkdownFile -> "markdown"
-                                    | JsonFile -> "json"
-                                  displayName = doc.displayName
-                                  storedPath = storedPath
-                                  indexPath = indexPath }
-
-                            installedBundleSources.Add
-                                { source with
-                                    sourceLocation = Some storedPath
-                                    sourceKind = Some asset.kind
-                                    indexFile = Path.GetFileName indexPath }
-
-                            if documentCopied || indexCopied then
-                                logs.Add $"Installed bundled FsColbert index: {doc.displayName}."
+                                installedBundleSources.Add
+                                    { entry.source with
+                                        sourceLocation = Some storedPath
+                                        sourceKind = Some sourceKind
+                                        indexFile = Path.GetFileName indexPath }
 
                     if installedBundleSources.Count > 0 then
                         writeInstalledBundleManifest
-                            { manifest with
+                            { bundle.manifest with
                                 sources = List.ofSeq installedBundleSources }
 
-                writeInstalledPrebuiltManifest (List.ofSeq installed)
+                    writeInstalledPrebuiltManifest (List.ofSeq installed)
 
-                return List.ofSeq docs, List.ofSeq logs
+                    logs.Add
+                        $"Imported FsColbert bundle '{bundle.manifest.bundleId}' ({installedBundleSources.Count} document(s))."
+
+                    return List.ofSeq docs, List.ofSeq logs
         }
 
     let copyNewDocuments (existing: PdfDocumentSource list) (results: FileResult seq) =
@@ -432,6 +742,7 @@ module PdfLibrary =
         report
         keywordOptions
         useHybridPdfParsing
+        useLayoutAnalysis
         (cancellationToken: CancellationToken)
         (doc: PdfDocumentSource)
         =
@@ -443,7 +754,7 @@ module PdfLibrary =
             cancellationToken.ThrowIfCancellationRequested()
             throwIfKeywordCancellationRequested keywordOptions
 
-            let! result = readPassages report useHybridPdfParsing doc cancellationToken
+            let! result = readPassages report useHybridPdfParsing useLayoutAnalysis doc cancellationToken
             cancellationToken.ThrowIfCancellationRequested()
 
             match result with
@@ -462,7 +773,7 @@ module PdfLibrary =
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions
-                        (pdfParsingMode useHybridPdfParsing)
+                        (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
                         source
                         passages
                         cancellationToken
@@ -495,6 +806,7 @@ module PdfLibrary =
         report
         keywordOptions
         useHybridPdfParsing
+        useLayoutAnalysis
         (cancellationToken: CancellationToken)
         (docs: PdfDocumentSource list)
         =
@@ -507,7 +819,16 @@ module PdfLibrary =
                     throwIfKeywordCancellationRequested keywordOptions
 
                     report $"Processing document {doc.displayName}."
-                    let! result = processDocument report keywordOptions useHybridPdfParsing cancellationToken doc
+
+                    let! result =
+                        processDocument
+                            report
+                            keywordOptions
+                            useHybridPdfParsing
+                            useLayoutAnalysis
+                            cancellationToken
+                            doc
+
                     report $"Finished processing document {doc.displayName}."
                     results <- result :: results
 
@@ -521,6 +842,5 @@ module PdfLibrary =
             if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
                 return false
             else
-                File.Delete doc.storedPath
-                return true
+                return deleteStoredDocumentFile doc
         }

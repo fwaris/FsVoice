@@ -24,8 +24,7 @@ type QaUseCaseProfile =
       queryExpansionRules: QueryExpansionRule list
       keywordInstruction: string option
       keywordHints: string list
-      answerSystemInstruction: string option
-      judgeSystemInstruction: string option }
+      answerSystemInstruction: string option }
 
 [<CLIMutable>]
 type QaUseCaseContextManifest =
@@ -65,7 +64,6 @@ type ModelRole =
     | Answer
     | Planner
     | Keyword
-    | Judge
     | QueryExpansion
 
 [<CLIMutable>]
@@ -86,7 +84,6 @@ type PromptSet =
       toolPlannerSystem: string option
       toolPlannerUserTemplate: string option
       keywordInstruction: string option
-      judgeSystem: string option
       speechResultInstruction: string option }
 
 [<CLIMutable>]
@@ -143,10 +140,9 @@ module ModelRole =
         | Answer -> "Answer"
         | Planner -> "Planner"
         | Keyword -> "Keyword"
-        | Judge -> "Judge"
         | QueryExpansion -> "QueryExpansion"
 
-    let all = [ Realtime; Transcriber; Answer; Planner; Keyword; Judge; QueryExpansion ]
+    let all = [ Realtime; Transcriber; Answer; Planner; Keyword; QueryExpansion ]
 
     let tryParse value =
         let normalized =
@@ -201,7 +197,6 @@ module PromptSet =
           toolPlannerSystem = None
           toolPlannerUserTemplate = None
           keywordInstruction = None
-          judgeSystem = None
           speechResultInstruction = None }
 
     let private clean value =
@@ -216,7 +211,6 @@ module PromptSet =
           toolPlannerSystem = clean prompts.toolPlannerSystem
           toolPlannerUserTemplate = clean prompts.toolPlannerUserTemplate
           keywordInstruction = clean prompts.keywordInstruction
-          judgeSystem = clean prompts.judgeSystem
           speechResultInstruction = clean prompts.speechResultInstruction }
 
 module UseCaseRuntimeOptions =
@@ -254,8 +248,7 @@ module QaUseCaseProfile =
           queryExpansionRules = []
           keywordInstruction = None
           keywordHints = []
-          answerSystemInstruction = None
-          judgeSystemInstruction = None }
+          answerSystemInstruction = None }
 
     let private jsonOptions =
         let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
@@ -305,8 +298,7 @@ module QaUseCaseProfile =
                         Some { triggers = triggers; terms = terms })
             keywordInstruction = profile.keywordInstruction |> Option.bind notEmpty
             keywordHints = cleanList profile.keywordHints
-            answerSystemInstruction = profile.answerSystemInstruction |> Option.bind notEmpty
-            judgeSystemInstruction = profile.judgeSystemInstruction |> Option.bind notEmpty }
+            answerSystemInstruction = profile.answerSystemInstruction |> Option.bind notEmpty }
 
     let fromJsonText (json: string) =
         JsonSerializer.Deserialize<QaUseCaseProfile>(json, jsonOptions)
@@ -345,8 +337,7 @@ module QaUseCaseProfile =
                    queryExpansionRules = profile.queryExpansionRules
                    keywordInstruction = profile.keywordInstruction
                    keywordHints = profile.keywordHints
-                   answerSystemInstruction = profile.answerSystemInstruction
-                   judgeSystemInstruction = profile.judgeSystemInstruction |},
+                   answerSystemInstruction = profile.answerSystemInstruction |},
                 jsonOptions
             )
 
@@ -433,7 +424,7 @@ Allowed direct actions:
 - answer simple conversational turns directly
 
 Tool use:
-- For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
+- For every use ask or question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
 - When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
 - Call QUERY_ORACLE silently. Do not say filler or status phrases before the call, such as "let me check", "one moment", "I'll look that up", or similar.
@@ -446,10 +437,10 @@ After QUERY_ORACLE returns:
 - If the tool says there is not enough information, say that plainly."""
 
     let transcriberPrompt =
-        "Expect natural spoken question-answering conversation. Requests may involve a wide variety of questions"
+        "Expect natural spoken question-answering conversation. Requests may involve a wide variety of questions or user asks"
 
     let answerSystem =
-        "You are FsVoice's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful."
+        "You are FsVoice's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Treat the user's question as an instruction over the provided evidence. Prefer matched source chunks whose heading, leading text, or local context directly matches the requested topic or section. Treat incidental or deep mentions of the same words as weaker evidence unless the surrounding context clearly answers the request. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful."
 
     let answerUserTemplate =
         "User question:\n{{question}}\n\nTyped durable memory:\n{{typedMemory}}\n\nTool observations:\n{{toolObservations}}\n\nSelected source inventory:\n{{sourceInventory}}\n\nMatched source context:\n{{sourceContext}}\n\nReturn only the answer."
@@ -489,7 +480,6 @@ module UseCaseDefinition =
           Keyword,
           { ModelRoleConfig.create "gpt-5-nano" with
               maxOutputTokens = Some 25000 }
-          Judge, ModelRoleConfig.create "gpt-5-nano"
           QueryExpansion, ModelRoleConfig.create "gpt-5-nano" ]
         |> Map.ofList
 

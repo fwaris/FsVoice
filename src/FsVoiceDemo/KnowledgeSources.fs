@@ -133,28 +133,40 @@ module KnowledgeSources =
                     client = None
                     modelId = C.NANO_MODEL }
 
-    let private pdfParsingMode useHybridPdfParsing =
-        if useHybridPdfParsing then
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+        if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Hybrid
+        elif useHybridPdfParsing then
+            FsVoice.QA.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Legacy
 
-    let InindexSource report keywordOptions useHybridPdfParsing (source: KnowledgeSource) =
+    let configurePdfParser useLayoutAnalysis =
+        { FsVoice.QA.DoclingHybrid.defaults with
+            enableLayoutAnalysis = useLayoutAnalysis }
+        |> FsVoice.QA.DoclingHybrid.setDefaultOptions
+
+    let InindexSource report keywordOptions useHybridPdfParsing useLayoutAnalysis (source: KnowledgeSource) =
+        configurePdfParser useLayoutAnalysis
+
         source
         |> toQaSource
         |> FsVoice.QA.KnowledgeSources.InindexSource
             FileSystem.AppDataDirectory
             report
             keywordOptions
-            (pdfParsingMode useHybridPdfParsing)
+            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
 
     let loadIndex
         report
         (keywordOptions: KeywordGenerationOptions)
         useHybridPdfParsing
+        useLayoutAnalysis
         (sources: KnowledgeSource list)
         =
         async {
+            configurePdfParser useLayoutAnalysis
+
             let! index, errors =
                 sources
                 |> List.map toQaSource
@@ -162,7 +174,7 @@ module KnowledgeSources =
                     FileSystem.AppDataDirectory
                     report
                     keywordOptions
-                    (pdfParsingMode useHybridPdfParsing)
+                    (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
                     false
 
             return fromQaIndex index, errors

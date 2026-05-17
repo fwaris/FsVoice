@@ -64,6 +64,15 @@ module Update =
                   DevicePlatform.WinUI, [ ".pdf"; ".md"; ".markdown" ] :> seq<string> ]
         )
 
+    let private indexBundleFileTypes =
+        FilePickerFileType(
+            dict
+                [ DevicePlatform.iOS, [ "public.zip-archive"; "com.pkware.zip-archive" ] :> seq<string>
+                  DevicePlatform.MacCatalyst, [ "public.zip-archive"; "com.pkware.zip-archive" ] :> seq<string>
+                  DevicePlatform.Android, [ "application/zip"; "application/x-zip-compressed" ] :> seq<string>
+                  DevicePlatform.WinUI, [ ".zip" ] :> seq<string> ]
+        )
+
     let private saveSettings model =
         Settings.setOpenAiKey model.openAiKey
         Settings.setActiveUseCaseId model.activeUseCase.id
@@ -77,6 +86,7 @@ module Update =
         Settings.setUseCaseUseLexicalFilter model.activeUseCase.id model.useLexicalFilter
         Settings.setUseCaseElaborateIndexKeywords model.activeUseCase.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
+        Settings.setUseLayoutAnalysis model.useLayoutAnalysis
 
         model.useCaseSettings
         |> Map.iter (fun key value -> Settings.setUseCaseSetting model.activeUseCase.id key value)
@@ -152,7 +162,8 @@ module Update =
                    logChunks = model.logChunks
                    useLexicalFilter = model.useLexicalFilter
                    elaborateIndexKeywords = model.elaborateIndexKeywords
-                   useHybridPdfParsing = model.useHybridPdfParsing |}
+                   useHybridPdfParsing = model.useHybridPdfParsing
+                   useLayoutAnalysis = model.useLayoutAnalysis |}
 
             bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
@@ -173,11 +184,32 @@ module Update =
                 return Error ex
         }
 
+    let private pickAndImportIndexBundle existing =
+        async {
+            try
+                let opts =
+                    PickOptions(PickerTitle = "Select FsVoice index bundle", FileTypes = indexBundleFileTypes)
+
+                let tsk () = FilePicker.Default.PickAsync(opts)
+
+                let! result = MainThread.InvokeOnMainThreadAsync<FileResult>(tsk) |> Async.AwaitTask
+
+                if isNull result then
+                    return Ok(existing, [ "No index bundle selected." ])
+                else
+                    use! stream = result.OpenReadAsync() |> Async.AwaitTask
+                    let! docs, logs = PdfLibrary.importPrebuiltBundle existing result.FileName stream
+                    return Ok(docs, logs)
+            with ex ->
+                return Error ex
+        }
+
     let private processDocuments
         report
         (cancellationToken: CancellationToken)
         keywordOptions
         useHybridPdfParsing
+        useLayoutAnalysis
         (docs: PdfDocumentSource list)
         =
         async {
@@ -188,7 +220,13 @@ module Update =
                 cancellationToken.ThrowIfCancellationRequested()
 
                 let! outcome =
-                    PdfLibrary.processDocuments report keywordOptions useHybridPdfParsing cancellationToken docs
+                    PdfLibrary.processDocuments
+                        report
+                        keywordOptions
+                        useHybridPdfParsing
+                        useLayoutAnalysis
+                        cancellationToken
+                        docs
 
                 report $"Document processing command completed for {docs.Length} document(s)."
                 return Ok outcome
@@ -221,6 +259,28 @@ module Update =
                           removedFile = removedFile
                           removedIndexCount = removedIndexCount
                           indexErrors = indexErrors }
+            with ex ->
+                return Error ex
+        }
+
+    let private appLinkUrl link =
+        match link with
+        | PrivacyPolicy -> C.PRIVACY_POLICY_URL
+        | ThirdPartyNotices -> C.THIRD_PARTY_NOTICES_URL
+
+    let private openAppLink link : Async<Result<unit, exn>> =
+        async {
+            try
+                let uri = Uri(appLinkUrl link)
+
+                let tsk () = Launcher.Default.OpenAsync(uri)
+
+                let! opened = MainThread.InvokeOnMainThreadAsync<bool>(tsk) |> Async.AwaitTask
+
+                if opened then
+                    return Ok()
+                else
+                    return Error(upcast InvalidOperationException($"Unable to open {uri}."))
             with ex ->
                 return Error ex
         }
@@ -276,7 +336,7 @@ module Update =
         let keywordOptions = keywordOptions model |> withKeywordCancellation cts.Token
 
         Cmd.OfAsync.either
-            (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing)
+            (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing model.useLayoutAnalysis)
             docs
             PdfProcessingCompleted
             EventError
@@ -295,7 +355,8 @@ module Update =
           logChunks = model.logChunks
           useLexicalFilter = model.useLexicalFilter
           elaborateIndexKeywords = model.elaborateIndexKeywords
-          useHybridPdfParsing = model.useHybridPdfParsing }
+          useHybridPdfParsing = model.useHybridPdfParsing
+          useLayoutAnalysis = model.useLayoutAnalysis }
 
     let init () =
         let docs = Settings.pdfLibrary ()
@@ -343,7 +404,8 @@ module Update =
             Settings.useCaseElaborateIndexKeywords
                 loadedUseCase.definition.id
                 loadedUseCase.definition.runtime.elaborateIndexKeywords
-          useHybridPdfParsing = Settings.useHybridPdfParsing () },
+          useHybridPdfParsing = Settings.useHybridPdfParsing ()
+          useLayoutAnalysis = Settings.useLayoutAnalysis () },
         Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
     let update msg model =
@@ -451,6 +513,26 @@ module Update =
                 saveSettings model
                 postSources model
                 model, Cmd.none
+        | UseLayoutAnalysisToggled value ->
+            match sourceConfigBlocked model "Changing layout analysis" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        useLayoutAnalysis = value
+                        log =
+                            $"Layout analysis {state}. Reprocess documents to rebuild Hybrid parser indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
         | PrebuiltDocumentsInstalled(Ok(docs, logs)) ->
             let model =
                 { model with
@@ -482,6 +564,12 @@ module Update =
         | Settings_Close ->
             saveSettings model
             { model with currentPage = Main }, Cmd.none
+        | OpenAppLink link -> model, Cmd.OfAsync.either openAppLink link AppLinkOpened EventError
+        | AppLinkOpened(Ok()) -> model, Cmd.none
+        | AppLinkOpened(Error ex) ->
+            { model with
+                log = $"Unable to open app link: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+            Cmd.none
         | ToggleSecretVisibility ->
             match sourceConfigBlocked model "Changing secret visibility" with
             | Some msg ->
@@ -501,6 +589,35 @@ module Update =
             | None ->
                 { model with isBusy = true },
                 Cmd.OfAsync.either pickAndCopyDocuments model.pdfDocuments PickPdfsCompleted EventError
+        | PickIndexBundle ->
+            match documentMutationBlocked model "Importing index bundle" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with isBusy = true },
+                Cmd.OfAsync.either pickAndImportIndexBundle model.pdfDocuments IndexBundleImportCompleted EventError
+        | IndexBundleImportCompleted(Ok(docs, logs)) ->
+            let model =
+                { model with
+                    pdfDocuments = docs
+                    isBusy = false
+                    log = (logs @ model.log) |> List.truncate C.MAX_LOG }
+
+            let model =
+                { model with
+                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+            postSources model
+            model, Cmd.none
+        | IndexBundleImportCompleted(Error ex) ->
+            { model with
+                isBusy = false
+                log =
+                    $"Index bundle import failed: {ex.Message}" :: model.log
+                    |> List.truncate C.MAX_LOG },
+            Cmd.none
         | PickPdfsCompleted(Ok docs) ->
             let pdfDocuments = model.pdfDocuments @ docs
 
@@ -702,6 +819,13 @@ module Update =
             | None ->
                 match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
                 | None -> model, Cmd.none
+                | Some doc when PdfDocuments.isBuiltIn doc ->
+                    { model with
+                        log =
+                            $"Built-in sources can be deselected but not deleted: {doc.displayName}."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG },
+                    Cmd.none
                 | Some doc ->
                     { model with isBusy = true },
                     Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError

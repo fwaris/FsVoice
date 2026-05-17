@@ -521,6 +521,11 @@ After QUERY_ORACLE returns:
         if String.IsNullOrWhiteSpace output then
             st
         else
+            ContentFunctionCallOutput.Create callId output
+            |> createFunctionOutputEvent
+            |> SendClientEvent
+            |> enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY
+
             st.bus.PostToAgent(
                 Ag_Log
                     $"Oracle tool output ready for call {callId}; output_chars={output.Length}; waiting for realtime item acknowledgement."
@@ -546,20 +551,17 @@ After QUERY_ORACLE returns:
                 |> tryScheduleSpeak
         | _ -> st
 
-    let private runAwaitedToolCall (bus: WBus<FlowMsg, AgentMsg>) conn (toolCall: VoiceToolCall) =
+    let private runAwaitedToolCall (bus: WBus<FlowMsg, AgentMsg>) (toolCall: VoiceToolCall) =
         async {
             try
                 let! result =
                     toolCall.task.Task.WaitAsync(toolCall.timeout, toolCall.cancellation.Token)
                     |> Async.AwaitTask
 
-                createFunctionOutputEvent result |> sendClientEvent conn
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, result.output))
             with ex ->
                 toolCall.cancellation.Cancel()
                 let output = "The oracle took too long to answer. Please try again."
-                let result = ContentFunctionCallOutput.Create toolCall.callId output
-                createFunctionOutputEvent result |> sendClientEvent conn
                 bus.PostToAgent(Ag_Log $"Oracle tool call timed out for {toolCall.callId}: {ex.Message}")
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))
         }
@@ -683,7 +685,7 @@ After QUERY_ORACLE returns:
                         sendClientEvent conn event
                     with ex ->
                         bus.PostToAgent(Ag_Log $"Failed to send realtime client event: {ex.Message}")
-                | AwaitToolCall toolCall -> runAwaitedToolCall bus conn toolCall |> Async.Start
+                | AwaitToolCall toolCall -> runAwaitedToolCall bus toolCall |> Async.Start
             })
 
     let private startAgent config outputQueue (bus: WBus<FlowMsg, AgentMsg>) =

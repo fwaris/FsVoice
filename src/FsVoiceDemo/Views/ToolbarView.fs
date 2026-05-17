@@ -24,7 +24,7 @@ module ToolbarView =
                 .alignStartHorizontal()
                 .gridColumn (0)
 
-            Label("FsVoiceDemo")
+            Label(C.APP_NAME)
                 .font(size = 20., attributes = FontAttributes.Bold)
                 .centerHorizontal()
                 .centerVertical()

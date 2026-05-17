@@ -16,10 +16,10 @@
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
 
     <!-- Display name -->
-    <ApplicationTitle>FsVoiceDemo</ApplicationTitle>
+    <ApplicationTitle>FsVoice.Demo</ApplicationTitle>
 
     <!-- App Identifier -->
-    <ApplicationId>com.companyname.FsVoiceDemo</ApplicationId>
+    <ApplicationId>com.fsvoice.FsVoice.Demo</ApplicationId>
     <ApplicationIdGuid>8BB52405-D58A-46FA-B299-CC07CF58E5F6</ApplicationIdGuid>
 
     <!-- Versions -->
@@ -37,11 +37,22 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
-  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios' and '$(Configuration)' != 'Release'">
     <MtouchLink>None</MtouchLink>
     <UseInterpreter>true</UseInterpreter>
     <MtouchInterpreter>all</MtouchInterpreter>
     <RunAOTCompilation>false</RunAOTCompilation>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios' and '$(Configuration)' == 'Release'">
+    <UseInterpreter>false</UseInterpreter>
+    <MtouchInterpreter></MtouchInterpreter>
+    <RunAOTCompilation>true</RunAOTCompilation>
+    <EnableAssemblyILStripping>false</EnableAssemblyILStripping>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'android' and '$(Configuration)' == 'Debug'">
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
   </PropertyGroup>
 
   <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
@@ -125,12 +136,14 @@
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
     <None Include="$(iOSProjectFolder)Info.plist" LogicalName="Info.plist" />
+    <BundleResource Include="$(iOSProjectFolder)PrivacyInfo.xcprivacy" LogicalName="PrivacyInfo.xcprivacy" />
     <Compile Include="$(iOSProjectFolder)AppDelegate.fs" />
     <Compile Include="$(iOSProjectFolder)Program.fs" />
   </ItemGroup>
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
     <None Include="$(MacCatalystProjectFolder)Info.plist" LogicalName="Info.plist" />
+    <BundleResource Include="$(MacCatalystProjectFolder)PrivacyInfo.xcprivacy" LogicalName="PrivacyInfo.xcprivacy" />
     <Compile Include="$(MacCatalystProjectFolder)AppDelegate.fs" />
     <Compile Include="$(MacCatalystProjectFolder)Program.fs" />
   </ItemGroup>
@@ -163,7 +176,8 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" Condition="'$(TargetPlatformIdentifier)' != 'android'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
     <PackageReference Include="RapidOCR.Net" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
@@ -177,12 +191,15 @@
     <PackageReference Update="Microsoft.Maui.Core" Version="10.0.51" />
     <PackageReference Update="Microsoft.Maui.Controls" Version="10.0.51" />
     <PackageReference Update="Microsoft.Maui.Controls.Compatibility" Version="10.0.51" />
-    <PackageReference Update="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
   </ItemGroup>
   
   
   <Target Name="ForceCodesign" AfterTargets="_CodesignAppBundle" Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst' and '$(Configuration)' == 'Debug'">
     <Exec Command="codesign -f -s - --deep &quot;$(MSBuildProjectDirectory)/$(_AppBundlePath)&quot;" />
+  </Target>
+
+  <Target Name="EnsurePdfRasterizationReferenceBuilt" BeforeTargets="CoreCompile" Condition="('$(TargetPlatformIdentifier)' == 'ios' or '$(TargetPlatformIdentifier)' == 'android' or '$(TargetPlatformIdentifier)' == 'maccatalyst') and '$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="..\FsVoice.PdfRasterization\FsVoice.PdfRasterization.fsproj" Targets="Build" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)" RemoveProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained" BuildInParallel="false" />
   </Target>
 
 </Project>

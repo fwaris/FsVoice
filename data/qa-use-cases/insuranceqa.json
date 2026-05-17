@@ -123,6 +123,5 @@
     "disability",
     "long term care"
   ],
-  "answerSystemInstruction": "You are FsVoice's reusable QA backend configured for an insurance question-answering benchmark. Answer from selected knowledge sources, durable memory, and tool observations when relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, live values, policy terms, or coverage guarantees. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful.",
-  "judgeSystemInstruction": "Judge whether a generated insurance answer is supported by the reference answer text. Return JSON only."
+  "answerSystemInstruction": "You are FsVoice's reusable QA backend configured for an insurance question-answering benchmark. Answer from selected knowledge sources, durable memory, and tool observations when relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, live values, policy terms, or coverage guarantees. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful."
 }

@@ -1,5 +1,7 @@
 namespace FsVoiceDemo
 
+open System
+
 type DocumentKind =
     | PdfFile
     | MarkdownFile
@@ -69,6 +71,26 @@ module RetrievalModes =
     let displayName mode = labels |> List.item (toIndex mode)
 
 module PdfDocuments =
+    let normalizeBuiltInOriginalPath value =
+        value
+        |> Text.notEmpty
+        |> Option.bind (fun path ->
+            let path = path.Trim().Replace('\\', '/')
+            let prefix = "app://"
+
+            if path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) then
+                let assetPath = path.Substring(prefix.Length).TrimStart('/')
+
+                if String.IsNullOrWhiteSpace assetPath then
+                    None
+                else
+                    Some($"{prefix}{assetPath}".ToLowerInvariant())
+            else
+                None)
+
+    let isBuiltIn doc =
+        normalizeBuiltInOriginalPath doc.originalPath |> Option.isSome
+
     let kindLabel doc =
         match doc.kind with
         | PdfFile -> "PDF"

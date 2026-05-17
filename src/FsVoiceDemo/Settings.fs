@@ -391,6 +391,15 @@ module Settings =
     let setUseHybridPdfParsing value =
         Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, value)
 
+    let useLayoutAnalysis () =
+        if Preferences.Default.ContainsKey(C.SETTINGS_USE_LAYOUT_ANALYSIS) then
+            Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, false)
+        else
+            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS, false)
+
+    let setUseLayoutAnalysis value =
+        Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
+
     let useCaseSetting useCaseId key fallback =
         getScopedString useCaseId $"Settings.{key}" None fallback
 

@@ -16,7 +16,8 @@ module QaAgent =
           logChunks: bool
           useLexicalFilter: bool
           elaborateIndexKeywords: bool
-          useHybridPdfParsing: bool }
+          useHybridPdfParsing: bool
+          useLayoutAnalysis: bool }
 
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
@@ -50,8 +51,10 @@ module QaAgent =
           enabled = source.enabled }
 
     let private pdfParsingMode flags =
-        if flags.useHybridPdfParsing then
+        if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Hybrid
+        elif flags.useHybridPdfParsing then
+            FsVoice.QA.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.QA.KnowledgeSources.PdfParsingMode.Legacy
 
@@ -174,6 +177,8 @@ module QaAgent =
 
     let private configureSession st flags mode sources (session: FsVoice.QA.IQaOrchestrator) =
         async {
+            KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
+
             let provider = createContextProvider st flags mode sources
             let providers = createPluginContextProviders st @ [ provider ]
             let! errors = session.ConfigureAsync(providers, CancellationToken.None) |> Async.AwaitTask
@@ -181,7 +186,14 @@ module QaAgent =
             for err in errors do
                 st.bus.PostToAgent(Ag_Log err)
 
-            let parserName = if flags.useHybridPdfParsing then "hybrid" else "legacy"
+            let parserName =
+                if flags.useHybridPdfParsing then
+                    if flags.useLayoutAnalysis then
+                        "hybrid+layout"
+                    else
+                        "hybrid"
+                else
+                    "legacy"
 
             st.bus.PostToAgent(
                 Ag_Log
@@ -281,7 +293,8 @@ module QaAgent =
                       logChunks = flags.logChunks
                       useLexicalFilter = flags.useLexicalFilter
                       elaborateIndexKeywords = flags.elaborateIndexKeywords
-                      useHybridPdfParsing = flags.useHybridPdfParsing }
+                      useHybridPdfParsing = flags.useHybridPdfParsing
+                      useLayoutAnalysis = flags.useLayoutAnalysis }
 
                 if st.session.IsSome && sameSourceConfiguration st mode sources flags then
                     st.bus.PostToAgent(
@@ -323,7 +336,8 @@ module QaAgent =
               logChunks = flags.logChunks
               useLexicalFilter = flags.useLexicalFilter
               elaborateIndexKeywords = flags.elaborateIndexKeywords
-              useHybridPdfParsing = flags.useHybridPdfParsing }
+              useHybridPdfParsing = flags.useHybridPdfParsing
+              useLayoutAnalysis = flags.useLayoutAnalysis }
 
         let st0 =
             { bus = bus

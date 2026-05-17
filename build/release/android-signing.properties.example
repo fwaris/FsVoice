@@ -1,0 +1,7 @@
+# Copy this file to signing.properties for local Android release builds.
+# Do not commit signing.properties.
+
+keystore=./build/release/fsvoice-upload.keystore
+storePassword=
+keyAlias=fsvoice-upload
+keyPassword=

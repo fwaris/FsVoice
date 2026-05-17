@@ -25,10 +25,8 @@ type MauiProgram =
         builder.Services.AddLogging(fun logging ->
             logging.AddConsole() |> ignore
             logging.AddFilter("FsVoiceDemoLog", LogLevel.Information) |> ignore
-            logging.AddFilter("RTOpenAILog", LogLevel.Information) |> ignore)
+            logging.AddFilter("RTOpenAILog", LogLevel.Warning) |> ignore)
         |> ignore
-
-        builder.Logging.AddConsole() |> ignore
 
         let app = builder.Build()
         FSharp.DI.DI.init app.Services

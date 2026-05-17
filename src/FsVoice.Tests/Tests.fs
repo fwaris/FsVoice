@@ -203,6 +203,11 @@ type FakeDoclingLayout(predictions: FsColbert.DoclingLayoutPrediction list) =
                     |> Ok
             }
 
+type FailingDoclingLayout() =
+    interface FsColbert.IDoclingLayoutPredictor with
+        member _.PredictLayoutAsync _ =
+            async { return Error "layout should not run" }
+
 type FakeDoclingFigureClassifier(classes: FsColbert.DoclingFigureClass list) =
     interface FsColbert.IDoclingFigureClassifier with
         member _.ClassifyAsync _ = async { return Ok classes }
@@ -608,6 +613,69 @@ let ``docling hybrid page input builder skips ocr when native pdf text is suffic
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling hybrid built-in layout providers resolve pp and heron`` () =
+    let pp = DoclingHybrid.tryBuiltInLayoutProvider "pp-doclayout-m"
+    let heron = DoclingHybrid.tryBuiltInLayoutProvider "heron"
+
+    Assert.True(pp.IsSome)
+    Assert.Equal("pp-doclayout-m", pp.Value.Id)
+    Assert.True(heron.IsSome)
+    Assert.Equal("heron", heron.Value.Id)
+
+[<Fact>]
+let ``pdf parser index fingerprint includes layout quality revision`` () =
+    let hybrid =
+        KnowledgeSources.PdfParsingModes.indexFingerprint KnowledgeSources.PdfParsingMode.Hybrid
+
+    let withoutLayout =
+        KnowledgeSources.PdfParsingModes.indexFingerprint KnowledgeSources.PdfParsingMode.HybridWithoutLayout
+
+    Assert.Contains("pdfParsingMode=hybrid", hybrid)
+    Assert.Contains("pdfParserQuality=layout-sparse-fallback-v1", hybrid)
+    Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
+
+[<Fact>]
+let ``docling hybrid layout disabled bypasses supplied layout predictor`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell "Native layout bypass text" 10.0 145.0 180.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let source =
+            FsColbert.PassageSource.create "/tmp/no-layout.pdf" "No Layout" "/tmp/no-layout.pdf"
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProvidersAndCancellation
+                { DoclingHybrid.defaults with
+                    enableLayoutAnalysis = false
+                    minNativeCharsPerPage = 8 }
+                ignore
+                FsColbert.ChunkOptions.fsKameDefaults
+                source
+                "/tmp/no-layout.pdf"
+                rasterizer
+                nativeProvider
+                None
+                (FailingDoclingLayout() :> FsColbert.IDoclingLayoutPredictor)
+                None
+                CancellationToken.None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages -> Assert.NotEmpty passages
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling hybrid provider path emits native text table picture metadata and keywords`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -727,6 +795,78 @@ let ``docling hybrid provider path falls back to native text when layout collaps
             Assert.True(passages.Length > 1)
             Assert.Contains(passages, fun passage -> passage.text.Contains("beta"))
             Assert.Contains(reports, fun message -> message.Contains("layout conversion produced only 1 passage"))
+            Assert.Contains(reports, fun message -> message.Contains("Using Docling native-text conversion"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid provider path falls back to native text when layout is sparse`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+
+        let rasterizer =
+            FakeDoclingRasterizer(
+                Ok
+                    [ { pageNo = 1; image = image }
+                      { pageNo = 2; image = image }
+                      { pageNo = 3; image = image }
+                      { pageNo = 4; image = image } ]
+            )
+
+        let repeatedText prefix =
+            [ 1..220 ] |> List.map (fun index -> $"{prefix}{index}") |> String.concat " "
+
+        let nativeProvider _ =
+            async {
+                let pageText pageNo prefix : FsColbert.DoclingNativePageText =
+                    { pageNo = pageNo
+                      size = { width = 400.0; height = 400.0 }
+                      cells = [ doclingNativeCell (repeatedText prefix) 20.0 350.0 380.0 380.0 ] }
+
+                return
+                    [ pageText 1 "alpha"
+                      pageText 2 "beta"
+                      pageText 3 "gamma"
+                      pageText 4 "delta" ]
+                    |> Ok
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters = [ doclingCluster 0 FsColbert.DoclingLabel.Text 15.0 15.0 390.0 70.0 ] }
+                  { pageNo = 2
+                    clusters = [ doclingCluster 1 FsColbert.DoclingLabel.Text 15.0 15.0 390.0 70.0 ] }
+                  { pageNo = 3; clusters = [] }
+                  { pageNo = 4; clusters = [] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/sparse.pdf" "Sparse" "/tmp/sparse.pdf"
+
+        let reports = ResizeArray<string>()
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                reports.Add
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/sparse.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.True(passages.Length > 2)
+            Assert.Contains(passages, fun passage -> passage.text.Contains("gamma"))
+            Assert.Contains(passages, fun passage -> passage.text.Contains("delta"))
+            Assert.Contains(reports, fun message -> message.Contains("layout conversion looked incomplete"))
             Assert.Contains(reports, fun message -> message.Contains("Using Docling native-text conversion"))
     }
     |> Async.RunSynchronously

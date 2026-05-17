@@ -14,6 +14,10 @@ type ConnectionBundle =
     { flow: IFlow<FlowMsg, AgentMsg>
       connection: Connection }
 
+type AppLink =
+    | PrivacyPolicy
+    | ThirdPartyNotices
+
 type StartParams =
     { apiKey: string
       useCase: FsVoice.QA.UseCaseDefinition
@@ -26,7 +30,8 @@ type StartParams =
       logChunks: bool
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
-      useHybridPdfParsing: bool }
+      useHybridPdfParsing: bool
+      useLayoutAnalysis: bool }
 
 and Model =
     { currentPage: AppPage
@@ -49,7 +54,8 @@ and Model =
       logChunks: bool
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
-      useHybridPdfParsing: bool }
+      useHybridPdfParsing: bool
+      useLayoutAnalysis: bool }
 
 and Msg =
     | OpenAiKeyChanged of string
@@ -58,9 +64,13 @@ and Msg =
     | RetrievalModeChanged of RetrievalMode
     | Settings_Show
     | Settings_Close
+    | OpenAppLink of AppLink
+    | AppLinkOpened of Result<unit, exn>
     | ToggleSecretVisibility
     | PickPdfs
     | PickPdfsCompleted of Result<PdfDocumentSource list, exn>
+    | PickIndexBundle
+    | IndexBundleImportCompleted of Result<PdfDocumentSource list * string list, exn>
     | PdfProcessingCompleted of Result<PdfProcessingOutcome, exn>
     | CancelPdfProcessing
     | PdfSelectionChanged of string * bool
@@ -82,4 +92,5 @@ and Msg =
     | UseLexicalFilterToggled of bool
     | ElaborateIndexKeywordsToggled of bool
     | UseHybridPdfParsingToggled of bool
+    | UseLayoutAnalysisToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

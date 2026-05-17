@@ -1,10 +1,14 @@
 namespace FsVoiceDemo
 
 module C =
-    let APP_NAME = "FsVoiceDemo"
+    let APP_NAME = "FsVoice.Demo"
     let PRODUCT_NAME = "FsVoice"
     let TOOL_PLUGIN_NAME = "FsVoiceTools"
     let LEGACY_PRODUCT_NAME = "FsKame"
+    let PRIVACY_POLICY_URL = "https://fwaris.github.io/docs/fsvoice/privacy.html"
+
+    let THIRD_PARTY_NOTICES_URL =
+        "https://fwaris.github.io/docs/fsvoice/third-party-notices.html"
 
     let SETTINGS_OPENAI_KEY = "FsVoice.OpenAIKey"
     let SETTINGS_PDF_LIBRARY = "FsVoice.PdfLibrary"
@@ -15,6 +19,7 @@ module C =
     let SETTINGS_USE_LEXICAL_FILTER = "FsVoice.UseLexicalFilter"
     let SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsVoice.ElaborateIndexKeywords"
     let SETTINGS_USE_HYBRID_PDF_PARSING = "FsVoice.UseHybridPdfParsing"
+    let SETTINGS_USE_LAYOUT_ANALYSIS = "FsVoice.UseLayoutAnalysis"
     let SETTINGS_ACTIVE_USE_CASE = "FsVoice.ActiveUseCase"
 
     let LEGACY_SETTINGS_OPENAI_KEY = "FsKame.OpenAIKey"
@@ -26,6 +31,7 @@ module C =
     let LEGACY_SETTINGS_USE_LEXICAL_FILTER = "FsKame.UseLexicalFilter"
     let LEGACY_SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsKame.ElaborateIndexKeywords"
     let LEGACY_SETTINGS_USE_HYBRID_PDF_PARSING = "FsKame.UseHybridPdfParsing"
+    let LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS = "FsKame.UseLayoutAnalysis"
     let LEGACY_SETTINGS_ACTIVE_USE_CASE = "FsKame.ActiveUseCase"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.5"

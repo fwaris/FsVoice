@@ -10,6 +10,7 @@ module Icons =
     let visibilityOff = "\ue8f5"
     let back = "\ue5c4"
     let uploadFile = "\uf09b"
+    let archive = "\ue149"
     let save = "\ue161"
     let add = "\ue145"
     let remove = "\ue15b"

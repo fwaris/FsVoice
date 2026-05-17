@@ -13,13 +13,28 @@ open FsColbert
 open RapidOcrNet
 open SkiaSharp
 
+type DoclingLayoutModelProviderContext =
+    { storageRoot: string
+      report: string -> unit
+      cancellationToken: CancellationToken }
+
+type DoclingLayoutModelProviderResult =
+    { predictor: IDoclingLayoutPredictor
+      disposable: IDisposable option }
+
+type IDoclingLayoutModelProvider =
+    abstract Id: string
+    abstract DisplayName: string
+    abstract CreateAsync: DoclingLayoutModelProviderContext -> Async<Result<DoclingLayoutModelProviderResult, string>>
+
 type DoclingHybridOptions =
     { minNativeCharsPerPage: int
       ocrDedupeOverlapThreshold: float
       rasterDpi: int
       enableOcr: bool
       enableLayoutAnalysis: bool
-      enableFigureClassification: bool }
+      enableFigureClassification: bool
+      layoutModelProvider: IDoclingLayoutModelProvider option }
 
 module DoclingHybrid =
     let defaults =
@@ -28,11 +43,14 @@ module DoclingHybrid =
           rasterDpi = 96
           enableOcr = true
           enableLayoutAnalysis = true
-          enableFigureClassification = false }
+          enableFigureClassification = false
+          layoutModelProvider = None }
 
     let mutable private activeDefaults = defaults
 
     let setDefaultOptions options = activeDefaults <- options
+
+    let currentDefaultOptions () = activeDefaults
 
     let resetDefaultOptions () = activeDefaults <- defaults
 
@@ -565,19 +583,243 @@ module DoclingHybrid =
         interface IDisposable with
             member _.Dispose() = session.Dispose()
 
-    let private loadLayoutPredictor report storageRoot =
-        async {
-            try
-                use client = new HttpClient()
-                let! modelPath = ensurePpDocLayoutMDownloadedAsync client storageRoot
+    type private PpDocLayoutMProvider() =
+        interface IDoclingLayoutModelProvider with
+            member _.Id = "pp-doclayout-m"
 
-                match modelPath with
-                | Error err -> return Error err
-                | Ok modelPath ->
-                    let predictor = new PpDocLayoutMOnnx(modelPath, report)
-                    return Ok(predictor :> IDoclingLayoutPredictor, predictor :> IDisposable)
-            with ex ->
-                return Error $"Unable to initialize PP-DocLayout-M ONNX model: {ex.Message}"
+            member _.DisplayName = "PP-DocLayout-M"
+
+            member _.CreateAsync context =
+                async {
+                    try
+                        context.cancellationToken.ThrowIfCancellationRequested()
+                        use client = new HttpClient()
+                        let! modelPath = ensurePpDocLayoutMDownloadedAsync client context.storageRoot
+                        context.cancellationToken.ThrowIfCancellationRequested()
+
+                        match modelPath with
+                        | Error err -> return Error err
+                        | Ok modelPath ->
+                            let predictor = new PpDocLayoutMOnnx(modelPath, context.report)
+
+                            return
+                                Ok
+                                    { predictor = predictor :> IDoclingLayoutPredictor
+                                      disposable = Some(predictor :> IDisposable) }
+                    with
+                    | :? OperationCanceledException ->
+                        return raise (OperationCanceledException context.cancellationToken)
+                    | ex -> return Error $"Unable to initialize PP-DocLayout-M ONNX model: {ex.Message}"
+                }
+
+    type private HeronLayoutOnnx(files: DoclingOnnxModelFiles, report: string -> unit) =
+        let width = 640
+        let height = 640
+        let threshold = 0.3f
+        let session = new InferenceSession(files.modelPath)
+        let gate = obj ()
+
+        let inputName name =
+            session.InputMetadata.Keys
+            |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX input '{name}' was not found.")
+
+        let outputName name =
+            session.OutputMetadata.Keys
+            |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX output '{name}' was not found.")
+
+        let imageInputName = inputName "images"
+        let targetSizesInputName = inputName "orig_target_sizes"
+        let labelsOutputName = outputName "labels"
+        let boxesOutputName = outputName "boxes"
+        let scoresOutputName = outputName "scores"
+
+        let labelFor classId =
+            match classId with
+            | 0 -> DoclingLabel.Caption
+            | 1 -> DoclingLabel.Footnote
+            | 2 -> DoclingLabel.Formula
+            | 4 -> DoclingLabel.PageFooter
+            | 5 -> DoclingLabel.PageHeader
+            | 6 -> DoclingLabel.Picture
+            | 7 -> DoclingLabel.SectionHeader
+            | 8 -> DoclingLabel.Table
+            | 10 -> DoclingLabel.Title
+            | 12 -> DoclingLabel.Code
+            | _ -> DoclingLabel.Text
+
+        let resize (image: DoclingRgbImage) =
+            use source = toBitmap image
+
+            let resized = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque)
+
+            use canvas = new SKCanvas(resized)
+            canvas.Clear(SKColors.White)
+            canvas.DrawBitmap(source, SKRect(0f, 0f, float32 width, float32 height))
+
+            resized
+
+        let imageInput (image: DoclingRgbImage) =
+            use bitmap = resize image
+            let values = Array.zeroCreate<byte> (3 * width * height)
+            let plane = width * height
+
+            for y = 0 to height - 1 do
+                for x = 0 to width - 1 do
+                    let color = bitmap.GetPixel(x, y)
+                    let offset = y * width + x
+                    values[offset] <- color.Red
+                    values[plane + offset] <- color.Green
+                    values[(2 * plane) + offset] <- color.Blue
+
+            DenseTensor<byte>(values, [| 1; 3; height; width |])
+            |> fun tensor -> NamedOnnxValue.CreateFromTensor(imageInputName, tensor)
+
+        let targetSizesInput (image: DoclingRgbImage) =
+            let values = [| int64 image.height; int64 image.width |]
+
+            DenseTensor<int64>(values, [| 1; 2 |])
+            |> fun tensor -> NamedOnnxValue.CreateFromTensor(targetSizesInputName, tensor)
+
+        let outputValue name (outputs: IDisposableReadOnlyCollection<DisposableNamedOnnxValue>) =
+            outputs
+            |> Seq.tryFind (fun output -> String.Equals(output.Name, name, StringComparison.Ordinal))
+            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX output '{name}' was not returned.")
+
+        let clamp limit value =
+            Math.Min(float limit, Math.Max(0.0, float value))
+
+        let boxFor (image: DoclingRgbImage) x1 y1 x2 y2 =
+            { l = clamp image.width x1
+              t = clamp image.height y1
+              r = clamp image.width x2
+              b = clamp image.height y2
+              coordOrigin = DoclingCoordinateOrigin.TopLeft }
+
+        let predictOne (page: DoclingPageInput) =
+            let imageInput = imageInput page.image
+            let targetSizesInput = targetSizesInput page.image
+            use outputs = session.Run([ imageInput; targetSizesInput ])
+            let labels = (outputValue labelsOutputName outputs).AsTensor<int64>()
+            let boxes = (outputValue boxesOutputName outputs).AsTensor<float32>()
+            let scores = (outputValue scoresOutputName outputs).AsTensor<float32>()
+
+            let candidateCount =
+                if scores.Dimensions.Length >= 2 then
+                    scores.Dimensions[1]
+                else
+                    int scores.Length
+
+            let clusters =
+                [ for index = 0 to candidateCount - 1 do
+                      let score = scores[0, index]
+
+                      if score >= threshold then
+                          let classId = int labels[0, index]
+                          let offset = index * 4
+                          let x1 = boxes.GetValue(offset) |> float
+                          let y1 = boxes.GetValue(offset + 1) |> float
+                          let x2 = boxes.GetValue(offset + 2) |> float
+                          let y2 = boxes.GetValue(offset + 3) |> float
+                          let bbox = boxFor page.image x1 y1 x2 y2
+
+                          if bbox.r > bbox.l && bbox.b > bbox.t then
+                              { id = index
+                                label = labelFor classId
+                                confidence = score
+                                bbox = bbox
+                                cells = [] } ]
+
+            { pageNo = page.pageNo
+              clusters = clusters |> List.sortByDescending _.confidence |> List.truncate 100 }
+
+        interface IDoclingLayoutPredictor with
+            member _.PredictLayoutAsync pages =
+                async {
+                    try
+                        let predictions =
+                            lock gate (fun () ->
+                                pages
+                                |> List.mapi (fun index page ->
+                                    let timer = Stopwatch.StartNew()
+                                    let prediction = predictOne page
+                                    timer.Stop()
+
+                                    report
+                                        $"Docling Heron layout page {index + 1}/{pages.Length} ({page.pageNo}) produced {prediction.clusters.Length} cluster(s) in {timer.Elapsed.TotalSeconds:F1}s."
+
+                                    prediction))
+
+                        return Ok predictions
+                    with ex ->
+                        return Error $"Docling Heron layout prediction failed: {ex.Message}"
+                }
+
+        interface IDisposable with
+            member _.Dispose() = session.Dispose()
+
+    type private HeronLayoutProvider() =
+        interface IDoclingLayoutModelProvider with
+            member _.Id = "heron"
+
+            member _.DisplayName = "Docling Heron"
+
+            member _.CreateAsync context =
+                async {
+                    try
+                        context.cancellationToken.ThrowIfCancellationRequested()
+                        use client = new HttpClient()
+
+                        let! files =
+                            ModelCatalog.ensureDoclingOnnxDownloadedAsync
+                                client
+                                (doclingModelFolder context.storageRoot "docling-layout-heron")
+                                ModelCatalog.doclingLayoutHeronOnnx
+
+                        context.cancellationToken.ThrowIfCancellationRequested()
+                        let predictor = new HeronLayoutOnnx(files, context.report)
+
+                        return
+                            Ok
+                                { predictor = predictor :> IDoclingLayoutPredictor
+                                  disposable = Some(predictor :> IDisposable) }
+                    with
+                    | :? OperationCanceledException ->
+                        return raise (OperationCanceledException context.cancellationToken)
+                    | ex -> return Error $"Unable to initialize Docling Heron layout ONNX model: {ex.Message}"
+                }
+
+    let ppDocLayoutMProvider () =
+        PpDocLayoutMProvider() :> IDoclingLayoutModelProvider
+
+    let heronLayoutProvider () =
+        HeronLayoutProvider() :> IDoclingLayoutModelProvider
+
+    let tryBuiltInLayoutProvider id =
+        match (defaultArg (Option.ofObj id) "").Trim().ToLowerInvariant() with
+        | ""
+        | "pp"
+        | "pp-doclayout"
+        | "pp-doclayout-m"
+        | "pp-doclayout-m-onnx" -> Some(ppDocLayoutMProvider ())
+        | "heron"
+        | "docling-heron"
+        | "docling-layout-heron" -> Some(heronLayoutProvider ())
+        | _ -> None
+
+    let private createLayoutPredictor options report storageRoot cancellationToken =
+        let provider =
+            options.layoutModelProvider |> Option.defaultWith ppDocLayoutMProvider
+
+        let context =
+            { storageRoot = storageRoot
+              report = report
+              cancellationToken = cancellationToken }
+
+        async {
+            report $"Docling hybrid using {provider.DisplayName} layout model."
+            return! provider.CreateAsync context
         }
 
     let private loadFigureClassifier options storageRoot =
@@ -771,6 +1013,7 @@ module DoclingHybrid =
             CancellationToken.None
 
     let private convertNativeTextOnly
+        announce
         report
         chunkOptions
         passageSource
@@ -827,8 +1070,9 @@ module DoclingHybrid =
         if List.isEmpty textItems then
             Error $"Docling hybrid native-text conversion found no readable text in {Path.GetFileName path}."
         else
-            report
-                $"Docling hybrid using fast native-text conversion for {Path.GetFileName path}; skipping layout ONNX."
+            if announce then
+                report
+                    $"Docling hybrid using fast native-text conversion for {Path.GetFileName path}; skipping layout ONNX."
 
             { name = documentName
               originFileName = Some(Path.GetFileName path)
@@ -842,6 +1086,30 @@ module DoclingHybrid =
             |> DoclingPassages.toPassages chunkOptions passageSource
             |> Ok
 
+    let private passageTextLength (passages: PassageRef list) =
+        passages
+        |> List.sumBy (fun passage ->
+            if isNull passage.text then
+                0L
+            else
+                int64 passage.text.Length)
+
+    let private layoutFallbackReason (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
+        let layoutChars = passageTextLength layoutPassages
+        let nativeChars = passageTextLength nativePassages
+
+        if layoutPassages.Length <= 1 then
+            Some $"Docling hybrid layout conversion produced only {layoutPassages.Length} passage(s)"
+        elif
+            nativePassages.Length > layoutPassages.Length
+            && nativeChars >= 2000L
+            && layoutChars * 4L < nativeChars * 3L
+        then
+            Some
+                $"Docling hybrid layout conversion looked incomplete ({layoutPassages.Length} passage(s), {layoutChars} chars vs {nativeChars} native chars)"
+        else
+            None
+
     let private keepLayoutUnlessCollapsed
         report
         chunkOptions
@@ -852,22 +1120,32 @@ module DoclingHybrid =
         =
         match layoutResult with
         | Error err -> Error err
-        | Ok layoutPassages when layoutPassages.Length > 1 -> Ok layoutPassages
         | Ok layoutPassages ->
             let fileName = Path.GetFileName path
 
-            report
-                $"Docling hybrid layout conversion produced only {layoutPassages.Length} passage(s) for {fileName}; checking native-text conversion."
+            match convertNativeTextOnly false report chunkOptions passageSource path pageInputs with
+            | Ok nativePassages ->
+                match layoutFallbackReason layoutPassages nativePassages with
+                | None -> Ok layoutPassages
+                | Some reason ->
+                    report $"{reason} for {fileName}; checking native-text conversion."
 
-            match convertNativeTextOnly report chunkOptions passageSource path pageInputs with
-            | Ok nativePassages when nativePassages.Length > layoutPassages.Length ->
-                report
-                    $"Using Docling native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s)."
+                    if
+                        nativePassages.Length > layoutPassages.Length
+                        || passageTextLength nativePassages > passageTextLength layoutPassages
+                    then
+                        report
+                            $"Using Docling native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
-                Ok nativePassages
-            | Ok _ -> Ok layoutPassages
+                        Ok nativePassages
+                    else
+                        report
+                            $"Keeping Docling layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
+
+                        Ok layoutPassages
             | Error nativeError ->
-                report $"Docling native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
+                if layoutPassages.Length <= 1 then
+                    report $"Docling native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
 
                 Ok layoutPassages
 
@@ -917,7 +1195,7 @@ module DoclingHybrid =
                     return keepLayoutUnlessCollapsed report chunkOptions passageSource path pageInputs layoutResult
                 else
                     throwIfCanceled cancellationToken
-                    return convertNativeTextOnly report chunkOptions passageSource path pageInputs
+                    return convertNativeTextOnly true report chunkOptions passageSource path pageInputs
         }
 
     let readPdfPassagesWithProviders
@@ -994,7 +1272,7 @@ module DoclingHybrid =
 
                         if options.enableLayoutAnalysis then
                             let! layout =
-                                loadLayoutPredictor report storageRoot
+                                createLayoutPredictor options report storageRoot cancellationToken
                                 |> timed report "Docling hybrid preparing layout ONNX model"
                                 |> withTimeout
                                     60000
@@ -1002,7 +1280,7 @@ module DoclingHybrid =
 
                             match layout with
                             | Error err -> return Error err
-                            | Ok(layoutPredictor, layoutDisposable) ->
+                            | Ok layout ->
                                 throwIfCanceled cancellationToken
 
                                 try
@@ -1025,7 +1303,7 @@ module DoclingHybrid =
                                                     chunkOptions
                                                     passageSource
                                                     path
-                                                    layoutPredictor
+                                                    layout.predictor
                                                     figureClassifier
                                                     pageInputs
                                                     cancellationToken
@@ -1041,10 +1319,10 @@ module DoclingHybrid =
                                         finally
                                             figureDisposable |> Option.iter (fun disposable -> disposable.Dispose())
                                 finally
-                                    layoutDisposable.Dispose()
+                                    layout.disposable |> Option.iter (fun disposable -> disposable.Dispose())
                         else
                             throwIfCanceled cancellationToken
-                            return convertNativeTextOnly report chunkOptions passageSource path pageInputs
+                            return convertNativeTextOnly true report chunkOptions passageSource path pageInputs
                 finally
                     disposableOcr |> Option.iter (fun disposable -> disposable.Dispose())
         }
@@ -1105,7 +1383,8 @@ module DoclingHybrid =
                             $"Docling hybrid PDF parser failed: {hybridError}{Environment.NewLine}Legacy PdfPig parser also failed: {legacyError}"
         }
 
-    let readPdfPassagesWithFallback
+    let readPdfPassagesWithOptionsWithFallback
+        options
         storageRoot
         report
         chunkOptions
@@ -1117,7 +1396,7 @@ module DoclingHybrid =
             let hybrid =
                 async {
                     try
-                        return! readPdfPassages activeDefaults report storageRoot chunkOptions passageSource path
+                        return! readPdfPassages options report storageRoot chunkOptions passageSource path
                     with ex ->
                         return Error $"Docling hybrid PDF parser could not start: {ex.Message}"
                 }
@@ -1125,7 +1404,25 @@ module DoclingHybrid =
             return! fallbackToLegacy report path hybrid legacyReader
         }
 
-    let readPdfPassagesWithFallbackAndCancellation
+    let readPdfPassagesWithFallback
+        storageRoot
+        report
+        chunkOptions
+        passageSource
+        path
+        (legacyReader: unit -> Async<Result<PassageRef list, string>>)
+        =
+        readPdfPassagesWithOptionsWithFallback
+            activeDefaults
+            storageRoot
+            report
+            chunkOptions
+            passageSource
+            path
+            legacyReader
+
+    let readPdfPassagesWithOptionsWithFallbackAndCancellation
+        options
         storageRoot
         report
         chunkOptions
@@ -1142,7 +1439,7 @@ module DoclingHybrid =
                     try
                         return!
                             readPdfPassagesWithCancellation
-                                activeDefaults
+                                options
                                 report
                                 storageRoot
                                 chunkOptions
@@ -1157,3 +1454,22 @@ module DoclingHybrid =
             throwIfCanceled cancellationToken
             return! fallbackToLegacy report path hybrid legacyReader
         }
+
+    let readPdfPassagesWithFallbackAndCancellation
+        storageRoot
+        report
+        chunkOptions
+        passageSource
+        path
+        (legacyReader: unit -> Async<Result<PassageRef list, string>>)
+        (cancellationToken: CancellationToken)
+        =
+        readPdfPassagesWithOptionsWithFallbackAndCancellation
+            activeDefaults
+            storageRoot
+            report
+            chunkOptions
+            passageSource
+            path
+            legacyReader
+            cancellationToken
