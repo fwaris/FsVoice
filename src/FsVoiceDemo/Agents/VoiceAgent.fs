@@ -283,7 +283,12 @@ After QUERY_ORACLE returns:
         |> FsVoiceDemo.Text.normalizeWhitespace
 
     let private oracleToolOutput (_snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
-        candidate.answer |> speechFriendlyMarkdown
+        let answer = candidate.answer |> speechFriendlyMarkdown
+
+        if String.IsNullOrWhiteSpace answer then
+            "Unfortunately, I received an empty answer. Please try again."
+        else
+            answer
 
     let private makeTranscriptSnapshot st itemId text isFinal =
         let revision = st.revision + 1
@@ -517,6 +522,16 @@ After QUERY_ORACLE returns:
 
     let private handleToolOutputReady (st: VoiceState) callId output =
         let st = removePendingToolCall callId st
+        let outputWasBlank = String.IsNullOrWhiteSpace output
+
+        let output =
+            if outputWasBlank then
+                "The oracle returned an empty answer. Please try again."
+            else
+                output
+
+        if outputWasBlank then
+            st.bus.PostToAgent(Ag_Log $"Oracle tool output was blank for call {callId}; using fallback text.")
 
         if String.IsNullOrWhiteSpace output then
             st

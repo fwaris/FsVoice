@@ -169,6 +169,29 @@ type QaSession(options: QaSessionOptions) =
     let roleMaxTokens role fallback =
         (modelConfig role).maxOutputTokens |> Option.defaultValue fallback
 
+    let emptyAnswerFallback =
+        "I could not produce an answer from the selected context. Please try again."
+
+    let nullableValue (value: Nullable<'T>) =
+        if value.HasValue then string value.Value else "n/a"
+
+    let responseDiagnostics (response: ChatResponse) =
+        let finishReason = response.FinishReason |> nullableValue
+
+        let usage =
+            if isNull response.Usage then
+                "usage=n/a"
+            else
+                $"usage=input:{nullableValue response.Usage.InputTokenCount} output:{nullableValue response.Usage.OutputTokenCount} reasoning:{nullableValue response.Usage.ReasoningTokenCount} total:{nullableValue response.Usage.TotalTokenCount}"
+
+        let messageCount =
+            if isNull response.Messages then
+                0
+            else
+                response.Messages.Count
+
+        $"finish={finishReason}; {usage}; messages={messageCount}"
+
     let renderTemplate replacements (template: string) =
         replacements
         |> List.fold (fun (text: string) (name, value) -> text.Replace("{{" + name + "}}", value)) template
@@ -541,28 +564,54 @@ type QaSession(options: QaSessionOptions) =
             match options.clients.answerGenerator with
             | None -> return "No answer model is configured for this QA session."
             | Some client ->
-                let opts = ChatOptions()
-
                 let answerConfig = modelConfig Answer
 
-                if ModelCapabilities.supportsTemperature options.answerModelId then
-                    opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
+                let prompt = answerPrompt snapshot decision memoryHits chunks observations
 
-                opts.MaxOutputTokens <- Nullable(roleMaxTokens Answer 300)
+                let answerAttempt maxOutputTokens =
+                    async {
+                        let opts = ChatOptions()
 
-                let! response =
-                    client.GetResponseAsync(
-                        answerPrompt snapshot decision memoryHits chunks observations,
-                        opts,
-                        cancellationToken
-                    )
-                    |> Async.AwaitTask
+                        if ModelCapabilities.supportsTemperature answerConfig.modelId then
+                            opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
 
-                return response.Text |> Text.normalizeWhitespace
+                        opts.MaxOutputTokens <- Nullable(maxOutputTokens)
+
+                        let! response = client.GetResponseAsync(prompt, opts, cancellationToken) |> Async.AwaitTask
+
+                        return response, response.Text |> Text.normalizeWhitespace
+                    }
+
+                let maxOutputTokens = roleMaxTokens Answer 900
+                let! response, answer = answerAttempt maxOutputTokens
+
+                if not (String.IsNullOrWhiteSpace answer) then
+                    return answer
+                else
+                    report
+                        $"Answer model returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics response}."
+
+                    let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
+                    let! retryResponse, retryAnswer = answerAttempt retryMaxOutputTokens
+
+                    if not (String.IsNullOrWhiteSpace retryAnswer) then
+                        report
+                            $"Answer model retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responseDiagnostics retryResponse}."
+
+                        return retryAnswer
+                    else
+                        report
+                            $"Answer model retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+
+                        return emptyAnswerFallback
         }
 
     let applyWriteback (snapshot: TranscriptSnapshot) (answer: string) =
-        if options.autoWriteback then
+        if
+            options.autoWriteback
+            && not (String.IsNullOrWhiteSpace answer)
+            && answer <> emptyAnswerFallback
+        then
             let proposals = memoryService.ProposalsFromExchange(snapshot, answer)
             let updates, logs = memoryService.CommitProposals proposals
 

@@ -142,6 +142,32 @@ type RecordingChatClient(responseText: string) =
         member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type SequencedChatClient(responseTexts: string list) =
+    let mutable calls: Nullable<int> list = []
+
+    member _.Calls = calls
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            let maxOutputTokens =
+                if isNull options then
+                    Nullable<int>()
+                else
+                    options.MaxOutputTokens
+
+            calls <- calls @ [ maxOutputTokens ]
+
+            let responseText =
+                responseTexts |> List.tryItem (calls.Length - 1) |> Option.defaultValue ""
+
+            ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type FakeQaToolHost() =
     interface IQaToolHost with
         member _.Report _ = ()
@@ -435,6 +461,50 @@ let ``qa session applies custom prompts and answer role options`` () =
         Assert.Equal("CUSTOM SYSTEM", recorder.Messages[0].Text)
         Assert.Contains("Q=What does the fake context say?", recorder.Messages[1].Text)
         Assert.Contains("Fake context for What does the fake context say?", recorder.Messages[1].Text)
+    }
+
+[<Fact>]
+let ``qa session retries empty answer response with larger output budget`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake"
+              enabled = true }
+
+        let client = new SequencedChatClient([ ""; "retry answer" ])
+        let logs = ResizeArray<string>()
+
+        let answerConfig =
+            { ModelRoleConfig.create "gpt-5.5" with
+                maxOutputTokens = Some 50 }
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some client }
+                answerModelId = answerConfig.modelId
+                modelRoles = UseCaseDefinition.defaultModels |> Map.add Answer answerConfig
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("retry answer", answer.answer)
+        Assert.Equal(2, client.Calls.Length)
+        Assert.Equal(50, client.Calls.Head.Value)
+        Assert.True(client.Calls[1].Value >= 1200)
+        Assert.Contains(logs, fun log -> log.Contains("Answer model returned empty text"))
+        Assert.Contains(logs, fun log -> log.Contains("Answer model retry succeeded"))
     }
 
 [<Fact>]
