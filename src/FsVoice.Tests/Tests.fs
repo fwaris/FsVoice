@@ -1467,6 +1467,35 @@ let ``rank promotes exact section target over lexical distractors`` () =
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``rank promotes inline section label over checklist mentions`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/paper.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 1
+                        text =
+                          "The NeurIPS checklist asks whether claims made in the abstract and introduction reflect the paper. The paper abstract should summarize contributions."
+                        score = 0.0f }
+                      { source = source
+                        index = 2
+                        text =
+                          "Abstract While LLM agents can use external tools, they require adaptive memory systems to leverage historical experiences."
+                        score = 0.0f } ] }
+
+        let! chunks = KnowledgeSources.rank None false false true ignore "summarize the paper abstract" 1 retrieval
+
+        Assert.Equal(2, chunks.Head.index)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``rank corrects misspelled section target before searching`` () =
     async {
         let source =

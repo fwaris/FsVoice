@@ -539,17 +539,42 @@ module KnowledgeSources =
             |> distinctChunks
             |> List.truncate maxResults
 
+    let private startsWithTerms (requestedTerms: string list) (candidateTerms: string list) =
+        not (List.isEmpty requestedTerms)
+        && (candidateTerms |> List.truncate requestedTerms.Length) = requestedTerms
+
+    let private leadingTerms (text: string) =
+        text |> Text.normalizeWhitespace |> Text.terms |> List.truncate 8
+
+    let private sectionAnchorBoost requested text =
+        match FsColbert.DocumentSections.tryGetHeading text with
+        | Some heading when FsColbert.DocumentSections.matches requested heading -> 1.0f
+        | _ ->
+            let requestedTerms = Text.terms requested
+
+            let candidateTerms =
+                match leadingTerms text with
+                | "section" :: rest -> rest
+                | terms -> terms
+
+            if startsWithTerms requestedTerms candidateTerms then
+                0.85f
+            else
+                0.0f
+
     let private applySectionBoost sectionName (chunks: SourceChunk list) =
         match sectionName with
         | None -> chunks
         | Some requested ->
             chunks
             |> List.map (fun chunk ->
-                match FsColbert.DocumentSections.tryGetHeading chunk.text with
-                | Some heading when FsColbert.DocumentSections.matches requested heading ->
+                let boost = sectionAnchorBoost requested chunk.text
+
+                if boost > 0.0f then
                     { chunk with
-                        score = chunk.score + 1.0f }
-                | _ -> chunk)
+                        score = chunk.score + boost }
+                else
+                    chunk)
             |> List.sortByDescending (fun chunk -> chunk.score)
 
     let private sectionHeadings (retrieval: RetrievalIndex) =
@@ -593,7 +618,13 @@ module KnowledgeSources =
           "the"
           "what"
           "would"
-          "you" ]
+          "you"
+          "paper"
+          "document"
+          "pdf"
+          "article"
+          "source"
+          "file" ]
         |> Set.ofList
 
     let private distinctNonEmpty (values: string seq) =
@@ -610,11 +641,21 @@ module KnowledgeSources =
         |> Seq.truncate 12
         |> Seq.toList
 
+    let private retrievalTerms (values: string seq) =
+        values
+        |> Seq.filter (fun term ->
+            let key = term.Trim().ToLowerInvariant()
+            not (retrievalActionTerms.Contains key))
+        |> distinctNonEmpty
+
     let private cleanupRetrievalTarget (target: string) =
         let withoutSourceTail =
             Regex.Replace(target, @"(?i)\b(?:from|in|of)\s+(?:the\s+)?(?:paper|document|pdf|article|source)\b.*$", "")
 
-        Regex.Replace(withoutSourceTail, @"[?.!,;:\s]+$", "").Trim()
+        let withoutSourceHead =
+            Regex.Replace(withoutSourceTail, @"(?i)^\s*(?:the\s+)?(?:paper|document|pdf|article|source|file)\s+", "")
+
+        Regex.Replace(withoutSourceHead, @"[?.!,;:\s]+$", "").Trim()
 
     let private tryExtractRetrievalTarget (query: string) =
         let patterns =
@@ -656,10 +697,7 @@ module KnowledgeSources =
                 | None -> compactTerms [ query ]
 
             Some
-                { terms =
-                    Seq.append processed.searchTerms baseTerms
-                    |> distinctNonEmpty
-                    |> List.truncate 32
+                { terms = Seq.append processed.searchTerms baseTerms |> retrievalTerms |> List.truncate 32
                   rewrittenQueries = distinctNonEmpty rewrittenQueries
                   sectionName = target
                   queryType = queryType }
@@ -782,7 +820,7 @@ Query: {query}
     let private getSearchWeights =
         function
         | QueryType.Question -> 1.0f, 0.1f
-        | QueryType.SectionRetrieval -> 0.65f, 1.0f
+        | QueryType.SectionRetrieval -> 1.0f, 0.35f
         | _ -> 1.0f, 1.0f
 
     let rankWithProfile
@@ -823,7 +861,7 @@ Query: {query}
                       | Some sectionName -> yield sectionName
                       | None -> () ])
                 |> Option.defaultValue []
-                |> distinctNonEmpty
+                |> retrievalTerms
 
             let queryType =
                 expansion
