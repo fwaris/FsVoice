@@ -13,8 +13,8 @@ module ViewControls =
             .font(size = 29., fontFamily = C.FONT_SYMBOLS)
             .background(Colors.Transparent)
             .textColor(Colors.Magenta)
-            .width(44.)
-            .height(44.)
+            .width(52.)
+            .height(52.)
             .padding (0.)
 
     let compactIconButton icon (msg: Msg) =

@@ -25,6 +25,24 @@ module KnowledgeSources =
           colbertIndices: (KnowledgeSource * FsColbert.ColbertIndex) list
           encoder: FsColbert.OnnxColbertEncoder option }
 
+    type IndexPreviewVectorSummary =
+        { tokenCount: int
+          embeddingDim: int
+          valueSample: float32 list }
+
+    type IndexPreviewRecord =
+        { index: int
+          text: string
+          keywords: string list
+          terms: string list
+          vector: IndexPreviewVectorSummary }
+
+    type IndexPreview =
+        { source: KnowledgeSource
+          totalChunks: int
+          sampledCount: int
+          records: IndexPreviewRecord list }
+
     let emptyIndex =
         { sources = []
           chunks = []
@@ -52,8 +70,8 @@ module KnowledgeSources =
           parallelism: int
           maxOutputTokens: int
           cancellationToken: CancellationToken option
-          useCaseProfile: QaUseCaseProfile
-          useCaseFingerprint: string }
+          plugInProfile: QaPlugInProfile
+          plugInFingerprint: string }
 
     module KeywordGenerationOptions =
         let defaults =
@@ -65,8 +83,8 @@ module KnowledgeSources =
               parallelism = DEFAULT_KEYWORD_METADATA_PARALLELISM
               maxOutputTokens = 25000
               cancellationToken = None
-              useCaseProfile = QaUseCaseProfile.generic
-              useCaseFingerprint = "" }
+              plugInProfile = QaPlugInProfile.generic
+              plugInFingerprint = "" }
 
         let disabled = { defaults with enabled = false }
 
@@ -703,7 +721,7 @@ module KnowledgeSources =
                   queryType = queryType }
 
     let private createLocalExpansion query =
-        createLocalExpansionWithProfile QaUseCaseProfile.generic query
+        createLocalExpansionWithProfile QaPlugInProfile.generic query
 
     let private mergeExpansions localExpansion remoteExpansion =
         match localExpansion, remoteExpansion with
@@ -752,7 +770,7 @@ module KnowledgeSources =
                 sectionName = Some canonicalSection }
 
     let getSynonymsWithProfile
-        (profile: QaUseCaseProfile)
+        (profile: QaPlugInProfile)
         (client: IChatClient)
         (report: (string -> unit) option)
         query
@@ -762,10 +780,10 @@ module KnowledgeSources =
                 return None
             else
                 try
-                    let profile = QaUseCaseProfile.sanitize profile
+                    let profile = QaPlugInProfile.sanitize profile
 
                     let profileHints =
-                        let hints = QaUseCaseProfile.renderHints profile
+                        let hints = QaPlugInProfile.renderHints profile
 
                         seq {
                             yield $"Use case: {profile.displayName} ({profile.id})."
@@ -815,7 +833,7 @@ Query: {query}
         }
 
     let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
-        getSynonymsWithProfile QaUseCaseProfile.generic client report query
+        getSynonymsWithProfile QaPlugInProfile.generic client report query
 
     let private getSearchWeights =
         function
@@ -824,7 +842,7 @@ Query: {query}
         | _ -> 1.0f, 1.0f
 
     let rankWithProfile
-        (profile: QaUseCaseProfile)
+        (profile: QaPlugInProfile)
         (queryExpansionClient: IChatClient option)
         (logExpansions: bool)
         (logChunks: bool)
@@ -943,7 +961,7 @@ Query: {query}
         (retrieval: RetrievalIndex)
         : Async<SourceChunk list> =
         rankWithProfile
-            QaUseCaseProfile.generic
+            QaPlugInProfile.generic
             queryExpansionClient
             logExpansions
             logChunks
@@ -1060,10 +1078,10 @@ Query: {query}
             [ yield sourceFingerprint
               yield options.modelId
               yield options.schemaVersion
-              yield QaUseCaseProfile.fingerprint options.useCaseProfile
+              yield QaPlugInProfile.fingerprint options.plugInProfile
 
-              if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
-                  yield options.useCaseFingerprint ]
+              if not (String.IsNullOrWhiteSpace options.plugInFingerprint) then
+                  yield options.plugInFingerprint ]
             |> String.concat "\n"
             |> hashText
 
@@ -1083,8 +1101,8 @@ Query: {query}
                 |> Text.notEmpty
                 |> Option.defaultValue KeywordGenerationOptions.defaults.schemaVersion
             cancellationToken = options.cancellationToken
-            useCaseProfile = QaUseCaseProfile.sanitize options.useCaseProfile
-            useCaseFingerprint = options.useCaseFingerprint |> Text.notEmpty |> Option.defaultValue "" }
+            plugInProfile = QaPlugInProfile.sanitize options.plugInProfile
+            plugInFingerprint = options.plugInFingerprint |> Text.notEmpty |> Option.defaultValue "" }
 
     let private keywordCacheKey sourceFingerprint (options: KeywordGenerationOptions) passageIndex textHash =
         [ yield sourceFingerprint
@@ -1092,10 +1110,10 @@ Query: {query}
           yield textHash
           yield options.modelId
           yield options.schemaVersion
-          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+          yield QaPlugInProfile.fingerprint options.plugInProfile
 
-          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
-              yield options.useCaseFingerprint ]
+          if not (String.IsNullOrWhiteSpace options.plugInFingerprint) then
+              yield options.plugInFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -1161,7 +1179,7 @@ Query: {query}
 
     let private loadKeywordCache path sourceFingerprint (options: KeywordGenerationOptions) =
         if File.Exists path then
-            let profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
+            let profileFingerprint = QaPlugInProfile.fingerprint options.plugInProfile
 
             File.ReadLines path
             |> Seq.choose tryReadKeywordCacheRecord
@@ -1213,7 +1231,7 @@ Query: {query}
                    text = promptPassageText passage.text |})
             |> fun items -> JsonSerializer.Serialize items
 
-        let profile = QaUseCaseProfile.sanitize options.useCaseProfile
+        let profile = QaPlugInProfile.sanitize options.plugInProfile
 
         let profileText =
             seq {
@@ -1223,13 +1241,13 @@ Query: {query}
                 | Some description -> yield $"Description: {description}"
                 | None -> ()
 
-                let hints = QaUseCaseProfile.renderHints profile
+                let hints = QaPlugInProfile.renderHints profile
 
                 if not (String.IsNullOrWhiteSpace hints) then
                     yield $"Domain hints: {hints}"
 
                 match profile.keywordInstruction with
-                | Some instruction -> yield $"Use-case keyword guidance: {instruction}"
+                | Some instruction -> yield $"PlugIn keyword guidance: {instruction}"
                 | None -> ()
             }
             |> String.concat "\n"
@@ -1480,10 +1498,10 @@ Passages:
         [ yield "keywords=enabled"
           yield $"keywordModel={options.modelId}"
           yield $"keywordSchema={options.schemaVersion}"
-          yield $"useCaseProfile={options.useCaseProfile.id}"
-          yield $"useCaseProfileHash={QaUseCaseProfile.fingerprint options.useCaseProfile}"
-          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
-              yield $"useCaseDefinitionHash={options.useCaseFingerprint}"
+          yield $"plugInProfile={options.plugInProfile.id}"
+          yield $"plugInProfileHash={QaPlugInProfile.fingerprint options.plugInProfile}"
+          if not (String.IsNullOrWhiteSpace options.plugInFingerprint) then
+              yield $"plugInDefinitionHash={options.plugInFingerprint}"
           yield $"keywordMetadataHash={hashText metadata}"
           yield $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
           yield $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
@@ -1514,7 +1532,7 @@ Passages:
                 return passages, disabledKeywordFingerprint
             else
                 let sourceFingerprintValue = sourceFingerprint source
-                let profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
+                let profileFingerprint = QaPlugInProfile.fingerprint options.plugInProfile
 
                 let cachePath = keywordCachePath storageRoot sourceFingerprintValue options
 
@@ -1932,6 +1950,65 @@ Passages:
         | Ok(Some index) -> Ok(Some index)
         | Error err -> Error err
         | Ok None -> tryLoadLegacyPrebuiltIndex storageRoot source
+
+    let private vectorValueSample maxValues (embedding: FsColbert.MultiVector) =
+        embedding.vectors |> Array.truncate maxValues |> Array.toList
+
+    let private toIndexPreviewRecord (passage: FsColbert.IndexedPassage) =
+        { index = passage.reference.index
+          text = passage.reference.text
+          keywords = passage.reference.keywords |> Option.ofObj |> Option.defaultValue []
+          terms = passage.terms |> Set.toList |> List.sort
+          vector =
+            { tokenCount = passage.embedding.tokenCount
+              embeddingDim = passage.embedding.embeddingDim
+              valueSample = vectorValueSample 8 passage.embedding } }
+
+    let private randomSample maxRecords (items: 'T list) =
+        if maxRecords <= 0 then
+            []
+        elif items.Length <= maxRecords then
+            items
+        else
+            let random = Random()
+
+            items |> List.sortBy (fun _ -> random.Next()) |> List.truncate maxRecords
+
+    let createIndexPreview maxRecords source (index: FsColbert.ColbertIndex) =
+        let records =
+            index.passages |> randomSample maxRecords |> List.map toIndexPreviewRecord
+
+        { source = source
+          totalChunks = index.passages.Length
+          sampledCount = records.Length
+          records = records }
+
+    let tryLoadIndexForPreview storageRoot report pdfParsingMode (source: KnowledgeSource) =
+        match tryLoadPrebuiltIndex storageRoot source with
+        | Ok(Some index) ->
+            report $"Loaded prebuilt FsColbert index preview for {source.DisplayName}."
+            Ok index
+        | Error err -> Error err
+        | Ok None ->
+            match tryLoadBestPersistedIndex storageRoot pdfParsingMode source "" with
+            | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches ->
+                report $"Loaded persisted FsColbert index preview for {source.DisplayName}."
+                Ok candidate.index
+            | Ok(Some candidate) ->
+                let metadataDescription =
+                    if candidate.hasMetadata then
+                        "older or different parser metadata"
+                    else
+                        "no parser metadata"
+
+                Error
+                    $"Persisted FsColbert index for {source.DisplayName} has {metadataDescription}; reprocess this source to rebuild with the current {PdfParsingModes.displayName pdfParsingMode} PDF parser quality checks."
+            | Ok None -> Error $"No FsColbert index is available for {source.DisplayName}."
+            | Error err -> Error err
+
+    let loadIndexPreview storageRoot report pdfParsingMode maxRecords source =
+        tryLoadIndexForPreview storageRoot report pdfParsingMode source
+        |> Result.map (createIndexPreview maxRecords source)
 
     let private loadEncoder storageRoot =
         async {

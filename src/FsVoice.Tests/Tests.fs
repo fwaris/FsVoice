@@ -7,11 +7,17 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Threading
+open System.Threading.Channels
 open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.Extensions.AI
 open FSharp.Control
+open FsVoice
+open FsVoice.Core
+open FsVoice.Hosting.AspNetCore
 open FsVoice.QA
+open FsVoice.Testing
+open FsVoice.Types
 
 type MockChatClient() =
     interface IChatClient with
@@ -181,6 +187,65 @@ type FakeQaToolHost() =
         member _.SearchBlackboardAsync(_, _) =
             Task.FromResult("No blackboard context.")
 
+type EchoVoiceTool(pluginId: VoicePluginId) =
+    let toolId =
+        { pluginId = pluginId
+          name = VoiceToolName.create "echo" }
+
+    interface IVoiceTool with
+        member _.Definition =
+            { id = toolId
+              description = "Echoes the input text."
+              parameters =
+                [ { name = "text"
+                    description = "Text to echo."
+                    required = true } ]
+              inputSchema = None
+              timeout = None }
+
+        member _.InvokeAsync(call, _) =
+            task {
+                let text =
+                    match call.arguments.TryGetProperty "text" with
+                    | true, value when value.ValueKind = JsonValueKind.String -> value.GetString()
+                    | _ -> ""
+                    |> Option.ofObj
+                    |> Option.defaultValue ""
+
+                return
+                    Ok
+                        { callId = call.callId
+                          toolId = toolId
+                          content = JsonSerializer.SerializeToElement {| echoed = text |}
+                          metadata = Dictionary<string, string>() :> IReadOnlyDictionary<string, string>
+                          completedAt = DateTimeOffset.UtcNow }
+            }
+
+type FakeVoicePlugin() =
+    let pluginId = VoicePluginId.create "fake"
+
+    interface IVoicePlugin with
+        member _.ContractVersion = 1
+        member _.PluginId = pluginId
+
+        member _.Definition =
+            { id = "fake"
+              version = "0.1.0"
+              displayName = "Fake Plugin"
+              description = None
+              prompts = Map.empty
+              settings = Map.empty }
+
+        member _.GetTools _ =
+            [ EchoVoiceTool(pluginId) :> IVoiceTool ]
+
+        member _.GetAgents _ = []
+
+let private voiceHostContext () : VoicePluginHostContext =
+    { storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+      settings = Map.empty
+      report = ignore }
+
 type FakeContextProvider(source: KnowledgeSource) =
     interface IQaContextProvider with
         member _.ProviderId = "fake.context"
@@ -306,10 +371,10 @@ let private testKeywordCachePath storageRoot sourceFingerprint (options: Knowled
         [ yield sourceFingerprint
           yield options.modelId
           yield options.schemaVersion
-          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+          yield QaPlugInProfile.fingerprint options.plugInProfile
 
-          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
-              yield options.useCaseFingerprint ]
+          if not (String.IsNullOrWhiteSpace options.plugInFingerprint) then
+              yield options.plugInFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -331,10 +396,10 @@ let private seedKeywordCache
           yield textHash
           yield options.modelId
           yield options.schemaVersion
-          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+          yield QaPlugInProfile.fingerprint options.plugInProfile
 
-          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
-              yield options.useCaseFingerprint ]
+          if not (String.IsNullOrWhiteSpace options.plugInFingerprint) then
+              yield options.plugInFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -348,7 +413,7 @@ let private seedKeywordCache
                textHash = textHash
                modelId = options.modelId
                schemaVersion = options.schemaVersion
-               profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
+               profileFingerprint = QaPlugInProfile.fingerprint options.plugInProfile
                keywords = keywords |}
         )
 
@@ -390,6 +455,40 @@ let private prebuiltFolder storageRoot =
     Directory.CreateDirectory folder |> ignore
     folder
 
+let private persistedIndexFolder storageRoot =
+    let folder = Path.Combine(storageRoot, "FsVoice", "FsColbert", "Indexes")
+    Directory.CreateDirectory folder |> ignore
+    folder
+
+[<Fact>]
+let ``picked source files classify supported extensions`` () =
+    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedDocument, FsVoiceDemo.PickedSourceFiles.kind "guide.pdf")
+    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedDocument, FsVoiceDemo.PickedSourceFiles.kind "guide.md")
+    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedIndexBundle, FsVoiceDemo.PickedSourceFiles.kind "bundle.zip")
+    Assert.True(FsVoiceDemo.PickedSourceFiles.isDocument "guide.pdf")
+    Assert.True(FsVoiceDemo.PickedSourceFiles.isDocument "guide.md")
+    Assert.True(FsVoiceDemo.PickedSourceFiles.isIndexBundle "bundle.zip")
+
+[<Fact>]
+let ``picked source files reject unsupported extensions`` () =
+    Assert.Equal(
+        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        FsVoiceDemo.PickedSourceFiles.kind "guide.markdown"
+    )
+
+    Assert.Equal(
+        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        FsVoiceDemo.PickedSourceFiles.kind "notes.txt"
+    )
+
+    Assert.Equal(
+        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        FsVoiceDemo.PickedSourceFiles.kind "index.fsci"
+    )
+
+    Assert.False(FsVoiceDemo.PickedSourceFiles.isDocument "guide.markdown")
+    Assert.False(FsVoiceDemo.PickedSourceFiles.isIndexBundle "index.fsci")
+
 [<Theory>]
 [<InlineData("gpt-5.5")>]
 [<InlineData("gpt-5.5-mini")>]
@@ -404,17 +503,29 @@ let ``model capability keeps temperature for supported models`` modelId =
     Assert.True(ModelCapabilities.supportsTemperature modelId)
 
 [<Fact>]
-let ``generic use case supplies model roles and runtime defaults`` () =
-    let plugin = new GenericQaUseCasePlugin() :> IUseCasePlugin
-    let definition = plugin.Definition |> UseCaseDefinition.sanitize
+let ``generic PlugIn supplies model roles and runtime defaults`` () =
+    let plugin = new GenericQaPlugIn() :> IQaPlugIn
+    let definition = plugin.Definition |> PlugInDefinition.sanitize
 
-    Assert.Equal(UseCaseDefinition.currentContractVersion, plugin.ContractVersion)
+    Assert.Equal(PlugInDefinition.currentContractVersion, plugin.ContractVersion)
     Assert.Equal("generic", definition.id)
-    Assert.Equal("gpt-realtime-2", (UseCaseDefinition.model Realtime definition).modelId)
-    Assert.Equal("gpt-5.5", (UseCaseDefinition.model Answer definition).modelId)
-    Assert.Equal("gpt-5-nano", (UseCaseDefinition.model Keyword definition).modelId)
+    Assert.Equal("gpt-realtime-2", (PlugInDefinition.model Realtime definition).modelId)
+    Assert.Equal("gpt-5.5", (PlugInDefinition.model Answer definition).modelId)
+    Assert.Equal("gpt-5-nano", (PlugInDefinition.model Keyword definition).modelId)
     Assert.True(definition.runtime.enableToolPlanner)
     Assert.False(definition.runtime.enableQueryExpansion)
+
+[<Fact>]
+let ``default realtime prompt is source first for document requests`` () =
+    let instructions = DefaultPlugInPrompts.realtimeInstructions
+
+    Assert.Contains("selected sources", instructions)
+    Assert.Contains("source-like requests", instructions)
+    Assert.Contains("abstract", instructions)
+    Assert.Contains("section", instructions)
+    Assert.Contains("summarize the abstract of the paper", instructions)
+    Assert.Contains("QUERY_ORACLE", instructions)
+    Assert.Contains("needs_external_context = true", instructions)
 
 [<Fact>]
 let ``qa session applies custom prompts and answer role options`` () =
@@ -439,7 +550,7 @@ let ``qa session applies custom prompts and answer role options`` () =
                     { QaModelClients.none with
                         answerGenerator = Some recorder }
                 answerModelId = answerConfig.modelId
-                modelRoles = UseCaseDefinition.defaultModels |> Map.add Answer answerConfig
+                modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 prompts =
                     { PromptSet.empty with
                         answerSystem = Some "CUSTOM SYSTEM"
@@ -486,7 +597,7 @@ let ``qa session retries empty answer response with larger output budget`` () =
                     { QaModelClients.none with
                         answerGenerator = Some client }
                 answerModelId = answerConfig.modelId
-                modelRoles = UseCaseDefinition.defaultModels |> Map.add Answer answerConfig
+                modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 report = fun msg -> logs.Add msg }
 
         use session = new QaSession(options)
@@ -536,9 +647,9 @@ let ``getSynonyms handles empty query`` () =
     |> Async.RunSynchronously
 
 [<Fact>]
-let ``query post-processing keeps domain expansion in supplied use-case profile`` () =
+let ``query post-processing keeps domain expansion in supplied plug-in profile`` () =
     let profile =
-        { QaUseCaseProfile.generic with
+        { QaPlugInProfile.generic with
             id = "test-domain"
             displayName = "Test Domain"
             voiceReplacements =
@@ -1212,6 +1323,118 @@ let ``bundle manifest mismatch reports compatibility reason`` () =
     | Error err -> Assert.Contains("model_id", err)
 
 [<Fact>]
+let ``index preview loads persisted index keywords terms and vector summary`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let indexPath = Path.Combine(persistedIndexFolder storageRoot, "preview.fsci")
+
+    { (fakeIndexedPassage source 0 "Policy waiting period text." [ "orthodontia" ]) with
+        terms = Set.ofList [ "period"; "waiting" ] }
+    |> List.singleton
+    |> fakeColbertIndex
+    |> FsColbert.IndexPersistence.save indexPath
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        let record = preview.records.Head
+
+        Assert.Equal(1, preview.totalChunks)
+        Assert.Equal(1, preview.sampledCount)
+        Assert.Equal<string list>([ "orthodontia" ], record.keywords)
+        Assert.Equal<string list>([ "period"; "waiting" ], record.terms)
+        Assert.Equal(1, record.vector.tokenCount)
+        Assert.True(record.vector.embeddingDim > 0)
+        Assert.Equal(1.0f, record.vector.valueSample.Head)
+
+[<Fact>]
+let ``index preview loads bundled prebuilt index`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-bundle.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview bundle markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "preview-bundle.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Bundled waiting period text." [ "bundle keyword" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    FsColbert.IndexBundle.create
+        "preview-bundle"
+        "1.0.0"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ { sourceId = sourcePath
+            sourceDisplayName = "Preview Bundle"
+            sourceLocation = Some sourcePath
+            sourceKind = Some "markdown"
+            indexFile = "preview-bundle.fsci" } ]
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(folder, "index-bundle.json"))
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(1, preview.records.Length)
+        Assert.Equal<string list>([ "bundle keyword" ], preview.records.Head.keywords)
+
+[<Fact>]
+let ``index preview returns at most requested random records`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-limit.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview limit markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let indexPath = Path.Combine(persistedIndexFolder storageRoot, "preview-limit.fsci")
+
+    [ 0..24 ]
+    |> List.map (fun index -> fakeIndexedPassage source index $"Passage {index}." [])
+    |> fakeColbertIndex
+    |> FsColbert.IndexPersistence.save indexPath
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(25, preview.totalChunks)
+        Assert.Equal(20, preview.records.Length)
+        Assert.True(preview.records.Length <= 20)
+
+[<Fact>]
+let ``index preview reports missing index`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "missing-preview.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Missing preview markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Ok _ -> failwith "Expected missing preview index."
+    | Error err -> Assert.Contains("No FsColbert index is available", err)
+
+[<Fact>]
 let ``qa session composes injected context providers`` () =
     task {
         let source =
@@ -1797,3 +2020,492 @@ let ``durable memory forget request retracts related current record`` () =
         store.records
         |> List.exists (fun record -> record.kind = Directive && record.status = Retracted)
     )
+
+[<Fact>]
+let ``voice event bus preserves publish order`` () =
+    let bus = VoiceEventBus()
+    let seen = ResizeArray<string>()
+
+    use _subscription = bus.Subscribe(fun event -> seen.Add event.name)
+
+    let publisher = bus :> IVoiceEventPublisher
+    publisher.Publish(VoiceEvents.create "session.started" (Some "s1") None None)
+    publisher.Publish(VoiceEvents.create "turn.completed" (Some "s1") None None)
+
+    Assert.Equal<string list>([ "session.started"; "turn.completed" ], List.ofSeq seen)
+    Assert.Equal<string list>([ "session.started"; "turn.completed" ], bus.Events |> List.map _.name)
+
+[<Fact>]
+let ``voice tool dispatcher records successful result shape`` () =
+    task {
+        let pluginId = VoicePluginId.create "fake"
+        let dispatcher = VoiceToolDispatcher([ EchoVoiceTool(pluginId) :> IVoiceTool ])
+
+        let call =
+            { callId = "call_1"
+              toolId =
+                { pluginId = pluginId
+                  name = VoiceToolName.create "echo" }
+              arguments = JsonSerializer.SerializeToElement {| text = "hello" |}
+              requestedAt = DateTimeOffset.UtcNow }
+
+        let! result = dispatcher.DispatchAsync(call, CancellationToken.None)
+
+        match result with
+        | ToolSucceeded toolResult ->
+            Assert.Equal("call_1", toolResult.callId)
+            Assert.Equal("hello", toolResult.content.GetProperty("echoed").GetString())
+        | _ -> failwith "Expected tool dispatch to succeed."
+    }
+
+[<Fact>]
+let ``voice runtime publishes session and tool events`` () =
+    task {
+        use transport = new FakeVoiceTransport([])
+        let engine = VoiceRuntimeEngine(FakeVoicePlugin(), voiceHostContext (), transport)
+
+        let pluginId = VoicePluginId.create "fake"
+
+        let call =
+            { callId = "call_2"
+              toolId =
+                { pluginId = pluginId
+                  name = VoiceToolName.create "echo" }
+              arguments = JsonSerializer.SerializeToElement {| text = "runtime" |}
+              requestedAt = DateTimeOffset.UtcNow }
+
+        do! engine.StartAsync CancellationToken.None
+        let! result = engine.DispatchToolAsync(call, CancellationToken.None)
+        do! engine.StopAsync CancellationToken.None
+
+        match result with
+        | ToolSucceeded _ -> ()
+        | _ -> failwith "Expected runtime tool dispatch to succeed."
+
+        let eventNames = engine.Events |> List.map _.name
+
+        Assert.Contains("session.started", eventNames)
+        Assert.Contains("tool.started", eventNames)
+        Assert.Contains("tool.completed", eventNames)
+        Assert.Contains("session.ended", eventNames)
+
+        let observation = Assert.Single engine.Blackboard.toolObservations
+        Assert.Equal("fake.echo", observation.toolName)
+    }
+
+[<Fact>]
+let ``text runtime captures submitted user turn`` () =
+    task {
+        let runtime = VoiceTextRuntime(FakeVoicePlugin(), voiceHostContext ())
+        let! snapshot = runtime.SubmitAsync("what changed?", CancellationToken.None)
+
+        let turn = Assert.Single snapshot.turns
+
+        Assert.Equal("user", turn.role)
+        Assert.Equal("what changed?", turn.text)
+    }
+
+[<Fact>]
+let ``bridge session logs browser and webrtc events`` () =
+    task {
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            { sessionId = sessionId
+              plugin = FakeVoicePlugin()
+              hostContext = voiceHostContext ()
+              runtimeOptions = None }
+
+        use session = new BridgeSession(options)
+        do! session.StartAsync CancellationToken.None
+
+        do!
+            session.AcceptClientEventAsync(
+                { eventId = "browser_1"
+                  kind = BrowserEvent
+                  eventType = "connected"
+                  payload = JsonSerializer.SerializeToElement {| tab = "agent" |} |> Some
+                  receivedAt = DateTimeOffset.UtcNow },
+                CancellationToken.None
+            )
+
+        do!
+            session.AcceptClientEventAsync(
+                { eventId = "webrtc_1"
+                  kind = WebRtcSignal
+                  eventType = "offer"
+                  payload = JsonSerializer.SerializeToElement {| sdp = "fake" |} |> Some
+                  receivedAt = DateTimeOffset.UtcNow },
+                CancellationToken.None
+            )
+
+        let eventTypes = session.SnapshotEvents() |> List.map _.eventType
+
+        Assert.Contains("session.started", eventTypes)
+        Assert.Contains("browser.connected", eventTypes)
+        Assert.Contains("webrtc.offer", eventTypes)
+    }
+
+[<Fact>]
+let ``bridge session forwards realtime server events into runtime event log`` () =
+    task {
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            { sessionId = sessionId
+              plugin = FakeVoicePlugin()
+              hostContext = voiceHostContext ()
+              runtimeOptions = None }
+
+        use session = new BridgeSession(options)
+        do! session.StartAsync CancellationToken.None
+
+        let runTask = session.Engine.RunUntilClosedAsync(CancellationToken.None)
+
+        do!
+            session.AcceptClientEventAsync(
+                { eventId = "server_1"
+                  kind = RealtimeServerEvent
+                  eventType = "speech.started"
+                  payload = None
+                  receivedAt = DateTimeOffset.UtcNow },
+                CancellationToken.None
+            )
+
+        use waitCts = new CancellationTokenSource(TimeSpan.FromSeconds 2.0)
+        let mutable observedSpeech = false
+
+        while not observedSpeech && not waitCts.IsCancellationRequested do
+            let! event = session.WaitForServerEventAsync waitCts.Token
+
+            observedSpeech <-
+                match event with
+                | Some event -> event.eventType = "speech.started"
+                | None -> false
+
+        do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
+
+        try
+            do! runTask
+        with :? OperationCanceledException ->
+            ()
+
+        let eventTypes = session.SnapshotEvents() |> List.map _.eventType
+        Assert.True(observedSpeech)
+        Assert.Contains("speech.started", eventTypes)
+    }
+
+[<Fact>]
+let ``bridge session store creates and removes sessions`` () =
+    task {
+        let store = BridgeSessionStore()
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            { sessionId = sessionId
+              plugin = FakeVoicePlugin()
+              hostContext = voiceHostContext ()
+              runtimeOptions = None }
+
+        let! session = store.CreateAsync(options, CancellationToken.None)
+
+        Assert.Equal(1, store.Count)
+        Assert.True(store.TryGet(session.SessionId).IsSome)
+
+        do! store.RemoveAsync session.SessionId
+
+        Assert.Equal(0, store.Count)
+        Assert.True(store.TryGet(session.SessionId).IsNone)
+    }
+
+type TestToHost =
+    | ShowThing of string
+    | VoiceActivityChanged of bool
+
+type TestFromHost =
+    | ScreenShown of string
+    | ProjectionCompleted of string
+
+type FakeTypedVoiceSession(startMessages: TestToHost list) =
+    let toHost = Channel.CreateUnbounded<TestToHost>()
+    let fromHost = Channel.CreateUnbounded<TestFromHost>()
+    let mutable stopped = false
+
+    member _.FromHost = fromHost.Reader
+    member _.Stopped = stopped
+
+    interface IVoiceSession<TestToHost, TestFromHost> with
+        member _.ToHost = toHost.Reader
+
+        member _.SendFromHostAsync(message, cancellationToken) =
+            fromHost.Writer.WriteAsync(message, cancellationToken).AsTask()
+
+        member _.StartAsync cancellationToken =
+            task {
+                for message in startMessages do
+                    do! toHost.Writer.WriteAsync(message, cancellationToken).AsTask()
+            }
+
+        member _.StopAsync _ =
+            task {
+                stopped <- true
+                toHost.Writer.TryComplete() |> ignore
+                fromHost.Writer.TryComplete() |> ignore
+            }
+
+        member this.DisposeAsync() =
+            task { do! (this :> IVoiceSession<TestToHost, TestFromHost>).StopAsync CancellationToken.None }
+            |> ValueTask
+
+type FakeTypedVoiceOrchestration() =
+    let session =
+        FakeTypedVoiceSession([ ShowThing "claim-123"; VoiceActivityChanged true ])
+
+    member _.Session = session
+
+    interface IVoiceOrchestration<TestToHost, TestFromHost> with
+        member _.Definition =
+            { VoiceOrchestrationDefinition.create "fake.typed" "0.1.0" "Fake Typed Orchestration" with
+                description = Some "A typed orchestration used by tests." }
+
+        member _.CreateSessionAsync(_, _, _) =
+            Task.FromResult(session :> IVoiceSession<TestToHost, TestFromHost>)
+
+let private typedVoiceConnection () =
+    let inbound = Channel.CreateUnbounded<JsonElement>()
+    let outbound = Channel.CreateUnbounded<JsonElement>()
+
+    { VoiceConnection.receiver = inbound.Reader
+      sender = outbound.Writer }
+
+let private typedVoiceContext () : VoiceOrchestrationContext =
+    { storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+      settings = Map.empty
+      report = ignore }
+
+[<Fact>]
+let ``typed voice orchestration emits host messages on start`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration() :> IVoiceOrchestration<_, _>
+
+        let! session =
+            orchestration.CreateSessionAsync(typedVoiceContext (), typedVoiceConnection (), CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+        let! message = session.ToHost.ReadAsync(CancellationToken.None).AsTask()
+
+        Assert.Equal(ShowThing "claim-123", message)
+    }
+
+[<Fact>]
+let ``typed voice session forwards host messages into orchestration`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration()
+
+        let! session =
+            (orchestration :> IVoiceOrchestration<_, _>)
+                .CreateSessionAsync(typedVoiceContext (), typedVoiceConnection (), CancellationToken.None)
+
+        do! session.SendFromHostAsync(ScreenShown "sources", CancellationToken.None)
+        let! message = orchestration.Session.FromHost.ReadAsync(CancellationToken.None).AsTask()
+
+        Assert.Equal(ScreenShown "sources", message)
+    }
+
+[<Fact>]
+let ``typed voice session stops and completes host streams`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration()
+
+        let! session =
+            (orchestration :> IVoiceOrchestration<_, _>)
+                .CreateSessionAsync(typedVoiceContext (), typedVoiceConnection (), CancellationToken.None)
+
+        do! session.StopAsync CancellationToken.None
+
+        Assert.True(orchestration.Session.Stopped)
+
+        let! canRead = session.ToHost.WaitToReadAsync(CancellationToken.None).AsTask()
+        Assert.False canRead
+    }
+
+[<Fact>]
+let ``pure voice orchestration can use unit host messages`` () =
+    task {
+        let toHost = Channel.CreateUnbounded<unit>()
+
+        let session =
+            { new IVoiceSession<unit, unit> with
+                member _.ToHost = toHost.Reader
+
+                member _.SendFromHostAsync(_, _) = Task.CompletedTask
+
+                member _.StartAsync _ = Task.CompletedTask
+
+                member _.StopAsync _ =
+                    toHost.Writer.TryComplete() |> ignore
+                    Task.CompletedTask
+
+                member _.DisposeAsync() =
+                    toHost.Writer.TryComplete() |> ignore
+                    ValueTask() }
+
+        do! session.StartAsync CancellationToken.None
+        do! session.SendFromHostAsync((), CancellationToken.None)
+        do! session.StopAsync CancellationToken.None
+
+        let! canRead = session.ToHost.WaitToReadAsync(CancellationToken.None).AsTask()
+        Assert.False canRead
+    }
+
+[<Fact>]
+let ``FsVoice Types public contract does not reference RTFlow`` () =
+    let assembly = typeof<IVoiceOrchestration<unit, unit>>.Assembly
+    let references = assembly.GetReferencedAssemblies() |> Array.map _.Name
+    let publicApi = assembly.GetExportedTypes() |> Array.map _.FullName
+
+    Assert.DoesNotContain("RTFlow", references)
+
+    Assert.DoesNotContain(
+        publicApi,
+        fun name -> not (isNull name) && name.Contains("RTFlow", StringComparison.OrdinalIgnoreCase)
+    )
+
+let private demoVoiceConnection () =
+    let inbound = Channel.CreateUnbounded<JsonElement>()
+    let outbound = Channel.CreateUnbounded<JsonElement>()
+
+    { VoiceConnection.receiver = inbound.Reader
+      sender = outbound.Writer }
+
+let private demoVoiceContext () : VoiceOrchestrationContext =
+    let storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory storageRoot |> ignore
+
+    { storageRoot = storageRoot
+      settings = Map.empty
+      report = ignore }
+
+let private demoRuntimeSettings values =
+    let settings = FsVoiceDemo.RuntimeSettings.empty ()
+    FsVoiceDemo.RuntimeSettings.replace settings (Map.ofList values)
+    settings
+
+let private demoOrchestration settings =
+    let qaPlugIn = FsVoice.QA.GenericQaPlugIn() :> IQaPlugIn
+
+    let options: FsVoiceDemo.WorkFlow.DemoVoiceOrchestrationOptions =
+        { settings = settings
+          plugIn = PlugInDefinition.generic
+          qaPlugIn = qaPlugIn
+          retrievalMode = FsVoiceDemo.InternalDocumentIndex
+          sources = [] }
+
+    FsVoiceDemo.WorkFlow.DemoVoiceOrchestration(options)
+    :> IVoiceOrchestration<FsVoiceDemo.WorkFlow.ToHost, FsVoiceDemo.WorkFlow.FromHost>
+
+let private readDemoToHostUntil
+    (session: IVoiceSession<FsVoiceDemo.WorkFlow.ToHost, FsVoiceDemo.WorkFlow.FromHost>)
+    (predicate: FsVoiceDemo.WorkFlow.ToHost -> 'T option)
+    =
+    task {
+        use cts = new CancellationTokenSource(TimeSpan.FromSeconds 10.)
+        let mutable result: 'T option = None
+
+        while result.IsNone do
+            let! message = session.ToHost.ReadAsync(cts.Token).AsTask()
+
+            match predicate message with
+            | Some value -> result <- Some value
+            | None -> ()
+
+        return result.Value
+    }
+
+[<Fact>]
+let ``FsVoiceDemo orchestration has no UI or RTOpenAI Api references`` () =
+    let references =
+        typeof<FsVoiceDemo.WorkFlow.DemoVoiceOrchestration>.Assembly.GetReferencedAssemblies()
+        |> Array.map _.Name
+        |> Set.ofArray
+
+    Assert.DoesNotContain("Fabulous", references)
+    Assert.DoesNotContain("Microsoft.Maui", references)
+    Assert.DoesNotContain("RTOpenAI.Api", references)
+
+[<Fact>]
+let ``demo orchestration start requests realtime connection`` () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+
+        let! session =
+            orchestration.CreateSessionAsync(demoVoiceContext (), demoVoiceConnection (), CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        let! requested =
+            readDemoToHostUntil session (function
+                | FsVoiceDemo.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | _ -> None)
+
+        Assert.True(requested.model |> Option.exists (String.IsNullOrWhiteSpace >> not))
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration accepts source changes from host`` () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+
+        let! session =
+            orchestration.CreateSessionAsync(demoVoiceContext (), demoVoiceConnection (), CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        do!
+            readDemoToHostUntil session (function
+                | FsVoiceDemo.WorkFlow.RequestRealtimeConnection _ -> Some()
+                | _ -> None)
+
+        do!
+            session.SendFromHostAsync(
+                FsVoiceDemo.WorkFlow.SourcesChanged(FsVoiceDemo.FsColbertWithFallback, []),
+                CancellationToken.None
+            )
+
+        let expectedMode =
+            FsVoiceDemo.RetrievalModes.displayName FsVoiceDemo.FsColbertWithFallback
+
+        let! logLine =
+            readDemoToHostUntil session (function
+                | FsVoiceDemo.WorkFlow.Log text when
+                    text.Contains("Host sources changed") && text.Contains($"mode={expectedMode}")
+                    ->
+                    Some text
+                | _ -> None)
+
+        Assert.Contains(expectedMode, logLine)
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration sees replaced runtime settings snapshots`` () =
+    let settings =
+        demoRuntimeSettings [ FsVoiceDemo.RuntimeSettings.UseLexicalFilter, "false" ]
+
+    let first =
+        FsVoiceDemo.RuntimeSettings.snapshot settings
+        |> FsVoiceDemo.RuntimeSettings.sourceFlags
+
+    FsVoiceDemo.RuntimeSettings.replace settings (Map.ofList [ FsVoiceDemo.RuntimeSettings.UseLexicalFilter, "true" ])
+
+    let second =
+        FsVoiceDemo.RuntimeSettings.snapshot settings
+        |> FsVoiceDemo.RuntimeSettings.sourceFlags
+
+    Assert.False first.useLexicalFilter
+    Assert.True second.useLexicalFilter

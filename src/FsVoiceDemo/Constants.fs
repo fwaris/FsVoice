@@ -1,8 +1,8 @@
 namespace FsVoiceDemo
 
 module C =
-    let APP_NAME = "FsVoice.Demo"
     let PRODUCT_NAME = "FsVoice"
+    let APP_NAME = PRODUCT_NAME
     let TOOL_PLUGIN_NAME = "FsVoiceTools"
     let LEGACY_PRODUCT_NAME = "FsKame"
     let PRIVACY_POLICY_URL = "https://fwaris.github.io/docs/fsvoice/privacy.html"
@@ -22,7 +22,7 @@ module C =
     let SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsVoice.ElaborateIndexKeywords"
     let SETTINGS_USE_HYBRID_PDF_PARSING = "FsVoice.UseHybridPdfParsing"
     let SETTINGS_USE_LAYOUT_ANALYSIS = "FsVoice.UseLayoutAnalysis"
-    let SETTINGS_ACTIVE_USE_CASE = "FsVoice.ActiveUseCase"
+    let SETTINGS_ACTIVE_PLUG_IN = "FsVoice.ActivePlugIn"
 
     let LEGACY_SETTINGS_OPENAI_KEY = "FsKame.OpenAIKey"
     let LEGACY_SETTINGS_PDF_LIBRARY = "FsKame.PdfLibrary"
@@ -34,7 +34,7 @@ module C =
     let LEGACY_SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsKame.ElaborateIndexKeywords"
     let LEGACY_SETTINGS_USE_HYBRID_PDF_PARSING = "FsKame.UseHybridPdfParsing"
     let LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS = "FsKame.UseLayoutAnalysis"
-    let LEGACY_SETTINGS_ACTIVE_USE_CASE = "FsKame.ActiveUseCase"
+    let LEGACY_SETTINGS_ACTIVE_PLUG_IN = "FsKame.ActivePlugIn"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.5"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-2"

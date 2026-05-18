@@ -252,6 +252,33 @@ type VoiceToolCall =
       timeout: TimeSpan
       task: TaskCompletionSource<ContentFunctionCallOutput> }
 
+type SourceFlags =
+    { logExpansions: bool
+      logChunks: bool
+      useLexicalFilter: bool
+      elaborateIndexKeywords: bool
+      useHybridPdfParsing: bool
+      useLayoutAnalysis: bool }
+
+type RealtimeConnectionState =
+    | RealtimeDisconnected
+    | RealtimeConnecting
+    | RealtimeConnected
+
+type FromHost =
+    | SourcesChanged of RetrievalMode * KnowledgeSource list
+    | RuntimeSettingsChanged
+    | RealtimeStateChanged of RealtimeConnectionState
+    | RealtimeConnectionFailed of string
+
+type ToHost =
+    | Log of string
+    | RequestRealtimeConnection of Session
+    | TranscriptFinalized of TranscriptSnapshot
+    | ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
+    | OracleResponseReady of TranscriptSnapshot * OracleCandidate option
+    | FlowEnded of abnormal: bool
+
 type FlowMsg =
     | Fl_Start
     | Fl_Terminate of {| abnormal: bool |}
@@ -259,15 +286,7 @@ type FlowMsg =
 type AgentMsg =
     | Ag_FlowError of WErrorType
     | Ag_FlowDone of {| abnormal: bool |}
-    | Ag_SourcesUpdated of
-        RetrievalMode *
-        KnowledgeSource list *
-        {| logExpansions: bool
-           logChunks: bool
-           useLexicalFilter: bool
-           elaborateIndexKeywords: bool
-           useHybridPdfParsing: bool
-           useLayoutAnalysis: bool |}
+    | Ag_SourcesUpdated of RetrievalMode * KnowledgeSource list * SourceFlags
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_MemoryRequested of MemoryRequest
     | Ag_MemoryReady of MemoryRequest * MemoryContext
@@ -278,6 +297,7 @@ type AgentMsg =
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_OracleRequested of MemoryRequest * MemoryContext
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option
+    | Ag_RequestRealtimeConnection of Session
     | Ag_VoiceServerEvent of ServerEvent
     | Ag_ToolCallOutputReady of string * string
     | Ag_Log of string
@@ -297,6 +317,7 @@ type AgentMsg =
         | Ag_ContextReady _ -> "Ag_ContextReady"
         | Ag_OracleRequested _ -> "Ag_OracleRequested"
         | Ag_ResponseReady _ -> "Ag_ResponseReady"
+        | Ag_RequestRealtimeConnection _ -> "Ag_RequestRealtimeConnection"
         | Ag_VoiceServerEvent _ -> "Ag_VoiceServerEvent"
         | Ag_ToolCallOutputReady _ -> "Ag_ToolCallOutputReady"
         | Ag_Log _ -> "Ag_Log"

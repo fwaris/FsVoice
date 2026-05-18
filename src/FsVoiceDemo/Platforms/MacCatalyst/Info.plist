@@ -28,5 +28,7 @@
 	<string>Assets.xcassets/appicon.appiconset</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>FsVoice needs microphone access for realtime voice question answering.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>FsVoice includes realtime communication components that may access camera APIs. Camera access is only used if you choose a feature that captures video.</string>
 </dict>
 </plist>

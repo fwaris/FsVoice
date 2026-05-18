@@ -18,23 +18,9 @@ module PdfSourcesView =
         not model.isBusy && not (isRealtimeActive model)
 
     let private addPdfButton model =
-        Button(Icons.add, PickPdfs)
+        Button(Icons.add, PickSources)
             .font(size = 22., fontFamily = C.FONT_SYMBOLS)
             .background(Colors.Magenta)
-            .textColor(Colors.White)
-            .cornerRadius(17)
-            .width(34.)
-            .height(34.)
-            .padding(0.)
-            .margin(0, -2, 2, 0)
-            .isEnabled(canMutateDocuments model)
-            .alignEndHorizontal()
-            .centerVertical ()
-
-    let private importBundleButton model =
-        Button(Icons.archive, PickIndexBundle)
-            .font(size = 22., fontFamily = C.FONT_SYMBOLS)
-            .background(Colors.DarkSlateBlue)
             .textColor(Colors.White)
             .cornerRadius(17)
             .width(34.)
@@ -84,8 +70,8 @@ module PdfSourcesView =
             (Grid(
                 [ Dimension.Absolute 42.
                   Dimension.Star
-                  Dimension.Absolute 48.
-                  Dimension.Absolute 48. ],
+                  Dimension.Absolute 42.
+                  Dimension.Absolute 42. ],
                 [ Dimension.Absolute 28.; Dimension.Absolute 28. ]
             ) {
                 CheckBox(doc.selected, fun selected -> PdfSelectionChanged(doc.id, selected))
@@ -115,6 +101,12 @@ module PdfSourcesView =
                         .gridColumn(2)
                         .gridRowSpan (2)
 
+                if doc.status = Ready then
+                    (ViewControls.compactIconButton Icons.preview (PreviewIndex doc.id))
+                        .isEnabled(true)
+                        .gridColumn(2)
+                        .gridRowSpan (2)
+
                 if isBuiltIn && not processingActive then
                     Label("Built-in")
                         .font(size = 11.)
@@ -141,10 +133,7 @@ module PdfSourcesView =
         let processingActive = model.documentProcessingCancellation.IsSome
 
         Border(
-            (Grid(
-                [ Dimension.Star; Dimension.Absolute 40.; Dimension.Absolute 40. ],
-                [ Dimension.Absolute 44.; Dimension.Star ]
-            ) {
+            (Grid([ Dimension.Star; Dimension.Absolute 40. ], [ Dimension.Absolute 44.; Dimension.Star ]) {
                 Label("Document Sources")
                     .font(size = 15., attributes = FontAttributes.Bold)
                     .centerVertical()
@@ -152,15 +141,14 @@ module PdfSourcesView =
                     .gridRow (0)
 
                 (addPdfButton model).gridColumn(1).gridRow (0)
-                (importBundleButton model).gridColumn(2).gridRow (0)
 
                 if List.isEmpty model.pdfDocuments then
-                    emptyView.gridColumnSpan(3).gridRow (1)
+                    emptyView.gridColumnSpan(2).gridRow (1)
                 else
                     (CollectionView
                         (model.pdfDocuments)
                         (row processingActive canMutateDocuments canChangeSourceSelection))
-                        .gridColumnSpan(3)
+                        .gridColumnSpan(2)
                         .gridRow (1)
             })
                 .padding (10.)

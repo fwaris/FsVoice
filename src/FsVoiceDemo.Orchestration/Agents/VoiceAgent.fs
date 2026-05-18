@@ -7,7 +7,7 @@ open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open FSharp.Control
-open RTOpenAI.Api
+open FsVoice.Types
 open RTOpenAI.Events
 open RTFlow
 open RTFlow.Functions
@@ -58,7 +58,7 @@ module VoiceAgent =
         | NoActiveResponse
         | ActiveResponse of {| id: string option |}
 
-    type private VoiceUseCaseConfig =
+    type private VoicePlugInConfig =
         { realtimeModel: string
           transcriberModel: string
           transcriberPrompt: string
@@ -69,7 +69,7 @@ module VoiceAgent =
 
     type private VoiceState =
         { initialized: bool
-          config: VoiceUseCaseConfig
+          config: VoicePlugInConfig
           realtimeSession: Session
           transcriptByItem: Map<string, string>
           revision: int
@@ -87,24 +87,24 @@ module VoiceAgent =
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
 
-    let private useCaseConfig (useCase: FsVoice.QA.UseCaseDefinition) =
-        let useCase = FsVoice.QA.UseCaseDefinition.sanitize useCase
-        let realtime = FsVoice.QA.UseCaseDefinition.model FsVoice.QA.Realtime useCase
-        let transcriber = FsVoice.QA.UseCaseDefinition.model FsVoice.QA.Transcriber useCase
+    let private plugInConfig (plugIn: FsVoice.QA.PlugInDefinition) =
+        let plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
+        let realtime = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Realtime plugIn
+        let transcriber = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Transcriber plugIn
 
         { realtimeModel = realtime.modelId
           transcriberModel = transcriber.modelId
           transcriberPrompt =
-            useCase.prompts.transcriberPrompt
-            |> Option.defaultValue FsVoice.QA.DefaultUseCasePrompts.transcriberPrompt
+            plugIn.prompts.transcriberPrompt
+            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.transcriberPrompt
           instructions =
-            useCase.prompts.realtimeInstructions
-            |> Option.defaultValue FsVoice.QA.DefaultUseCasePrompts.realtimeInstructions
+            plugIn.prompts.realtimeInstructions
+            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.realtimeInstructions
           speechResultInstructions =
-            useCase.prompts.speechResultInstruction
-            |> Option.defaultValue FsVoice.QA.DefaultUseCasePrompts.speechResultInstruction
-          memoryRequestTimeout = TimeSpan.FromMilliseconds(float useCase.runtime.realtimeMemoryTimeoutMs)
-          functionCallTimeout = TimeSpan.FromMilliseconds(float useCase.runtime.functionCallTimeoutMs) }
+            plugIn.prompts.speechResultInstruction
+            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.speechResultInstruction
+          memoryRequestTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.realtimeMemoryTimeoutMs)
+          functionCallTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.functionCallTimeoutMs) }
 
     let private sessionAudio config =
         { Audio.Default with
@@ -130,33 +130,11 @@ module VoiceAgent =
                                 |> Include }
                 ) }
 
-    let private instructions =
-        """You are FsVoice's low-latency spoken front-end for question answering.
-
-Allowed direct actions:
-- greet the user
-- handle short rapport, repetition, or simple clarification
-- ask a brief follow-up when the request is too vague to answer safely
-- answer simple conversational turns directly
-
-Tool use:
-- For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
-- Pass the user's request as the `question` argument.
-- When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
-- Call QUERY_ORACLE silently. Do not say filler or status phrases before the call, such as "let me check", "one moment", "I'll look that up", or similar.
-- Do not refuse a request just because it is not about documents or selected sources.
-- Do not invent tool results, source details, page contents, citations, live values, or app state.
-
-After QUERY_ORACLE returns:
-- Treat the tool result as the authoritative answer.
-- Speak the tool result naturally and briefly, without adding new facts or a status preface.
-- If the tool says there is not enough information, say that plainly."""
-
     let private oracleTool =
         { Tool.Default with
             name = ToolNames.QUERY_ORACLE
             description =
-                "Use this for every substantive user question. It can answer with the backend oracle using available tools, app context, selected sources, and general reasoning. The tool returns the exact wording to speak."
+                "Use this for every substantive user question, especially selected-source or document requests such as summarizing the abstract, explaining a section, or comparing PDFs. It can answer with the backend oracle using available tools, app context, selected sources, and general reasoning. The tool returns the exact wording to speak."
             parameters =
                 { Parameters.Default with
                     properties =
@@ -216,7 +194,16 @@ After QUERY_ORACLE returns:
     let private enqueueClientEvent state event =
         enqueueOutbound state.outputQueue CONTROL_EVENT_PRIORITY (SendClientEvent event)
 
-    let private sendClientEvent conn event = Connection.sendClientEvent conn event
+    let private writeClientEvent (connection: VoiceConnection) event =
+        task {
+            let json = SerDe.toJson event
+            use document = JsonDocument.Parse(json)
+            do! connection.sender.WriteAsync(document.RootElement.Clone(), CancellationToken.None).AsTask()
+        }
+
+    let private toServerEvent (json: JsonElement) =
+        let document = JsonDocument.Parse(json.GetRawText())
+        SerDe.toEvent document
 
     let private sessionUpdateEvent config (session: Session) =
         { SessionUpdate.Default with
@@ -675,29 +662,26 @@ After QUERY_ORACLE returns:
             | _ -> return st
         }
 
-    let private startRealtime config apiKey conn (bus: WBus<FlowMsg, AgentMsg>) =
+    let private startRealtime config (connection: VoiceConnection) (bus: WBus<FlowMsg, AgentMsg>) =
         async {
-            let keyReq =
-                { KeyReq.Default with
-                    session = updateSession config KeyReq.Default.session }
-
-            let! ephemKey = Connection.getEphemeralKey apiKey keyReq |> Async.AwaitTask
-            do! Connection.connect ephemKey conn |> Async.AwaitTask
+            updateSession config Session.Default
+            |> Ag_RequestRealtimeConnection
+            |> bus.PostToAgent
 
             do!
-                conn.WebRtcClient.OutputChannel.Reader.ReadAllAsync()
-                |> AsyncSeq.map SerDe.toEvent
+                connection.receiver.ReadAllAsync()
+                |> AsyncSeq.map toServerEvent
                 |> AsyncSeq.iter (Ag_VoiceServerEvent >> bus.PostToAgent)
         }
 
-    let private startOutputPump conn (bus: WBus<FlowMsg, AgentMsg>) (outputQueue: AsyncPriorityQueue<Q>) =
+    let private startOutputPump connection (bus: WBus<FlowMsg, AgentMsg>) (outputQueue: AsyncPriorityQueue<Q>) =
         outputQueue.ToAsyncSeq()
         |> AsyncSeq.iterAsync (fun work ->
             async {
                 match work with
                 | SendClientEvent event ->
                     try
-                        sendClientEvent conn event
+                        do! writeClientEvent connection event |> Async.AwaitTask
                     with ex ->
                         bus.PostToAgent(Ag_Log $"Failed to send realtime client event: {ex.Message}")
                 | AwaitToolCall toolCall -> runAwaitedToolCall bus toolCall |> Async.Start
@@ -722,16 +706,16 @@ After QUERY_ORACLE returns:
 
         bus.AgentBus.RunAsync("voice", st, update)
 
-    let start apiKey useCase conn bus =
+    let start plugIn voiceConnection bus =
         let outputQueue = AsyncPriorityQueue<Q>()
-        let config = useCaseConfig useCase
+        let config = plugInConfig plugIn
 
         async {
-            let! outputPump = Async.StartChild(startOutputPump conn bus outputQueue)
+            let! outputPump = Async.StartChild(startOutputPump voiceConnection bus outputQueue)
             let! voiceAgent = Async.StartChild(startAgent config outputQueue bus)
 
             try
-                do! startRealtime config apiKey conn bus
+                do! startRealtime config voiceConnection bus
             finally
                 outputQueue.Complete()
 

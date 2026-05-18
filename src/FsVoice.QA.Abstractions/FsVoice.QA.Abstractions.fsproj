@@ -12,7 +12,7 @@
 
   <ItemGroup>
     <Compile Include="Types.fs" />
-    <Compile Include="UseCase.fs" />
+    <Compile Include="PlugIn.fs" />
   </ItemGroup>
 
   <ItemGroup>

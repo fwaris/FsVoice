@@ -225,20 +225,20 @@ module Settings =
 
         Preferences.Default.Set(C.SETTINGS_ORACLE_MODEL, value)
 
-    let private useCaseScopedKey (useCaseId: string) (suffix: string) =
-        let id = useCaseId |> Text.notEmpty |> Option.defaultValue "generic"
-        $"FsVoice.UseCases.{id}.{suffix}"
+    let private plugInScopedKey (plugInId: string) (suffix: string) =
+        let id = plugInId |> Text.notEmpty |> Option.defaultValue "generic"
+        $"FsVoice.PlugIns.{id}.{suffix}"
 
-    let private legacyUseCaseScopedKey (useCaseId: string) (suffix: string) =
-        let id = useCaseId |> Text.notEmpty |> Option.defaultValue "generic"
-        $"{C.LEGACY_PRODUCT_NAME}.UseCases.{id}.{suffix}"
+    let private legacyPlugInScopedKey (plugInId: string) (suffix: string) =
+        let id = plugInId |> Text.notEmpty |> Option.defaultValue "generic"
+        $"{C.LEGACY_PRODUCT_NAME}.PlugIns.{id}.{suffix}"
 
     let private contains (key: string) = Preferences.Default.ContainsKey(key)
 
-    let private getScopedString (useCaseId: string) (suffix: string) (legacyKey: string option) (fallback: string) =
-        let key = useCaseScopedKey useCaseId suffix
+    let private getScopedString (plugInId: string) (suffix: string) (legacyKey: string option) (fallback: string) =
+        let key = plugInScopedKey plugInId suffix
 
-        let legacyScopedKey = legacyUseCaseScopedKey useCaseId suffix
+        let legacyScopedKey = legacyPlugInScopedKey plugInId suffix
 
         if contains key then
             Preferences.Default.Get(key, fallback).Trim()
@@ -249,10 +249,10 @@ module Settings =
             | Some legacy -> Preferences.Default.Get(legacy, fallback).Trim()
             | None -> fallback
 
-    let private getScopedBool (useCaseId: string) (suffix: string) (legacyKey: string option) (fallback: bool) =
-        let key = useCaseScopedKey useCaseId suffix
+    let private getScopedBool (plugInId: string) (suffix: string) (legacyKey: string option) (fallback: bool) =
+        let key = plugInScopedKey plugInId suffix
 
-        let legacyScopedKey = legacyUseCaseScopedKey useCaseId suffix
+        let legacyScopedKey = legacyPlugInScopedKey plugInId suffix
 
         if contains key then
             Preferences.Default.Get(key, fallback)
@@ -263,7 +263,7 @@ module Settings =
             | Some legacy -> Preferences.Default.Get(legacy, fallback)
             | None -> fallback
 
-    let modelRoleModelId useCaseId role fallback =
+    let modelRoleModelId plugInId role fallback =
         let legacy =
             match role with
             | FsVoice.QA.Answer -> Some C.LEGACY_SETTINGS_ORACLE_MODEL
@@ -271,11 +271,11 @@ module Settings =
 
         let suffix = $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
 
-        getScopedString useCaseId suffix legacy fallback
+        getScopedString plugInId suffix legacy fallback
         |> Text.notEmpty
         |> Option.defaultValue fallback
 
-    let setModelRoleModelId useCaseId role value =
+    let setModelRoleModelId plugInId role value =
         let fallback =
             match role with
             | FsVoice.QA.Answer -> C.DEFAULT_ORACLE_MODEL
@@ -284,22 +284,22 @@ module Settings =
         let value = value |> Text.notEmpty |> Option.defaultValue fallback
 
         let key =
-            useCaseScopedKey useCaseId $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
+            plugInScopedKey plugInId $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
 
         Preferences.Default.Set(key, value)
 
         if role = FsVoice.QA.Answer then
             setOracleModel value
 
-    let activeUseCaseId () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_ACTIVE_USE_CASE) then
-            Preferences.Default.Get(C.SETTINGS_ACTIVE_USE_CASE, "generic").Trim()
+    let activePlugInId () =
+        if Preferences.Default.ContainsKey(C.SETTINGS_ACTIVE_PLUG_IN) then
+            Preferences.Default.Get(C.SETTINGS_ACTIVE_PLUG_IN, "generic").Trim()
         else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_ACTIVE_USE_CASE, "generic").Trim()
+            Preferences.Default.Get(C.LEGACY_SETTINGS_ACTIVE_PLUG_IN, "generic").Trim()
 
-    let setActiveUseCaseId (value: string) =
+    let setActivePlugInId (value: string) =
         let value = value |> Text.notEmpty |> Option.defaultValue "generic"
-        Preferences.Default.Set(C.SETTINGS_ACTIVE_USE_CASE, value)
+        Preferences.Default.Set(C.SETTINGS_ACTIVE_PLUG_IN, value)
 
     let retrievalMode () =
         let key =
@@ -314,18 +314,18 @@ module Settings =
     let setRetrievalMode mode =
         Preferences.Default.Set(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue mode)
 
-    let useCaseRetrievalMode useCaseId fallback =
+    let plugInRetrievalMode plugInId fallback =
         let value =
             getScopedString
-                useCaseId
+                plugInId
                 "Runtime.RetrievalMode"
                 (Some C.LEGACY_SETTINGS_RETRIEVAL_MODE)
                 (RetrievalModes.toStorageValue fallback)
 
         RetrievalModes.ofStorageValue value
 
-    let setUseCaseRetrievalMode useCaseId mode =
-        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.RetrievalMode", RetrievalModes.toStorageValue mode)
+    let setPlugInRetrievalMode plugInId mode =
+        Preferences.Default.Set(plugInScopedKey plugInId "Runtime.RetrievalMode", RetrievalModes.toStorageValue mode)
         setRetrievalMode mode
 
     let logExpansions () =
@@ -355,11 +355,11 @@ module Settings =
     let setUseLexicalFilter value =
         Preferences.Default.Set(C.SETTINGS_USE_LEXICAL_FILTER, value)
 
-    let useCaseUseLexicalFilter useCaseId fallback =
-        getScopedBool useCaseId "Runtime.UseLexicalFilter" (Some C.LEGACY_SETTINGS_USE_LEXICAL_FILTER) fallback
+    let plugInUseLexicalFilter plugInId fallback =
+        getScopedBool plugInId "Runtime.UseLexicalFilter" (Some C.LEGACY_SETTINGS_USE_LEXICAL_FILTER) fallback
 
-    let setUseCaseUseLexicalFilter useCaseId value =
-        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.UseLexicalFilter", value)
+    let setPlugInUseLexicalFilter plugInId value =
+        Preferences.Default.Set(plugInScopedKey plugInId "Runtime.UseLexicalFilter", value)
         setUseLexicalFilter value
 
     let elaborateIndexKeywords () =
@@ -371,15 +371,15 @@ module Settings =
     let setElaborateIndexKeywords value =
         Preferences.Default.Set(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, value)
 
-    let useCaseElaborateIndexKeywords useCaseId fallback =
+    let plugInElaborateIndexKeywords plugInId fallback =
         getScopedBool
-            useCaseId
+            plugInId
             "Runtime.ElaborateIndexKeywords"
             (Some C.LEGACY_SETTINGS_ELABORATE_INDEX_KEYWORDS)
             fallback
 
-    let setUseCaseElaborateIndexKeywords useCaseId value =
-        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.ElaborateIndexKeywords", value)
+    let setPlugInElaborateIndexKeywords plugInId value =
+        Preferences.Default.Set(plugInScopedKey plugInId "Runtime.ElaborateIndexKeywords", value)
         setElaborateIndexKeywords value
 
     let useHybridPdfParsing () =
@@ -400,15 +400,15 @@ module Settings =
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
 
-    let useCaseSetting useCaseId key fallback =
-        getScopedString useCaseId $"Settings.{key}" None fallback
+    let plugInSetting plugInId key fallback =
+        getScopedString plugInId $"Settings.{key}" None fallback
 
-    let setUseCaseSetting useCaseId key value =
-        Preferences.Default.Set(useCaseScopedKey useCaseId $"Settings.{key}", value)
+    let setPlugInSetting plugInId key value =
+        Preferences.Default.Set(plugInScopedKey plugInId $"Settings.{key}", value)
 
-    let useCaseSettings useCaseId (fields: FsVoice.QA.UseCaseSettingsField list) =
+    let plugInSettings plugInId (fields: FsVoice.QA.PlugInSettingsField list) =
         fields
         |> List.map (fun field ->
             let fallback = field.defaultValue |> Option.defaultValue ""
-            field.key, useCaseSetting useCaseId field.key fallback)
+            field.key, plugInSetting plugInId field.key fallback)
         |> Map.ofList

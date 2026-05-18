@@ -6,6 +6,7 @@ open System.Threading
 open System.Threading.Channels
 open FSharp.Control
 open Fabulous
+open FsVoice.Types
 open FsVoiceDemo.WorkFlow
 open Microsoft.Extensions.AI
 open Microsoft.Maui.ApplicationModel
@@ -27,6 +28,17 @@ module Update =
 
     let private sources model =
         KnowledgeSources.selectedSources model.pdfDocuments
+
+    let private sourceKindFromDocument kind =
+        match kind with
+        | PdfFile -> Pdf
+        | MarkdownFile -> Markdown
+        | JsonFile -> Json
+
+    let private sourceFromDocument (doc: PdfDocumentSource) : KnowledgeSource =
+        { kind = sourceKindFromDocument doc.kind
+          location = doc.storedPath
+          enabled = true }
 
     let private isRealtimeActive model =
         model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
@@ -53,43 +65,71 @@ module Update =
         else
             None
 
-    let private documentFileTypes =
+    let private runtimeSettingsMap (model: Model) =
+        seq {
+            yield RuntimeSettings.OpenAiKey, model.openAiKey
+            yield RuntimeSettings.LogExpansions, string model.logExpansions
+            yield RuntimeSettings.LogChunks, string model.logChunks
+            yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
+            yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
+            yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
+            yield RuntimeSettings.UseLayoutAnalysis, string model.useLayoutAnalysis
+
+            for KeyValue(role, modelId) in model.modelRoleOverrides do
+                yield RuntimeSettings.modelRoleKey role, modelId
+
+            for KeyValue(key, value) in model.plugInSettings do
+                yield RuntimeSettings.plugInSettingKey key, value
+        }
+        |> Seq.filter (fun (_, value) -> not (isNull value))
+        |> Map.ofSeq
+
+    let private refreshRuntimeSettings model =
+        RuntimeSettings.replace model.runtimeSettings (runtimeSettingsMap model)
+        model
+
+    let private sourceFileTypes =
         FilePickerFileType(
             dict
                 [ DevicePlatform.iOS,
-                  [ "com.adobe.pdf"; "net.daringfireball.markdown"; "public.plain-text" ] :> seq<string>
+                  [ "com.adobe.pdf"
+                    "net.daringfireball.markdown"
+                    "public.zip-archive"
+                    "com.pkware.zip-archive" ]
+                  :> seq<string>
                   DevicePlatform.MacCatalyst,
-                  [ "com.adobe.pdf"; "net.daringfireball.markdown"; "public.plain-text" ] :> seq<string>
-                  DevicePlatform.Android, [ "application/pdf"; "text/markdown"; "text/plain" ] :> seq<string>
-                  DevicePlatform.WinUI, [ ".pdf"; ".md"; ".markdown" ] :> seq<string> ]
-        )
-
-    let private indexBundleFileTypes =
-        FilePickerFileType(
-            dict
-                [ DevicePlatform.iOS, [ "public.zip-archive"; "com.pkware.zip-archive" ] :> seq<string>
-                  DevicePlatform.MacCatalyst, [ "public.zip-archive"; "com.pkware.zip-archive" ] :> seq<string>
-                  DevicePlatform.Android, [ "application/zip"; "application/x-zip-compressed" ] :> seq<string>
-                  DevicePlatform.WinUI, [ ".zip" ] :> seq<string> ]
+                  [ "com.adobe.pdf"
+                    "net.daringfireball.markdown"
+                    "public.zip-archive"
+                    "com.pkware.zip-archive" ]
+                  :> seq<string>
+                  DevicePlatform.Android,
+                  [ "application/pdf"
+                    "text/markdown"
+                    "application/zip"
+                    "application/x-zip-compressed" ]
+                  :> seq<string>
+                  DevicePlatform.WinUI, [ ".pdf"; ".md"; ".zip" ] :> seq<string> ]
         )
 
     let private saveSettings model =
+        refreshRuntimeSettings model |> ignore
         Settings.setOpenAiKey model.openAiKey
-        Settings.setActiveUseCaseId model.activeUseCase.id
+        Settings.setActivePlugInId model.activePlugIn.id
 
         model.modelRoleOverrides
-        |> Map.iter (fun role modelId -> Settings.setModelRoleModelId model.activeUseCase.id role modelId)
+        |> Map.iter (fun role modelId -> Settings.setModelRoleModelId model.activePlugIn.id role modelId)
 
-        Settings.setUseCaseRetrievalMode model.activeUseCase.id model.retrievalMode
+        Settings.setPlugInRetrievalMode model.activePlugIn.id model.retrievalMode
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
-        Settings.setUseCaseUseLexicalFilter model.activeUseCase.id model.useLexicalFilter
-        Settings.setUseCaseElaborateIndexKeywords model.activeUseCase.id model.elaborateIndexKeywords
+        Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
+        Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
         Settings.setUseLayoutAnalysis model.useLayoutAnalysis
 
-        model.useCaseSettings
-        |> Map.iter (fun key value -> Settings.setUseCaseSetting model.activeUseCase.id key value)
+        model.plugInSettings
+        |> Map.iter (fun key value -> Settings.setPlugInSetting model.activePlugIn.id key value)
 
     let private savePdfLibraryWithLog docs log =
         let saveLog =
@@ -112,28 +152,28 @@ module Update =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
-    let private useCaseModelRoleOverrides (definition: FsVoice.QA.UseCaseDefinition) =
+    let private plugInModelRoleOverrides (definition: FsVoice.QA.PlugInDefinition) =
         FsVoice.QA.ModelRole.all
         |> List.map (fun role ->
-            let fallback = (FsVoice.QA.UseCaseDefinition.model role definition).modelId
+            let fallback = (FsVoice.QA.PlugInDefinition.model role definition).modelId
             role, Settings.modelRoleModelId definition.id role fallback)
         |> Map.ofList
 
-    let private composeUseCase model =
-        UseCaseComposer.withHostOverrides
+    let private composePlugIn (model: Model) =
+        PlugInComposer.withHostOverrides
             model.modelRoleOverrides
             model.retrievalMode
             model.useLexicalFilter
             model.elaborateIndexKeywords
-            model.activeUseCase
+            model.activePlugIn
 
-    let private keywordOptions model =
+    let private keywordOptions (model: Model) =
         if not model.elaborateIndexKeywords then
             FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.disabled
         else
-            let useCase = composeUseCase model
+            let plugIn = composePlugIn model
 
-            let keywordModel = FsVoice.QA.UseCaseDefinition.model FsVoice.QA.Keyword useCase
+            let keywordModel = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Keyword plugIn
 
             model.openAiKey
             |> Text.notEmpty
@@ -141,65 +181,83 @@ module Update =
                 { FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
                     client = Some(createChatClient key keywordModel.modelId)
                     modelId = keywordModel.modelId
-                    useCaseProfile = useCase.profile
-                    useCaseFingerprint = FsVoice.QA.UseCaseDefinition.fingerprint useCase })
+                    plugInProfile = plugIn.profile
+                    plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint plugIn })
             |> Option.defaultValue
                 { FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
                     client = None
                     modelId = keywordModel.modelId
-                    useCaseProfile = useCase.profile
-                    useCaseFingerprint = FsVoice.QA.UseCaseDefinition.fingerprint useCase }
+                    plugInProfile = plugIn.profile
+                    plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint plugIn }
 
     let private withKeywordCancellation token (options: FsVoice.QA.KnowledgeSources.KeywordGenerationOptions) =
         { options with
             cancellationToken = Some token }
 
     let private postSources model =
+        refreshRuntimeSettings model |> ignore
+
         match model.bundle with
         | Some bundle ->
-            let flags =
-                {| logExpansions = model.logExpansions
-                   logChunks = model.logChunks
-                   useLexicalFilter = model.useLexicalFilter
-                   elaborateIndexKeywords = model.elaborateIndexKeywords
-                   useHybridPdfParsing = model.useHybridPdfParsing
-                   useLayoutAnalysis = model.useLayoutAnalysis |}
-
-            bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
+            bundle.session.SendFromHostAsync(SourcesChanged(model.retrievalMode, sources model), CancellationToken.None)
+            |> ignore
         | None -> ()
 
-    let private pickAndCopyDocuments existing =
+    let private pickedResultsToList (results: FileResult seq) =
+        if isNull (box results) then [] else results |> Seq.toList
+
+    let private pickAndImportSources existing =
         async {
             try
                 let opts =
-                    PickOptions(PickerTitle = "Select PDFs or Markdown files", FileTypes = documentFileTypes)
+                    PickOptions(
+                        PickerTitle = "Select PDF, Markdown, or FsVoice index bundle",
+                        FileTypes = sourceFileTypes
+                    )
 
                 let tsk () =
                     FilePicker.Default.PickMultipleAsync(opts)
 
                 let! results = MainThread.InvokeOnMainThreadAsync<FileResult seq>(tsk) |> Async.AwaitTask
-                let! docs = PdfLibrary.copyNewDocuments existing results
-                return Ok docs
-            with ex ->
-                return Error ex
-        }
+                let picked = pickedResultsToList results
+                let logs = ResizeArray<string>()
 
-    let private pickAndImportIndexBundle existing =
-        async {
-            try
-                let opts =
-                    PickOptions(PickerTitle = "Select FsVoice index bundle", FileTypes = indexBundleFileTypes)
+                let documentResults =
+                    picked
+                    |> List.filter (fun result -> PickedSourceFiles.isDocument result.FileName)
 
-                let tsk () = FilePicker.Default.PickAsync(opts)
+                let bundleResults =
+                    picked
+                    |> List.filter (fun result -> PickedSourceFiles.isIndexBundle result.FileName)
 
-                let! result = MainThread.InvokeOnMainThreadAsync<FileResult>(tsk) |> Async.AwaitTask
+                let unsupported =
+                    picked
+                    |> List.filter (fun result ->
+                        match PickedSourceFiles.kind result.FileName with
+                        | UnsupportedPickedSourceFile -> true
+                        | PickedDocument
+                        | PickedIndexBundle -> false)
 
-                if isNull result then
-                    return Ok(existing, [ "No index bundle selected." ])
-                else
+                for result in unsupported do
+                    logs.Add $"Unsupported source file ignored: {result.FileName}."
+
+                let mutable docs = existing
+
+                for result in bundleResults do
                     use! stream = result.OpenReadAsync() |> Async.AwaitTask
-                    let! docs, logs = PdfLibrary.importPrebuiltBundle existing result.FileName stream
-                    return Ok(docs, logs)
+                    let! importedDocs, importLogs = PdfLibrary.importPrebuiltBundle docs result.FileName stream
+                    docs <- importedDocs
+
+                    for log in importLogs do
+                        logs.Add log
+
+                let! newDocuments = PdfLibrary.copyNewDocuments docs documentResults
+
+                return
+                    Ok
+                        { documents = docs @ newDocuments
+                          newDocuments = newDocuments
+                          logs = List.ofSeq logs }
             with ex ->
                 return Error ex
         }
@@ -250,7 +308,7 @@ module Update =
         async {
             try
                 let! removedFile = PdfLibrary.deleteStoredDocument doc
-                let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes ()
+                let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes FileSystem.AppDataDirectory
 
                 return
                     Ok
@@ -259,6 +317,42 @@ module Update =
                           removedFile = removedFile
                           removedIndexCount = removedIndexCount
                           indexErrors = indexErrors }
+            with ex ->
+                return Error ex
+        }
+
+    let private loadIndexPreviewForDocument (model: Model) documentId =
+        async {
+            try
+                match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = documentId) with
+                | None ->
+                    let error: exn =
+                        InvalidOperationException("Document source was not found for index preview.")
+
+                    return Error error
+                | Some doc when not (PdfDocuments.isReady doc) ->
+                    let error: exn =
+                        InvalidOperationException(
+                            $"Index preview is only available for ready sources: {doc.displayName}."
+                        )
+
+                    return Error error
+                | Some doc ->
+                    let source = sourceFromDocument doc
+
+                    let report msg =
+                        Debug.WriteLine msg
+                        Console.WriteLine msg
+
+                    return
+                        KnowledgeSources.loadIndexPreview
+                            FileSystem.AppDataDirectory
+                            report
+                            model.useHybridPdfParsing
+                            model.useLayoutAnalysis
+                            20
+                            source
+                        |> Result.mapError (fun err -> InvalidOperationException(err) :> exn)
             with ex ->
                 return Error ex
         }
@@ -343,71 +437,86 @@ module Update =
             EventError
 
     let private startParams model =
-        let useCase = composeUseCase model
+        refreshRuntimeSettings model |> ignore
+
+        let orchestrationOptions =
+            { settings = model.runtimeSettings
+              plugIn = model.activePlugIn
+              qaPlugIn = model.qaPlugIn
+              retrievalMode = model.retrievalMode
+              sources = sources model }
+
+        let orchestration =
+            DemoVoiceOrchestration(orchestrationOptions) :> IVoiceOrchestration<ToHost, FromHost>
 
         { apiKey = model.openAiKey
-          useCase = useCase
-          useCasePlugin = model.useCasePlugin
-          useCaseSettings = model.useCaseSettings
-          retrievalMode = model.retrievalMode
-          sources = sources model
+          orchestration = orchestration
+          context =
+            { storageRoot = FileSystem.AppDataDirectory
+              settings = RuntimeSettings.snapshot model.runtimeSettings
+              report = fun msg -> model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore }
           mailbox = model.mailbox
-          logExpansions = model.logExpansions
-          logChunks = model.logChunks
-          useLexicalFilter = model.useLexicalFilter
-          elaborateIndexKeywords = model.elaborateIndexKeywords
-          useHybridPdfParsing = model.useHybridPdfParsing
-          useLayoutAnalysis = model.useLayoutAnalysis }
+          runtimeSettings = model.runtimeSettings }
 
     let init () =
         let docs = Settings.pdfLibrary ()
 
-        let loadedUseCase, useCaseLogs =
-            UseCaseHost.loadActive (Some(Settings.activeUseCaseId ()))
+        let loadedPlugIn, plugInLogs =
+            PlugInHost.loadActive
+                FileSystem.AppDataDirectory
+                [ typeof<Model>.Assembly ]
+                (Some(Settings.activePlugInId ()))
 
-        Settings.setActiveUseCaseId loadedUseCase.definition.id
+        Settings.setActivePlugInId loadedPlugIn.definition.id
 
-        let modelRoleOverrides = useCaseModelRoleOverrides loadedUseCase.definition
+        let modelRoleOverrides = plugInModelRoleOverrides loadedPlugIn.definition
 
         let retrievalMode =
-            loadedUseCase.definition.runtime.retrievalMode
-            |> UseCaseComposer.fromQaRetrievalMode
-            |> Settings.useCaseRetrievalMode loadedUseCase.definition.id
+            loadedPlugIn.definition.runtime.retrievalMode
+            |> PlugInComposer.fromQaRetrievalMode
+            |> Settings.plugInRetrievalMode loadedPlugIn.definition.id
 
         let initialLog =
-            ($"FsVoice ready with use case: {loadedUseCase.definition.displayName}. Add PDFs, then connect."
-             :: useCaseLogs)
+            ($"FsVoice ready with PlugIn: {loadedPlugIn.definition.displayName}. Add PDFs, then connect."
+             :: plugInLogs)
             |> List.truncate C.MAX_LOG
 
-        { currentPage = Main
-          mailbox = Channel.CreateBounded<Msg>(100)
-          bundle = None
-          sessionState = RTOpenAI.WebRTC.State.Disconnected
-          openAiKey = Settings.openAiKey ()
-          activeUseCase = loadedUseCase.definition
-          useCasePlugin = loadedUseCase.plugin
-          useCaseSettings = Settings.useCaseSettings loadedUseCase.definition.id loadedUseCase.definition.settingsFacets
-          modelRoleOverrides = modelRoleOverrides
-          retrievalMode = retrievalMode
-          pdfDocuments = docs
-          log = initialLog
-          logFontSize = 12.
-          hideSecrets = true
-          isBusy = false
-          documentProcessingCancellation = None
-          logExpansions = Settings.logExpansions ()
-          logChunks = Settings.logChunks ()
-          useLexicalFilter =
-            Settings.useCaseUseLexicalFilter
-                loadedUseCase.definition.id
-                loadedUseCase.definition.runtime.useLexicalFilter
-          elaborateIndexKeywords =
-            Settings.useCaseElaborateIndexKeywords
-                loadedUseCase.definition.id
-                loadedUseCase.definition.runtime.elaborateIndexKeywords
-          useHybridPdfParsing = Settings.useHybridPdfParsing ()
-          useLayoutAnalysis = Settings.useLayoutAnalysis () },
-        Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
+        let runtimeSettings = RuntimeSettings.empty ()
+
+        let model =
+            { currentPage = Main
+              mailbox = Channel.CreateBounded<Msg>(100)
+              bundle = None
+              sessionState = RTOpenAI.WebRTC.State.Disconnected
+              openAiKey = Settings.openAiKey ()
+              activePlugIn = loadedPlugIn.definition
+              qaPlugIn = loadedPlugIn.plugIn
+              runtimeSettings = runtimeSettings
+              plugInSettings = Settings.plugInSettings loadedPlugIn.definition.id loadedPlugIn.definition.settingsFacets
+              modelRoleOverrides = modelRoleOverrides
+              retrievalMode = retrievalMode
+              pdfDocuments = docs
+              log = initialLog
+              logFontSize = 12.
+              hideSecrets = true
+              isBusy = false
+              documentProcessingCancellation = None
+              logExpansions = Settings.logExpansions ()
+              logChunks = Settings.logChunks ()
+              useLexicalFilter =
+                Settings.plugInUseLexicalFilter
+                    loadedPlugIn.definition.id
+                    loadedPlugIn.definition.runtime.useLexicalFilter
+              elaborateIndexKeywords =
+                Settings.plugInElaborateIndexKeywords
+                    loadedPlugIn.definition.id
+                    loadedPlugIn.definition.runtime.elaborateIndexKeywords
+              useHybridPdfParsing = Settings.useHybridPdfParsing ()
+              useLayoutAnalysis = Settings.useLayoutAnalysis ()
+              indexPreview = None }
+            |> refreshRuntimeSettings
+
+        model, Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
     let update msg model =
         match msg with
@@ -417,7 +526,7 @@ module Update =
                 { model with
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
-            | None -> { model with openAiKey = value }, Cmd.none
+            | None -> { model with openAiKey = value } |> refreshRuntimeSettings, Cmd.none
         | ModelRoleModelChanged(role, value) ->
             match sourceConfigBlocked model $"Changing {FsVoice.QA.ModelRole.storageName role} model" with
             | Some msg ->
@@ -428,9 +537,10 @@ module Update =
                 let modelRoleOverrides = model.modelRoleOverrides |> Map.add role value
 
                 { model with
-                    modelRoleOverrides = modelRoleOverrides },
+                    modelRoleOverrides = modelRoleOverrides }
+                |> refreshRuntimeSettings,
                 Cmd.none
-        | UseCaseSettingChanged(key, value) ->
+        | PlugInSettingChanged(key, value) ->
             match sourceConfigBlocked model $"Changing {key}" with
             | Some msg ->
                 { model with
@@ -438,7 +548,8 @@ module Update =
                 Cmd.none
             | None ->
                 { model with
-                    useCaseSettings = model.useCaseSettings |> Map.add key value },
+                    plugInSettings = model.plugInSettings |> Map.add key value }
+                |> refreshRuntimeSettings,
                 Cmd.none
         | RetrievalModeChanged mode ->
             match sourceConfigBlocked model "Changing retrieval mode" with
@@ -446,7 +557,7 @@ module Update =
                 { model with
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
-            | None -> { model with retrievalMode = mode }, Cmd.none
+            | None -> { model with retrievalMode = mode } |> refreshRuntimeSettings, Cmd.none
         | LogExpansionsToggled value ->
             match sourceConfigBlocked model "Changing retrieval logging" with
             | Some msg ->
@@ -581,77 +692,50 @@ module Update =
                 { model with
                     hideSecrets = not model.hideSecrets },
                 Cmd.none
-        | PickPdfs ->
-            match documentMutationBlocked model "Adding documents" with
+        | PickSources ->
+            match documentMutationBlocked model "Adding sources" with
             | Some msg ->
                 { model with
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | None ->
                 { model with isBusy = true },
-                Cmd.OfAsync.either pickAndCopyDocuments model.pdfDocuments PickPdfsCompleted EventError
-        | PickIndexBundle ->
-            match documentMutationBlocked model "Importing index bundle" with
-            | Some msg ->
-                { model with
-                    log = msg :: model.log |> List.truncate C.MAX_LOG },
-                Cmd.none
-            | None ->
-                { model with isBusy = true },
-                Cmd.OfAsync.either pickAndImportIndexBundle model.pdfDocuments IndexBundleImportCompleted EventError
-        | IndexBundleImportCompleted(Ok(docs, logs)) ->
-            let model =
-                { model with
-                    pdfDocuments = docs
-                    isBusy = false
-                    log = (logs @ model.log) |> List.truncate C.MAX_LOG }
-
-            let model =
-                { model with
-                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
-
-            postSources model
-            model, Cmd.none
-        | IndexBundleImportCompleted(Error ex) ->
-            { model with
-                isBusy = false
-                log =
-                    $"Index bundle import failed: {ex.Message}" :: model.log
-                    |> List.truncate C.MAX_LOG },
-            Cmd.none
-        | PickPdfsCompleted(Ok docs) ->
-            let pdfDocuments = model.pdfDocuments @ docs
-
+                Cmd.OfAsync.either pickAndImportSources model.pdfDocuments PickSourcesCompleted EventError
+        | PickSourcesCompleted(Ok result) ->
             let msg =
-                if List.isEmpty docs then
-                    "No new documents selected."
+                if List.isEmpty result.newDocuments && List.isEmpty result.logs then
+                    "No new sources selected."
+                elif List.isEmpty result.newDocuments then
+                    "Source import complete."
                 else
-                    $"Processing {docs.Length} new document(s)."
+                    $"Processing {result.newDocuments.Length} new document(s)."
 
-            let log = msg :: model.log |> List.truncate C.MAX_LOG
+            let log = ([ msg ] @ result.logs @ model.log) |> List.truncate C.MAX_LOG
 
             let model =
                 { model with
-                    pdfDocuments = pdfDocuments
+                    pdfDocuments = result.documents
                     log = log }
 
             let model =
                 { model with
                     log = savePdfLibraryWithLog model.pdfDocuments model.log }
 
-            if List.isEmpty docs then
-                { model with isBusy = false }, Cmd.none
+            if List.isEmpty result.newDocuments then
+                let model = { model with isBusy = false }
+                postSources model
+                model, Cmd.none
             else
                 let report msg = processingReport model msg
                 let cts = new CancellationTokenSource()
 
                 { model with
                     documentProcessingCancellation = Some cts },
-                documentProcessingCommand report cts model docs
-        | PickPdfsCompleted(Error ex) ->
+                documentProcessingCommand report cts model result.newDocuments
+        | PickSourcesCompleted(Error ex) ->
             { model with
                 isBusy = false
-                log = $"Document picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+                log = $"Source picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfProcessingCompleted(Ok(Completed results)) ->
             disposeDocumentProcessingCancellation model
@@ -867,6 +951,70 @@ module Update =
                 isBusy = false
                 log = $"Document delete failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
+        | PreviewIndex id ->
+            match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
+            | None ->
+                { model with
+                    log =
+                        "Document source was not found for index preview." :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | Some doc when not (PdfDocuments.isReady doc) ->
+                { model with
+                    log =
+                        $"Index preview is only available for ready sources: {doc.displayName}."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | Some _ ->
+                { model with
+                    currentPage = IndexPreview id
+                    indexPreview = Some(PreviewLoading id) },
+                Cmd.OfAsync.either
+                    (loadIndexPreviewForDocument model)
+                    id
+                    (fun result -> IndexPreviewLoaded(id, result))
+                    EventError
+        | RefreshIndexPreview ->
+            match model.currentPage with
+            | IndexPreview id ->
+                { model with
+                    indexPreview = Some(PreviewLoading id) },
+                Cmd.OfAsync.either
+                    (loadIndexPreviewForDocument model)
+                    id
+                    (fun result -> IndexPreviewLoaded(id, result))
+                    EventError
+            | Main
+            | Settings -> model, Cmd.none
+        | IndexPreviewBack ->
+            { model with
+                currentPage = Main
+                indexPreview = None },
+            Cmd.none
+        | IndexPreviewLoaded(id, Ok preview) ->
+            match model.currentPage with
+            | IndexPreview currentId when currentId = id ->
+                { model with
+                    indexPreview = Some(PreviewReady preview)
+                    log =
+                        $"Loaded index preview for {preview.source.DisplayName}: {preview.sampledCount}/{preview.totalChunks} chunk(s)."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | Main
+            | Settings
+            | IndexPreview _ -> model, Cmd.none
+        | IndexPreviewLoaded(id, Error ex) ->
+            match model.currentPage with
+            | IndexPreview currentId when currentId = id ->
+                { model with
+                    indexPreview = Some(PreviewFailed(id, ex.Message))
+                    log = $"Index preview failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | Main
+            | Settings
+            | IndexPreview _ -> model, Cmd.none
         | ApplySources ->
             match sourceConfigBlocked model "Applying sources" with
             | Some msg ->

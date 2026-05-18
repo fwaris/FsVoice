@@ -3,13 +3,15 @@ namespace FsVoiceDemo.WorkFlow
 open System
 open System.IO
 open Microsoft.Extensions.AI
-open Microsoft.Maui.Storage
 open FsVoiceDemo
 
 module KnowledgeSources =
     type QueryType = FsVoice.QA.KnowledgeSources.QueryType
     type Expansion = FsVoice.QA.KnowledgeSources.Expansion
     type KeywordGenerationOptions = FsVoice.QA.KnowledgeSources.KeywordGenerationOptions
+    type IndexPreviewVectorSummary = FsVoice.QA.KnowledgeSources.IndexPreviewVectorSummary
+    type IndexPreviewRecord = FsVoice.QA.KnowledgeSources.IndexPreviewRecord
+    type IndexPreview = FsVoice.QA.KnowledgeSources.IndexPreview
 
     module KeywordGenerationOptions =
         let defaults = FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.defaults
@@ -100,19 +102,21 @@ module KnowledgeSources =
             return fromQaIndex index, errors
         }
 
-    let private fsColbertRoot () =
-        Path.Combine(FileSystem.AppDataDirectory, "FsVoice", "FsColbert")
+    let private defaultKeywordModel = "gpt-5-nano"
 
-    let prebuiltFolder () =
-        let path = Path.Combine(fsColbertRoot (), "Prebuilt")
+    let private fsColbertRoot storageRoot =
+        Path.Combine(storageRoot, "FsVoice", "FsColbert")
+
+    let prebuiltFolder storageRoot =
+        let path = Path.Combine(fsColbertRoot storageRoot, "Prebuilt")
         Directory.CreateDirectory path |> ignore
         path
 
-    let prebuiltManifestPath () =
-        Path.Combine(prebuiltFolder (), "prebuilt-indexes.installed.json")
+    let prebuiltManifestPath storageRoot =
+        Path.Combine(prebuiltFolder storageRoot, "prebuilt-indexes.installed.json")
 
-    let clearPersistedIndexes () =
-        FsVoice.QA.KnowledgeSources.clearPersistedIndexes FileSystem.AppDataDirectory
+    let clearPersistedIndexes storageRoot =
+        FsVoice.QA.KnowledgeSources.clearPersistedIndexes storageRoot
 
     let private createChatClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
@@ -126,12 +130,12 @@ module KnowledgeSources =
             |> Option.bind Text.notEmpty
             |> Option.map (fun key ->
                 { KeywordGenerationOptions.defaults with
-                    client = Some(createChatClient key C.NANO_MODEL)
-                    modelId = C.NANO_MODEL })
+                    client = Some(createChatClient key defaultKeywordModel)
+                    modelId = defaultKeywordModel })
             |> Option.defaultValue
                 { KeywordGenerationOptions.defaults with
                     client = None
-                    modelId = C.NANO_MODEL }
+                    modelId = defaultKeywordModel }
 
     let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
         if useHybridPdfParsing && useLayoutAnalysis then
@@ -146,18 +150,26 @@ module KnowledgeSources =
             enableLayoutAnalysis = useLayoutAnalysis }
         |> FsVoice.QA.DoclingHybrid.setDefaultOptions
 
-    let InindexSource report keywordOptions useHybridPdfParsing useLayoutAnalysis (source: KnowledgeSource) =
+    let InindexSource
+        storageRoot
+        report
+        keywordOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        (source: KnowledgeSource)
+        =
         configurePdfParser useLayoutAnalysis
 
         source
         |> toQaSource
         |> FsVoice.QA.KnowledgeSources.InindexSource
-            FileSystem.AppDataDirectory
+            storageRoot
             report
             keywordOptions
             (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
 
     let loadIndex
+        storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
         useHybridPdfParsing
@@ -171,7 +183,7 @@ module KnowledgeSources =
                 sources
                 |> List.map toQaSource
                 |> FsVoice.QA.KnowledgeSources.loadIndex
-                    FileSystem.AppDataDirectory
+                    storageRoot
                     report
                     keywordOptions
                     (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
@@ -179,6 +191,15 @@ module KnowledgeSources =
 
             return fromQaIndex index, errors
         }
+
+    let loadIndexPreview storageRoot report useHybridPdfParsing useLayoutAnalysis maxRecords source =
+        source
+        |> toQaSource
+        |> FsVoice.QA.KnowledgeSources.loadIndexPreview
+            storageRoot
+            report
+            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            maxRecords
 
     let rank
         (apiKey: string option)
@@ -193,7 +214,7 @@ module KnowledgeSources =
         async {
             match apiKey |> Option.bind Text.notEmpty, useLexicalFilter with
             | Some key, true ->
-                use client = createChatClient key C.NANO_MODEL
+                use client = createChatClient key defaultKeywordModel
 
                 let! chunks =
                     FsVoice.QA.KnowledgeSources.rank

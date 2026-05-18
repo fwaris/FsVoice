@@ -63,7 +63,7 @@ module Program =
 FsVoice.Cli
 
 Commands:
-  ask --question "..." --source path [--source path] [--use-case-profile path] [--json]
+  ask --question "..." --source path [--source path] [--plug-in-profile path] [--json]
   index-folder --input docs --output bundle-dir-or.zip --bundle-id id [--bundle-version 1.0.0]
   insuranceqa-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert] [--no-judge]
   insuranceqa-search-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert]
@@ -77,7 +77,7 @@ Common options:
   --index-path path        Optional persisted FsColbert .fsci file for search eval.
   --answers-source path    Optional JSON/Markdown InsuranceQA answer source to index/evaluate.
   --answers-markdown path  Back-compat alias for --answers-source.
-  --use-case-profile path  Optional QA use-case profile JSON for domain terms and prompts.
+  --plug-in-profile path  Optional QA plug-in profile JSON for domain terms and prompts.
   --label-list-path path   Optional newline-delimited InsuranceQA answer labels for index elaboration.
   --llm-query-expansion    Use the configured small model to add retrieval terms in search eval.
   --expansion-replay-path path  Replay saved LLM expansion JSONL for fusion tests.
@@ -184,21 +184,21 @@ Index-folder options:
         optionValue "storage-root" (Path.Combine("temp", "fsvoice-cli")) parsed
         |> Path.GetFullPath
 
-    let private insuranceQaUseCaseProfilePath () =
-        Path.Combine("data", "qa-use-cases", "insuranceqa.json") |> Path.GetFullPath
+    let private insuranceQaPlugInProfilePath () =
+        Path.Combine("data", "qa-plug-ins", "insuranceqa.json") |> Path.GetFullPath
 
-    let useCaseProfile parsed =
+    let plugInProfile parsed =
         let defaultProfile =
             if parsed.command.StartsWith("insuranceqa", StringComparison.OrdinalIgnoreCase) then
-                Some(insuranceQaUseCaseProfilePath ())
+                Some(insuranceQaPlugInProfilePath ())
             else
                 None
 
-        optionValues "use-case-profile" parsed
+        optionValues "plug-in-profile" parsed
         |> List.tryLast
         |> Option.orElse defaultProfile
-        |> Option.bind QaUseCaseProfile.tryLoad
-        |> Option.defaultValue QaUseCaseProfile.generic
+        |> Option.bind QaPlugInProfile.tryLoad
+        |> Option.defaultValue QaPlugInProfile.generic
 
     let createSession parsed autoWriteback =
         let storageRoot = storageRoot parsed
@@ -217,7 +217,7 @@ Index-folder options:
             { QaSessionOptions.create storageRoot with
                 retrievalMode = retrievalMode parsed
                 clients = clients
-                useCaseProfile = useCaseProfile parsed
+                plugInProfile = plugInProfile parsed
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
                 keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
@@ -315,7 +315,7 @@ Index-folder options:
                         enabled = true
                         client = Some(createClient key modelId)
                         modelId = modelId
-                        useCaseProfile = useCaseProfile parsed }
+                        plugInProfile = plugInProfile parsed }
 
     let private documentBundlePath (outputRoot: string) (relativePath: string) =
         Path.Combine(outputRoot, "documents", relativePath.Replace('/', Path.DirectorySeparatorChar))
@@ -808,7 +808,7 @@ Index-folder options:
                             enabled = not (hasFlag "no-index-elaboration" parsed)
                             client = clients.queryExpansion
                             modelId = optionValue "small-model" QaDefaults.nanoModel parsed
-                            useCaseProfile = profile }
+                            plugInProfile = profile }
 
                     return!
                         KnowledgeSources.loadIndex
@@ -1008,7 +1008,7 @@ Index-folder options:
         else
             normalized.Substring(0, 900)
 
-    let private indexElaborationPrompt (profile: QaUseCaseProfile) (batch: (int * string) list) =
+    let private indexElaborationPrompt (profile: QaPlugInProfile) (batch: (int * string) list) =
         let payload =
             batch
             |> List.map (fun (label, answer) ->
@@ -1016,10 +1016,10 @@ Index-folder options:
                    answer = promptAnswerText answer |})
             |> fun items -> JsonSerializer.Serialize(items, jsonLineOptions)
 
-        let profile = QaUseCaseProfile.sanitize profile
+        let profile = QaPlugInProfile.sanitize profile
 
         let profileHints =
-            let hints = QaUseCaseProfile.renderHints profile
+            let hints = QaPlugInProfile.renderHints profile
 
             seq {
                 yield $"Use case: {profile.displayName} ({profile.id})."
@@ -1089,7 +1089,7 @@ Answers:
             "Search-index keyword and question metadata for QA answers."
 
     let private generateIndexElaborationBatch
-        (profile: QaUseCaseProfile)
+        (profile: QaPlugInProfile)
         (client: IChatClient)
         (maxOutputTokens: int)
         (batch: (int * string) list)
@@ -1199,7 +1199,7 @@ Answers:
         task {
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
             let model = optionValue "small-model" "gpt-5-nano" parsed
-            let profile = useCaseProfile parsed
+            let profile = plugInProfile parsed
             let batchSize = optionValue "batch-size" "8" parsed |> Int32.Parse
             let parallelism = optionValue "parallelism" "2" parsed |> Int32.Parse
 
@@ -1315,7 +1315,7 @@ Answers:
 
                 printJson
                     {| model = model
-                       useCaseProfile = profile.id
+                       plugInProfile = profile.id
                        answers = answers.Count
                        targetedAnswers = targetAnswers.Length
                        targetedElaborations =
@@ -1499,7 +1499,7 @@ Answers:
                 optionValue "max-results" (string QaDefaults.memoryCandidateChunks) parsed
                 |> Int32.Parse
 
-            let profile = useCaseProfile parsed
+            let profile = plugInProfile parsed
             let! answers, questions, defaultAnswersSourcePath = loadInsuranceQa dataDir
 
             let answersSourcePath =
@@ -1659,7 +1659,7 @@ Answers:
             let summary =
                 {| sample = selected.Length
                    indexedAnswers = answers.Count
-                   useCaseProfile = profile.id
+                   plugInProfile = profile.id
                    retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
                    maxResults = maxResults
                    hits = hits
@@ -1691,7 +1691,7 @@ Answers:
         task {
             let sample = optionValue "sample" "30" parsed |> fun value -> Int32.Parse value
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
-            let profile = useCaseProfile parsed
+            let profile = plugInProfile parsed
             let! answers, questions, defaultAnswersSourcePath = loadInsuranceQa dataDir
 
             let answersSourcePath =
@@ -1802,7 +1802,7 @@ Answers:
             let summary =
                 {| sample = selected.Length
                    indexedAnswers = answers.Count
-                   useCaseProfile = profile.id
+                   plugInProfile = profile.id
                    retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
                    contextHitRate =
                     if selected.IsEmpty then

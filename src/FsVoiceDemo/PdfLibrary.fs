@@ -61,10 +61,7 @@ module PdfLibrary =
     let private kindFromFileName (fileName: string) =
         match Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant() with
         | "pdf" -> PdfFile
-        | "md"
-        | "markdown"
-        | "mdown"
-        | "mkdn" -> MarkdownFile
+        | "md" -> MarkdownFile
         | "json" -> JsonFile
         | _ -> MarkdownFile
 
@@ -224,7 +221,7 @@ module PdfLibrary =
         | _ -> String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
 
     let private prebuiltIndexFolder () =
-        let path = KnowledgeSources.prebuiltFolder ()
+        let path = KnowledgeSources.prebuiltFolder FileSystem.AppDataDirectory
         Directory.CreateDirectory path |> ignore
         path
 
@@ -232,7 +229,7 @@ module PdfLibrary =
         Path.Combine(prebuiltIndexFolder (), "index-bundle.json")
 
     let private installedPrebuiltManifestPath () =
-        let path = KnowledgeSources.prebuiltManifestPath ()
+        let path = KnowledgeSources.prebuiltManifestPath FileSystem.AppDataDirectory
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath path))
         |> ignore
@@ -728,6 +725,7 @@ module PdfLibrary =
         async {
             let candidates =
                 results
+                |> Seq.filter (fun result -> PickedSourceFiles.isDocument result.FileName)
                 |> Seq.filter (fun result ->
                     let originalPath = defaultArg (Text.notEmpty result.FullPath) result.FileName
                     not (hasExisting existing originalPath result.FileName))

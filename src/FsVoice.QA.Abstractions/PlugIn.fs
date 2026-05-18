@@ -16,7 +16,7 @@ type QueryExpansionRule =
       terms: string list }
 
 [<CLIMutable>]
-type QaUseCaseProfile =
+type QaPlugInProfile =
     { id: string
       displayName: string
       description: string option
@@ -27,7 +27,7 @@ type QaUseCaseProfile =
       answerSystemInstruction: string option }
 
 [<CLIMutable>]
-type QaUseCaseContextManifest =
+type QaPlugInContextManifest =
     { id: string
       provider: string
       displayName: string
@@ -35,28 +35,28 @@ type QaUseCaseContextManifest =
       enabled: bool }
 
 [<CLIMutable>]
-type QaUseCaseToolManifest =
+type QaPlugInToolManifest =
     { id: string
       assemblyPath: string
       enabled: bool }
 
 [<CLIMutable>]
-type QaUseCaseUiManifest =
+type QaPlugInUiManifest =
     { id: string
       kind: string
       assetPath: string }
 
 [<CLIMutable>]
-type QaUseCasePackageManifest =
+type QaPlugInPackageManifest =
     { contractVersion: int
       id: string
       version: string
       displayName: string
       description: string option
-      behaviorProfile: QaUseCaseProfile
-      contexts: QaUseCaseContextManifest list
-      tools: QaUseCaseToolManifest list
-      ui: QaUseCaseUiManifest list }
+      behaviorProfile: QaPlugInProfile
+      contexts: QaPlugInContextManifest list
+      tools: QaPlugInToolManifest list
+      ui: QaPlugInUiManifest list }
 
 type ModelRole =
     | Realtime
@@ -87,7 +87,7 @@ type PromptSet =
       speechResultInstruction: string option }
 
 [<CLIMutable>]
-type UseCaseRuntimeOptions =
+type PlugInRuntimeOptions =
     { retrievalMode: RetrievalMode
       enableToolPlanner: bool
       enableQueryExpansion: bool
@@ -100,7 +100,7 @@ type UseCaseRuntimeOptions =
       autoWriteback: bool }
 
 [<CLIMutable>]
-type UseCaseSettingsField =
+type PlugInSettingsField =
     { key: string
       label: string
       kind: string
@@ -108,29 +108,29 @@ type UseCaseSettingsField =
       description: string option }
 
 [<CLIMutable>]
-type UseCaseDefinition =
+type PlugInDefinition =
     { id: string
       version: string
       displayName: string
       description: string option
-      profile: QaUseCaseProfile
+      profile: QaPlugInProfile
       prompts: PromptSet
       models: Map<ModelRole, ModelRoleConfig>
-      runtime: UseCaseRuntimeOptions
-      packagedContexts: QaUseCaseContextManifest list
-      settingsFacets: UseCaseSettingsField list }
+      runtime: PlugInRuntimeOptions
+      packagedContexts: QaPlugInContextManifest list
+      settingsFacets: PlugInSettingsField list }
 
-type UseCaseHostContext =
+type PlugInHostContext =
     { storageRoot: string
       packageRoot: string option
       settings: Map<string, string>
       report: string -> unit }
 
-type IUseCasePlugin =
+type IQaPlugIn =
     abstract ContractVersion: int
-    abstract Definition: UseCaseDefinition
+    abstract Definition: PlugInDefinition
     abstract GetToolProviders: unit -> IQaToolProvider list
-    abstract GetContextProviders: UseCaseHostContext -> IQaContextProvider list
+    abstract GetContextProviders: PlugInHostContext -> IQaContextProvider list
 
 module ModelRole =
     let storageName role =
@@ -213,7 +213,7 @@ module PromptSet =
           keywordInstruction = clean prompts.keywordInstruction
           speechResultInstruction = clean prompts.speechResultInstruction }
 
-module UseCaseRuntimeOptions =
+module PlugInRuntimeOptions =
     let defaults =
         { retrievalMode = FsColbertWithFallback
           enableToolPlanner = true
@@ -233,7 +233,7 @@ module UseCaseRuntimeOptions =
             realtimeMemoryTimeoutMs = max 100 runtime.realtimeMemoryTimeoutMs
             functionCallTimeoutMs = max 1000 runtime.functionCallTimeoutMs }
 
-module QaUseCaseProfile =
+module QaPlugInProfile =
     let private notEmpty (value: string) =
         if String.IsNullOrWhiteSpace value then
             None
@@ -263,7 +263,7 @@ module QaUseCaseProfile =
         |> List.choose notEmpty
         |> List.distinctBy _.ToLowerInvariant()
 
-    let sanitize (profile: QaUseCaseProfile) =
+    let sanitize (profile: QaPlugInProfile) =
         let id = profile.id |> notEmpty |> Option.defaultValue generic.id
 
         let displayName =
@@ -301,7 +301,7 @@ module QaUseCaseProfile =
             answerSystemInstruction = profile.answerSystemInstruction |> Option.bind notEmpty }
 
     let fromJsonText (json: string) =
-        JsonSerializer.Deserialize<QaUseCaseProfile>(json, jsonOptions)
+        JsonSerializer.Deserialize<QaPlugInProfile>(json, jsonOptions)
         |> Option.ofObj
         |> Option.defaultValue generic
         |> sanitize
@@ -317,7 +317,7 @@ module QaUseCaseProfile =
         with _ ->
             None
 
-    let renderHints (profile: QaUseCaseProfile) =
+    let renderHints (profile: QaPlugInProfile) =
         let profile = sanitize profile
 
         if List.isEmpty profile.keywordHints then
@@ -325,7 +325,7 @@ module QaUseCaseProfile =
         else
             profile.keywordHints |> String.concat ", "
 
-    let fingerprint (profile: QaUseCaseProfile) =
+    let fingerprint (profile: QaPlugInProfile) =
         let profile = sanitize profile
 
         let canonical =
@@ -348,7 +348,7 @@ module QaUseCaseProfile =
         |> Convert.ToHexString
         |> fun hash -> hash.ToLowerInvariant()
 
-module QaUseCasePackageManifest =
+module QaPlugInPackageManifest =
     let currentContractVersion = 1
 
     let private jsonOptions =
@@ -370,19 +370,19 @@ module QaUseCasePackageManifest =
           displayName = displayName
           description = None
           behaviorProfile =
-            { QaUseCaseProfile.generic with
+            { QaPlugInProfile.generic with
                 id = id
                 displayName = displayName }
           contexts = []
           tools = []
           ui = [] }
 
-    let sanitize (manifest: QaUseCasePackageManifest) =
+    let sanitize (manifest: QaPlugInPackageManifest) =
         let profile =
             if isNull (box manifest.behaviorProfile) then
-                QaUseCaseProfile.generic
+                QaPlugInProfile.generic
             else
-                QaUseCaseProfile.sanitize manifest.behaviorProfile
+                QaPlugInProfile.sanitize manifest.behaviorProfile
 
         { manifest with
             contractVersion =
@@ -400,7 +400,7 @@ module QaUseCasePackageManifest =
             ui = manifest.ui |> Option.ofObj |> Option.defaultValue [] }
 
     let fromJsonText (json: string) =
-        JsonSerializer.Deserialize<QaUseCasePackageManifest>(json, jsonOptions)
+        JsonSerializer.Deserialize<QaPlugInPackageManifest>(json, jsonOptions)
         |> Option.ofObj
         |> Option.map sanitize
 
@@ -413,7 +413,7 @@ module QaUseCasePackageManifest =
         with _ ->
             None
 
-module DefaultUseCasePrompts =
+module DefaultPlugInPrompts =
     let realtimeInstructions =
         """You are FsVoice's low-latency spoken front-end for question answering.
 
@@ -424,9 +424,12 @@ Allowed direct actions:
 - answer simple conversational turns directly
 
 Tool use:
-- For every use ask or question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
+- For every user ask or question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
+- Default to selected sources for source-like requests. If the user asks about the paper, document, PDF, selected sources, source, abstract, section, introduction, conclusion, "this", or "it" in a source context, call QUERY_ORACLE before answering.
+- For requests to summarize, explain, extract, find, list, quote, compare, or answer from selected source content, call QUERY_ORACLE. Examples that require QUERY_ORACLE include "summarize the abstract of the paper", "what does the introduction say", and "compare the two documents".
+- Do not answer source-like requests from general knowledge or conversational memory. The oracle is responsible for checking selected sources and saying when there is not enough source evidence.
 - Pass the user's request as the `question` argument.
-- When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
+- When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. Use needs_external_context = true when the request appears to involve selected sources, documents, tools, current facts, app state, memory, comparison, or summary beyond casual chat. These are hints only; the backend validates them and decides memory/tool/oracle handling.
 - Call QUERY_ORACLE silently. Do not say filler or status phrases before the call, such as "let me check", "one moment", "I'll look that up", or similar.
 - Do not refuse a request just because it is not about documents or selected sources.
 - Do not invent tool results, source details, page contents, citations, live values, or app state.
@@ -463,7 +466,7 @@ Use an empty calls array when no tool is needed."""
     let speechResultInstruction =
         "Start directly with the provided oracle answer. Speak it naturally and briefly. Do not add a preface such as 'I found', 'It says', 'Let me check', or 'Based on the context'. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
 
-module UseCaseDefinition =
+module PlugInDefinition =
     let currentContractVersion = 1
 
     let defaultModels =
@@ -485,23 +488,23 @@ module UseCaseDefinition =
 
     let defaultPrompts =
         { PromptSet.empty with
-            realtimeInstructions = Some DefaultUseCasePrompts.realtimeInstructions
-            transcriberPrompt = Some DefaultUseCasePrompts.transcriberPrompt
-            answerSystem = Some DefaultUseCasePrompts.answerSystem
-            answerUserTemplate = Some DefaultUseCasePrompts.answerUserTemplate
-            toolPlannerSystem = Some DefaultUseCasePrompts.toolPlannerSystem
-            toolPlannerUserTemplate = Some DefaultUseCasePrompts.toolPlannerUserTemplate
-            speechResultInstruction = Some DefaultUseCasePrompts.speechResultInstruction }
+            realtimeInstructions = Some DefaultPlugInPrompts.realtimeInstructions
+            transcriberPrompt = Some DefaultPlugInPrompts.transcriberPrompt
+            answerSystem = Some DefaultPlugInPrompts.answerSystem
+            answerUserTemplate = Some DefaultPlugInPrompts.answerUserTemplate
+            toolPlannerSystem = Some DefaultPlugInPrompts.toolPlannerSystem
+            toolPlannerUserTemplate = Some DefaultPlugInPrompts.toolPlannerUserTemplate
+            speechResultInstruction = Some DefaultPlugInPrompts.speechResultInstruction }
 
     let generic =
         { id = "generic"
           version = "1.0.0"
           displayName = "Generic QA"
           description = Some "General-purpose knowledge and memory question answering."
-          profile = QaUseCaseProfile.generic
+          profile = QaPlugInProfile.generic
           prompts = defaultPrompts
           models = defaultModels
-          runtime = UseCaseRuntimeOptions.defaults
+          runtime = PlugInRuntimeOptions.defaults
           packagedContexts = []
           settingsFacets = [] }
 
@@ -531,7 +534,7 @@ module UseCaseDefinition =
             else
                 Some(text.Trim()))
 
-    let private sanitizeSettingsFacet (field: UseCaseSettingsField) =
+    let private sanitizeSettingsFacet (field: PlugInSettingsField) =
         match cleanText field.key with
         | None -> None
         | Some key ->
@@ -545,12 +548,12 @@ module UseCaseDefinition =
                   defaultValue = field.defaultValue |> Option.bind cleanText
                   description = field.description |> Option.bind cleanText }
 
-    let sanitize (definition: UseCaseDefinition) =
+    let sanitize (definition: PlugInDefinition) =
         let profile =
             if isNull (box definition.profile) then
-                QaUseCaseProfile.generic
+                QaPlugInProfile.generic
             else
-                QaUseCaseProfile.sanitize definition.profile
+                QaPlugInProfile.sanitize definition.profile
 
         let model role fallback =
             definition.models
@@ -578,10 +581,10 @@ module UseCaseDefinition =
                 definition.runtime
                 |> fun runtime ->
                     if isNull (box runtime) then
-                        UseCaseRuntimeOptions.defaults
+                        PlugInRuntimeOptions.defaults
                     else
                         runtime
-                |> UseCaseRuntimeOptions.sanitize
+                |> PlugInRuntimeOptions.sanitize
             packagedContexts = definition.packagedContexts |> Option.ofObj |> Option.defaultValue []
             settingsFacets =
                 definition.settingsFacets
@@ -627,7 +630,7 @@ module UseCaseDefinition =
                    version = definition.version
                    displayName = definition.displayName
                    description = definition.description
-                   profileHash = QaUseCaseProfile.fingerprint definition.profile
+                   profileHash = QaPlugInProfile.fingerprint definition.profile
                    prompts = definition.prompts
                    models = modelRows
                    runtime = runtime

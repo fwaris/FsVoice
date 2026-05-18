@@ -16,14 +16,14 @@
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
 
     <!-- Display name -->
-    <ApplicationTitle>FsVoice.Demo</ApplicationTitle>
+    <ApplicationTitle>FsVoice</ApplicationTitle>
 
     <!-- App Identifier -->
     <ApplicationId>com.fsvoice.FsVoice.Demo</ApplicationId>
     <ApplicationIdGuid>8BB52405-D58A-46FA-B299-CC07CF58E5F6</ApplicationIdGuid>
 
     <!-- Versions -->
-    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
     <ApplicationVersion>1</ApplicationVersion>
 
     <TargetPlatformIdentifier Condition=" $(TargetPlatformIdentifier) == '' ">$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</TargetPlatformIdentifier>
@@ -56,6 +56,7 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
+    <_AppBundleName>$(AssemblyName)</_AppBundleName>
     <MtouchLink>None</MtouchLink>
     <UseInterpreter>true</UseInterpreter>
     <MtouchInterpreter>-all</MtouchInterpreter>
@@ -79,27 +80,17 @@
     <Compile Include="Icons.fs" />
     <Compile Include="Log.fs" />
     <Compile Include="StorageMigration.fs" />
-    <Compile Include="Utils.fs" />
-    <Compile Include="PdfSourcesModel.fs" />
     <Compile Include="Settings.fs" />
-    <Compile Include="WorkFlowTypes.fs" />
     <Compile Include="Audio.fs" />
-    <Compile Include="KnowledgeSources.fs" />
-    <Compile Include="DurableMemory.fs" />
-    <Compile Include="UseCases.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
-    <Compile Include="Agents\AsyncPriorityQueue.fs" />
-    <Compile Include="Agents\VoiceAgent.fs" />
-    <Compile Include="Agents\AppAgent.fs" />
-    <Compile Include="Agents\QaAgent.fs" />
-    <Compile Include="Agents\WorkFlow.fs" />
     <Compile Include="Interaction\Connect.fs" />
     <Compile Include="Interaction\Update.fs" />
     <Compile Include="Views\ViewControls.fs" />
     <Compile Include="Views\ToolbarView.fs" />
     <Compile Include="Views\PdfSourcesView.fs" />
     <Compile Include="Views\SettingsView.fs" />
+    <Compile Include="Views\IndexPreviewView.fs" />
     <Compile Include="Views\MainView.fs" />
     <Compile Include="App.fs" />
     <Compile Include="MauiProgram.fs" />
@@ -163,8 +154,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Testing\FsVoice.Testing.fsproj" />
     <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
     <ProjectReference Include="..\FsVoice.PdfRasterization\FsVoice.PdfRasterization.fsproj" />
+    <ProjectReference Include="..\FsVoiceDemo.Orchestration\FsVoiceDemo.Orchestration.fsproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -182,7 +177,6 @@
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="FsColbert" />
-    <PackageReference Include="RTFlow" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
@@ -192,8 +186,15 @@
     <PackageReference Update="Microsoft.Maui.Controls" Version="10.0.51" />
     <PackageReference Update="Microsoft.Maui.Controls.Compatibility" Version="10.0.51" />
   </ItemGroup>
-  
-  
+
+  <Target Name="PruneStaleMacCatalystAppBundles" BeforeTargets="_CreateAppBundle" Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst' and '$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <MacCatalystOutputDirectory>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(OutDir)'))</MacCatalystOutputDirectory>
+    </PropertyGroup>
+
+    <Exec Command="/usr/bin/find &quot;$(MacCatalystOutputDirectory)&quot; -maxdepth 1 -type d -name '*.app' ! -name &quot;$(_AppBundleName).app&quot; -prune -exec /bin/rm -rf {} +" Condition="Exists('$(MacCatalystOutputDirectory)')" />
+  </Target>
+
   <Target Name="ForceCodesign" AfterTargets="_CodesignAppBundle" Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst' and '$(Configuration)' == 'Debug'">
     <Exec Command="codesign -f -s - --deep &quot;$(MSBuildProjectDirectory)/$(_AppBundlePath)&quot;" />
   </Target>

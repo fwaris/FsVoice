@@ -26,7 +26,7 @@ type QaSessionOptions =
       toolProviderDirectory: string option
       retrievalMode: RetrievalMode
       clients: QaModelClients
-      useCaseProfile: QaUseCaseProfile
+      plugInProfile: QaPlugInProfile
       prompts: PromptSet
       modelRoles: Map<ModelRole, ModelRoleConfig>
       answerModelId: string
@@ -54,9 +54,9 @@ module QaSessionOptions =
           toolProviderDirectory = None
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
-          useCaseProfile = QaUseCaseProfile.generic
+          plugInProfile = QaPlugInProfile.generic
           prompts = PromptSet.empty
-          modelRoles = UseCaseDefinition.defaultModels
+          modelRoles = PlugInDefinition.defaultModels
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
@@ -163,7 +163,7 @@ type QaSession(options: QaSessionOptions) =
         options.modelRoles
         |> Option.ofObj
         |> Option.bind (Map.tryFind role)
-        |> Option.orElse (UseCaseDefinition.defaultModels |> Map.tryFind role)
+        |> Option.orElse (PlugInDefinition.defaultModels |> Map.tryFind role)
         |> Option.defaultValue (ModelRoleConfig.create options.answerModelId)
 
     let roleMaxTokens role fallback =
@@ -284,12 +284,12 @@ type QaSession(options: QaSessionOptions) =
 
         let systemPrompt =
             options.prompts.answerSystem
-            |> Option.orElse options.useCaseProfile.answerSystemInstruction
-            |> Option.defaultValue DefaultUseCasePrompts.answerSystem
+            |> Option.orElse options.plugInProfile.answerSystemInstruction
+            |> Option.defaultValue DefaultPlugInPrompts.answerSystem
 
         let userPrompt =
             options.prompts.answerUserTemplate
-            |> Option.defaultValue DefaultUseCasePrompts.answerUserTemplate
+            |> Option.defaultValue DefaultPlugInPrompts.answerUserTemplate
             |> renderTemplate
                 [ "question", snapshot.text
                   "typedMemory", typedMemory
@@ -382,11 +382,11 @@ type QaSession(options: QaSessionOptions) =
     let toolPlanPrompt question (catalog: QaToolCatalog) =
         let systemPrompt =
             options.prompts.toolPlannerSystem
-            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerSystem
+            |> Option.defaultValue DefaultPlugInPrompts.toolPlannerSystem
 
         let userPrompt =
             options.prompts.toolPlannerUserTemplate
-            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerUserTemplate
+            |> Option.defaultValue DefaultPlugInPrompts.toolPlannerUserTemplate
             |> renderTemplate [ "toolInventory", renderToolInventory catalog; "question", question ]
 
         [ ChatMessage(ChatRole.System, systemPrompt)
@@ -659,24 +659,24 @@ type QaSession(options: QaSessionOptions) =
                         else
                             None
                     keywordGenerationClient = options.clients.queryExpansion
-                    useCaseProfile = options.useCaseProfile
-                    useCaseFingerprint =
-                        { UseCaseDefinition.generic with
-                            id = options.useCaseProfile.id
-                            displayName = options.useCaseProfile.displayName
-                            description = options.useCaseProfile.description
-                            profile = options.useCaseProfile
+                    plugInProfile = options.plugInProfile
+                    plugInFingerprint =
+                        { PlugInDefinition.generic with
+                            id = options.plugInProfile.id
+                            displayName = options.plugInProfile.displayName
+                            description = options.plugInProfile.description
+                            profile = options.plugInProfile
                             prompts = options.prompts
                             models = options.modelRoles
                             runtime =
-                                { UseCaseRuntimeOptions.defaults with
+                                { PlugInRuntimeOptions.defaults with
                                     retrievalMode = mode
                                     enableToolPlanner = options.enableToolPlanner
                                     enableQueryExpansion = options.enableQueryExpansion
                                     elaborateIndexKeywords = options.elaborateIndexKeywords
                                     useLexicalFilter = options.useLexicalFilter
                                     autoWriteback = options.autoWriteback } }
-                        |> UseCaseDefinition.fingerprint
+                        |> PlugInDefinition.fingerprint
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords
                     pdfParsingMode = options.pdfParsingMode

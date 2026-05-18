@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Core</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Core</PackageId>
+    <Description>Runtime engine, event bus, tool dispatcher, and backboard implementation for FsVoice.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    
+    <Compile Include="EventBus.fs" />
+    <Compile Include="Blackboard.fs" />
+    <Compile Include="ToolDispatcher.fs" />
+    <Compile Include="RuntimeEngine.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+</Project>

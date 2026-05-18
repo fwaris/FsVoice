@@ -19,10 +19,7 @@ module ToolbarView =
 
     let main model =
         (Grid([ Dimension.Absolute 52.; Dimension.Star; Dimension.Absolute 52. ], [ Dimension.Absolute 50. ]) {
-            (ViewControls.iconButton Icons.settings Settings_Show)
-                .isEnabled(not model.isBusy)
-                .alignStartHorizontal()
-                .gridColumn (0)
+            (ViewControls.iconButton Icons.settings Settings_Show).alignStartHorizontal().gridColumn (0)
 
             Label(C.APP_NAME)
                 .font(size = 20., attributes = FontAttributes.Bold)

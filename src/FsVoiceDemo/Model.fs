@@ -2,17 +2,22 @@ namespace FsVoiceDemo
 
 open System.Threading
 open System.Threading.Channels
+open System.Text.Json
+open FsVoice.Types
 open FsVoiceDemo.WorkFlow
-open RTFlow
 open RTOpenAI.Api
 
 type AppPage =
     | Main
     | Settings
+    | IndexPreview of documentId: string
 
 type ConnectionBundle =
-    { flow: IFlow<FlowMsg, AgentMsg>
-      connection: Connection }
+    { session: IVoiceSession<ToHost, FromHost>
+      connection: Connection
+      serverEvents: Channel<JsonElement>
+      clientEvents: Channel<JsonElement>
+      cancellation: CancellationTokenSource }
 
 type AppLink =
     | PrivacyPolicy
@@ -21,18 +26,20 @@ type AppLink =
 
 type StartParams =
     { apiKey: string
-      useCase: FsVoice.QA.UseCaseDefinition
-      useCasePlugin: FsVoice.QA.IUseCasePlugin
-      useCaseSettings: Map<string, string>
-      retrievalMode: RetrievalMode
-      sources: KnowledgeSource list
+      orchestration: IVoiceOrchestration<ToHost, FromHost>
+      context: VoiceOrchestrationContext
       mailbox: Channel<Msg>
-      logExpansions: bool
-      logChunks: bool
-      useLexicalFilter: bool
-      elaborateIndexKeywords: bool
-      useHybridPdfParsing: bool
-      useLayoutAnalysis: bool }
+      runtimeSettings: RuntimeSettings }
+
+and IndexPreviewState =
+    | PreviewLoading of documentId: string
+    | PreviewReady of KnowledgeSources.IndexPreview
+    | PreviewFailed of documentId: string * error: string
+
+and PickedSourceImportResult =
+    { documents: PdfDocumentSource list
+      newDocuments: PdfDocumentSource list
+      logs: string list }
 
 and Model =
     { currentPage: AppPage
@@ -40,9 +47,10 @@ and Model =
       bundle: ConnectionBundle option
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
-      activeUseCase: FsVoice.QA.UseCaseDefinition
-      useCasePlugin: FsVoice.QA.IUseCasePlugin
-      useCaseSettings: Map<string, string>
+      activePlugIn: FsVoice.QA.PlugInDefinition
+      qaPlugIn: FsVoice.QA.IQaPlugIn
+      runtimeSettings: RuntimeSettings
+      plugInSettings: Map<string, string>
       modelRoleOverrides: Map<FsVoice.QA.ModelRole, string>
       retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
@@ -56,28 +64,31 @@ and Model =
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
-      useLayoutAnalysis: bool }
+      useLayoutAnalysis: bool
+      indexPreview: IndexPreviewState option }
 
 and Msg =
     | OpenAiKeyChanged of string
     | ModelRoleModelChanged of FsVoice.QA.ModelRole * string
-    | UseCaseSettingChanged of string * string
+    | PlugInSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode
     | Settings_Show
     | Settings_Close
     | OpenAppLink of AppLink
     | AppLinkOpened of Result<unit, exn>
     | ToggleSecretVisibility
-    | PickPdfs
-    | PickPdfsCompleted of Result<PdfDocumentSource list, exn>
-    | PickIndexBundle
-    | IndexBundleImportCompleted of Result<PdfDocumentSource list * string list, exn>
+    | PickSources
+    | PickSourcesCompleted of Result<PickedSourceImportResult, exn>
     | PdfProcessingCompleted of Result<PdfProcessingOutcome, exn>
     | CancelPdfProcessing
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
     | DeletePdf of string
     | DeletePdfCompleted of Result<PdfDeleteResult, exn>
+    | PreviewIndex of string
+    | RefreshIndexPreview
+    | IndexPreviewBack
+    | IndexPreviewLoaded of string * Result<KnowledgeSources.IndexPreview, exn>
     | ApplySources
     | StartStop
     | StartCompleted of Result<ConnectionBundle, exn>

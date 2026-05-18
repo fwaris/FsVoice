@@ -20,7 +20,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
+    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Hosting.AspNetCore\FsVoice.Hosting.AspNetCore.fsproj" />
+    <ProjectReference Include="..\FsVoice.Testing\FsVoice.Testing.fsproj" />
     <ProjectReference Include="..\FsVoice.Tools\FsVoice.Tools.fsproj" />
+    <ProjectReference Include="..\FsVoice.Types\FsVoice.Types.fsproj" />
+    <ProjectReference Include="..\FsVoiceDemo.Orchestration\FsVoiceDemo.Orchestration.fsproj" />
   </ItemGroup>
 
 </Project>

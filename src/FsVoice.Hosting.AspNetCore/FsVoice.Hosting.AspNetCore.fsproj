@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Hosting.AspNetCore</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Hosting.AspNetCore</PackageId>
+    <Description>ASP.NET bridge runtime for FsVoice browser, WebRTC, and WebSocket hosts.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="BridgeTypes.fs" />
+    <Compile Include="BridgeSession.fs" />
+    <Compile Include="BridgeSessionStore.fs" />
+    <Compile Include="BridgeEndpoints.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

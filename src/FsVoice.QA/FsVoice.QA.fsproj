@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
-    <Compile Include="UseCases.fs" />
+    <Compile Include="PlugIns.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="MemoryTypes.fs" />
     <Compile Include="DoclingHybrid.fs" />
@@ -22,6 +22,7 @@
     <Compile Include="DurableMemory.fs" />
     <Compile Include="MemoryService.fs" />
     <Compile Include="Tools.fs" />
+    <Compile Include="VoicePluginAdapter.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
 
@@ -33,6 +34,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsVoice.QA.Abstractions\FsVoice.QA.Abstractions.fsproj" />
+    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

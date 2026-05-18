@@ -7,6 +7,7 @@ This app can be released from a public repo without committing signing material.
 - `build/release/release.env.example` documents the environment variables used by local release scripts.
 - `build/release/publish-ios.sh` builds an iOS App Store package using environment-provided signing values.
 - `build/release/publish-android.sh` builds a signed Android App Bundle using environment-provided signing values.
+- `build/release/publish-maccatalyst.sh` builds a Mac Catalyst app using the same app identity and version values.
 - `build/release/ios-export-options.template.plist` is a template for App Store Connect export/upload automation.
 - `build/release/android-signing.properties.example` is a local signing file template.
 
@@ -31,6 +32,9 @@ APP_BUILD
 APPLE_TEAM_ID
 IOS_CODESIGN_KEY
 IOS_CODESIGN_PROVISION
+MACCATALYST_RUNTIME_IDENTIFIER
+MACCATALYST_CODESIGN_KEY
+MACCATALYST_CODESIGN_PROVISION
 ANDROID_KEYSTORE
 ANDROID_KEY_ALIAS
 ANDROID_KEYSTORE_PASSWORD
@@ -51,6 +55,17 @@ ANDROID_KEY_PASSWORD
 The Release iOS configuration disables the Mono interpreter, enables AOT, and disables assembly IL stripping because the current toolchain crashes stripping `FSharp.Core.dll`.
 
 Before App Review, provide reviewer instructions and a test OpenAI API key or another reviewer-access path.
+
+## Mac Catalyst
+
+1. Copy `build/release/release.env.example` to `build/release/release.env` and fill in local values.
+2. Run:
+
+```bash
+./build/release/publish-maccatalyst.sh
+```
+
+The Mac Catalyst script uses the same `APP_TITLE`, `APP_ID`, `APP_VERSION`, and `APP_BUILD` values as the iOS and Android release scripts so the desktop build cannot drift behind the mobile builds.
 
 ## Android
 

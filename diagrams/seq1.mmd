@@ -7,14 +7,14 @@ sequenceDiagram
     participant Tool as Tool Providers
     participant LLM as Model Clients
 
-    UI->>Loader: Select use-case packages
+    UI->>Loader: Select plug-in packages
     Loader->>Ctx: Load prebuilt indexes or local indexes
     Loader->>Tool: Load package tool providers
     Loader-->>UI: Component set ready
 
     UI->>Orch: User turn
     Orch->>Mem: Recall relevant memory
-    Orch->>Ctx: Retrieve use-case context
+    Orch->>Ctx: Retrieve plug-in context
     Orch->>Tool: Invoke selected tools
     Orch->>LLM: Generate answer from memory, context, tools
     LLM-->>Orch: Answer

@@ -4,55 +4,54 @@ open System
 open System.IO
 open System.Reflection
 open System.Runtime.InteropServices
-open Microsoft.Maui.Storage
 
-type LoadedUseCase =
-    { plugin: FsVoice.QA.IUseCasePlugin
-      definition: FsVoice.QA.UseCaseDefinition }
+type LoadedPlugIn =
+    { plugIn: FsVoice.QA.IQaPlugIn
+      definition: FsVoice.QA.PlugInDefinition }
 
-module UseCaseHost =
-    let private pluginFolder () =
-        Path.Combine(FileSystem.AppDataDirectory, "use-case-plugins")
+module PlugInHost =
+    let private plugInFolder storageRoot = Path.Combine(storageRoot, "plug-ins")
 
-    let private supportsFolderPlugins () =
+    let private supportsFolderPlugIns () =
         not (RuntimeInformation.IsOSPlatform(OSPlatform.Create("IOS")))
 
-    let private bundledAssemblies () =
-        [ typeof<FsVoice.QA.GenericQaUseCasePlugin>.Assembly
-          Assembly.GetExecutingAssembly() ]
+    let private bundledAssemblies hostAssemblies =
+        [ yield typeof<FsVoice.QA.GenericQaPlugIn>.Assembly
+          yield Assembly.GetExecutingAssembly()
+          yield! hostAssemblies ]
         |> List.distinctBy _.FullName
 
-    let private pluginTypes (assembly: Assembly) =
+    let private plugInTypes (assembly: Assembly) =
         try
             assembly.GetTypes()
             |> Array.filter (fun t ->
                 t.IsPublic
                 && not t.IsAbstract
-                && typeof<FsVoice.QA.IUseCasePlugin>.IsAssignableFrom t)
+                && typeof<FsVoice.QA.IQaPlugIn>.IsAssignableFrom t)
             |> Array.toList
         with ex ->
             ignore ex
             []
 
-    let private instantiatePlugin (pluginType: Type) =
+    let private instantiatePlugIn (plugInType: Type) =
         try
-            match pluginType.GetConstructor(Type.EmptyTypes) with
-            | null -> Error $"Use-case plugin {pluginType.FullName} must expose a public parameterless constructor."
-            | ctor -> Ok(ctor.Invoke(Array.empty) :?> FsVoice.QA.IUseCasePlugin)
+            match plugInType.GetConstructor(Type.EmptyTypes) with
+            | null -> Error $"PlugIn {plugInType.FullName} must expose a public parameterless constructor."
+            | ctor -> Ok(ctor.Invoke(Array.empty) :?> FsVoice.QA.IQaPlugIn)
         with ex ->
-            Error $"Unable to create use-case plugin {pluginType.FullName}: {ex.Message}"
+            Error $"Unable to create plug-in {plugInType.FullName}: {ex.Message}"
 
     let private loadAssembly path =
         try
             Assembly.LoadFrom path |> Ok
         with ex ->
-            Error $"Skipping use-case plugin assembly {path}: {ex.Message}"
+            Error $"Skipping plug-in assembly {path}: {ex.Message}"
 
-    let private folderAssemblies () =
-        if not (supportsFolderPlugins ()) then
-            [], [ "Use-case plugin folder loading is disabled on iOS; bundled plugins can still be scanned." ]
+    let private folderAssemblies storageRoot =
+        if not (supportsFolderPlugIns ()) then
+            [], [ "PlugIn folder loading is disabled on iOS; bundled plug-ins can still be scanned." ]
         else
-            let folder = pluginFolder ()
+            let folder = plugInFolder storageRoot
 
             if not (Directory.Exists folder) then
                 [], []
@@ -69,59 +68,62 @@ module UseCaseHost =
 
     let private loadFromAssembly (logs: ResizeArray<string>) (assembly: Assembly) =
         assembly
-        |> pluginTypes
-        |> List.choose (fun pluginType ->
-            match instantiatePlugin pluginType with
+        |> plugInTypes
+        |> List.choose (fun plugInType ->
+            match instantiatePlugIn plugInType with
             | Error err ->
                 logs.Add err
                 None
-            | Ok plugin when plugin.ContractVersion <> FsVoice.QA.UseCaseDefinition.currentContractVersion ->
+            | Ok plugIn when plugIn.ContractVersion <> FsVoice.QA.PlugInDefinition.currentContractVersion ->
                 logs.Add
-                    $"Skipping use-case plugin {pluginType.FullName}: contract version {plugin.ContractVersion} is not supported."
+                    $"Skipping plug-in {plugInType.FullName}: contract version {plugIn.ContractVersion} is not supported."
 
                 None
-            | Ok plugin ->
+            | Ok plugIn ->
                 Some
-                    { plugin = plugin
-                      definition = FsVoice.QA.UseCaseDefinition.sanitize plugin.Definition })
+                    { plugIn = plugIn
+                      definition = FsVoice.QA.PlugInDefinition.sanitize plugIn.Definition })
 
-    let loadAll () =
+    let loadAll storageRoot hostAssemblies =
         let logs = ResizeArray<string>()
-        let bundled = bundledAssemblies () |> List.collect (loadFromAssembly logs)
-        let folderAssemblies, folderLogs = folderAssemblies ()
-        folderLogs |> List.iter logs.Add
-        let folderPlugins = folderAssemblies |> List.collect (loadFromAssembly logs)
-        let seen = Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        let accepted = ResizeArray<LoadedUseCase>()
 
-        for loaded in bundled @ folderPlugins do
+        let bundled =
+            bundledAssemblies hostAssemblies |> List.collect (loadFromAssembly logs)
+
+        let folderAssemblies, folderLogs = folderAssemblies storageRoot
+        folderLogs |> List.iter logs.Add
+        let folderPlugIns = folderAssemblies |> List.collect (loadFromAssembly logs)
+        let seen = Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        let accepted = ResizeArray<LoadedPlugIn>()
+
+        for loaded in bundled @ folderPlugIns do
             if seen.Add loaded.definition.id then
                 accepted.Add loaded
             else
-                logs.Add $"Duplicate use-case plugin skipped: {loaded.definition.id}"
+                logs.Add $"Duplicate plug-in skipped: {loaded.definition.id}"
 
         List.ofSeq accepted, List.ofSeq logs
 
-    let loadActive activeUseCaseId =
-        let plugins, logs = loadAll ()
+    let loadActive storageRoot hostAssemblies activePlugInId =
+        let plugIns, logs = loadAll storageRoot hostAssemblies
 
         let active =
-            activeUseCaseId
+            activePlugInId
             |> Option.bind (fun id ->
-                plugins
+                plugIns
                 |> List.tryFind (fun loaded ->
                     String.Equals(loaded.definition.id, id, StringComparison.OrdinalIgnoreCase)))
             |> Option.orElse (
-                plugins
-                |> List.tryFind (fun loaded -> loaded.definition.id = FsVoice.QA.UseCaseDefinition.generic.id)
+                plugIns
+                |> List.tryFind (fun loaded -> loaded.definition.id = FsVoice.QA.PlugInDefinition.generic.id)
             )
             |> Option.defaultWith (fun () ->
-                { plugin = FsVoice.QA.GenericQaUseCasePlugin() :> FsVoice.QA.IUseCasePlugin
-                  definition = FsVoice.QA.UseCaseDefinition.generic })
+                { plugIn = FsVoice.QA.GenericQaPlugIn() :> FsVoice.QA.IQaPlugIn
+                  definition = FsVoice.QA.PlugInDefinition.generic })
 
         active, logs
 
-module UseCaseComposer =
+module PlugInComposer =
     let toQaRetrievalMode (mode: RetrievalMode) =
         match mode with
         | InternalDocumentIndex -> FsVoice.QA.InternalDocumentIndex
@@ -137,9 +139,9 @@ module UseCaseComposer =
         retrievalMode
         useLexicalFilter
         elaborateIndexKeywords
-        (definition: FsVoice.QA.UseCaseDefinition)
+        (definition: FsVoice.QA.PlugInDefinition)
         =
-        let definition = FsVoice.QA.UseCaseDefinition.sanitize definition
+        let definition = FsVoice.QA.PlugInDefinition.sanitize definition
 
         let models =
             modelOverrides
@@ -151,7 +153,7 @@ module UseCaseComposer =
                         let current =
                             definition.models
                             |> Map.tryFind role
-                            |> Option.defaultValue (FsVoice.QA.UseCaseDefinition.model role definition)
+                            |> Option.defaultValue (FsVoice.QA.PlugInDefinition.model role definition)
 
                         models |> Map.add role { current with modelId = modelId })
                 definition.models

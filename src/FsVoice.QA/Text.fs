@@ -64,8 +64,8 @@ module Text =
               @"^\s*(?:okay|ok|hey|so)\b[,\s]*", ""
               @"^\s*(?:can|could|would)\s+you\s+(?:please\s+)?", "" ]
 
-        let private profileReplacements (profile: QaUseCaseProfile) =
-            let profile = QaUseCaseProfile.sanitize profile
+        let private profileReplacements (profile: QaPlugInProfile) =
+            let profile = QaPlugInProfile.sanitize profile
 
             profile.voiceReplacements
             |> List.map (fun replacement -> replacement.pattern, replacement.replacement)
@@ -77,7 +77,7 @@ module Text =
             Regex.IsMatch(value, boundary phrase, regexOptions)
 
         let private expansionTerms profile normalized =
-            let profile = QaUseCaseProfile.sanitize profile
+            let profile = QaPlugInProfile.sanitize profile
 
             profile.queryExpansionRules
             |> List.collect (fun rule ->
@@ -131,7 +131,7 @@ module Text =
                 |> Seq.toList }
 
         let forVoiceLikeRetrieval query =
-            forVoiceLikeRetrievalWithProfile QaUseCaseProfile.generic query
+            forVoiceLikeRetrievalWithProfile QaPlugInProfile.generic query
 
 module ModelCapabilities =
     let private temperatureUnsupportedPrefixes = [ "gpt-5.5" ]

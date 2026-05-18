@@ -13,8 +13,8 @@ type FsColbertContextProviderOptions =
       keywordGenerationClient: IChatClient option
       disposeQueryExpansionClient: bool
       disposeKeywordGenerationClient: bool
-      useCaseProfile: QaUseCaseProfile
-      useCaseFingerprint: string
+      plugInProfile: QaPlugInProfile
+      plugInFingerprint: string
       keywordModelId: string
       elaborateIndexKeywords: bool
       pdfParsingMode: KnowledgeSources.PdfParsingMode
@@ -33,8 +33,8 @@ module FsColbertContextProviderOptions =
           keywordGenerationClient = None
           disposeQueryExpansionClient = false
           disposeKeywordGenerationClient = false
-          useCaseProfile = QaUseCaseProfile.generic
-          useCaseFingerprint = ""
+          plugInProfile = QaPlugInProfile.generic
+          plugInFingerprint = ""
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
           pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
@@ -72,8 +72,8 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                                 enabled = options.elaborateIndexKeywords
                                 client = options.keywordGenerationClient
                                 modelId = options.keywordModelId
-                                useCaseProfile = options.useCaseProfile
-                                useCaseFingerprint = options.useCaseFingerprint }
+                                plugInProfile = options.plugInProfile
+                                plugInFingerprint = options.plugInFingerprint }
 
                         KnowledgeSources.loadIndex
                             options.storageRoot
@@ -94,7 +94,7 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
 
         member _.RetrieveAsync(request, cancellationToken) =
             KnowledgeSources.rankWithProfile
-                options.useCaseProfile
+                options.plugInProfile
                 options.queryExpansionClient
                 options.logExpansions
                 options.logChunks

@@ -5,26 +5,18 @@ open System.IO
 open System.Threading
 open FsVoiceDemo
 open Microsoft.Extensions.AI
-open Microsoft.Maui.Storage
 open OpenAI.Chat
 open RTFlow
 open RTFlow.Functions
 
 module QaAgent =
-    type SourceFlags =
-        { logExpansions: bool
-          logChunks: bool
-          useLexicalFilter: bool
-          elaborateIndexKeywords: bool
-          useHybridPdfParsing: bool
-          useLayoutAnalysis: bool }
-
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
+          storageRoot: string
           apiKey: string
-          useCase: FsVoice.QA.UseCaseDefinition
-          useCasePlugin: FsVoice.QA.IUseCasePlugin
-          useCaseSettings: Map<string, string>
+          plugIn: FsVoice.QA.PlugInDefinition
+          qaPlugIn: FsVoice.QA.IQaPlugIn
+          plugInSettings: Map<string, string>
           session: FsVoice.QA.IQaOrchestrator option
           retrievalMode: FsVoiceDemo.RetrievalMode
           sources: KnowledgeSource list
@@ -86,10 +78,8 @@ module QaAgent =
               sensitive = judgement.riskFlags.sensitive
               conflictLikely = judgement.riskFlags.conflictLikely } }
 
-    let private storageRoot () = FileSystem.AppDataDirectory
-
-    let private modelConfig role (useCase: FsVoice.QA.UseCaseDefinition) =
-        FsVoice.QA.UseCaseDefinition.model role useCase
+    let private modelConfig role (plugIn: FsVoice.QA.PlugInDefinition) =
+        FsVoice.QA.PlugInDefinition.model role plugIn
 
     let private createSession (st: State) flags : FsVoice.QA.IQaOrchestrator =
         let clients: FsVoice.QA.QaModelClients =
@@ -97,39 +87,39 @@ module QaAgent =
                 FsVoice.QA.QaModelClients.none
             else
                 let queryExpansion =
-                    createClient st.apiKey (modelConfig FsVoice.QA.QueryExpansion st.useCase).modelId
+                    createClient st.apiKey (modelConfig FsVoice.QA.QueryExpansion st.plugIn).modelId
 
                 let planner =
-                    createClient st.apiKey (modelConfig FsVoice.QA.Planner st.useCase).modelId
+                    createClient st.apiKey (modelConfig FsVoice.QA.Planner st.plugIn).modelId
 
                 let answer =
-                    createClient st.apiKey (modelConfig FsVoice.QA.Answer st.useCase).modelId
+                    createClient st.apiKey (modelConfig FsVoice.QA.Answer st.plugIn).modelId
 
                 { queryExpansion = Some queryExpansion
                   toolPlanner = Some planner
                   answerGenerator = Some answer }
 
-        let storageRoot = storageRoot ()
-        let answerModel = modelConfig FsVoice.QA.Answer st.useCase
-        let keywordModel = modelConfig FsVoice.QA.Keyword st.useCase
+        let storageRoot = st.storageRoot
+        let answerModel = modelConfig FsVoice.QA.Answer st.plugIn
+        let keywordModel = modelConfig FsVoice.QA.Keyword st.plugIn
 
         let options =
             { FsVoice.QA.QaSessionOptions.create storageRoot with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
-                toolProviders = st.useCasePlugin.GetToolProviders()
-                useCaseProfile = st.useCase.profile
-                prompts = st.useCase.prompts
-                modelRoles = st.useCase.models
+                toolProviders = st.qaPlugIn.GetToolProviders()
+                plugInProfile = st.plugIn.profile
+                prompts = st.plugIn.prompts
+                modelRoles = st.plugIn.models
                 answerModelId = answerModel.modelId
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
-                enableToolPlanner = st.useCase.runtime.enableToolPlanner
-                enableQueryExpansion = st.useCase.runtime.enableQueryExpansion
-                memoryCandidateChunks = st.useCase.runtime.memoryCandidateChunks
-                maxContextChunks = st.useCase.runtime.maxContextChunks
-                autoWriteback = st.useCase.runtime.autoWriteback
+                enableToolPlanner = st.plugIn.runtime.enableToolPlanner
+                enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
+                memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
+                maxContextChunks = st.plugIn.runtime.maxContextChunks
+                autoWriteback = st.plugIn.runtime.autoWriteback
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -142,15 +132,15 @@ module QaAgent =
         let qaMode = toQaMode mode
         let qaSources = sources |> List.map toQaSource
 
-        let keywordModel = modelConfig FsVoice.QA.Keyword st.useCase
+        let keywordModel = modelConfig FsVoice.QA.Keyword st.plugIn
 
         let options =
-            { FsVoice.QA.FsColbertContextProviderOptions.create (storageRoot ()) qaMode qaSources with
+            { FsVoice.QA.FsColbertContextProviderOptions.create st.storageRoot qaMode qaSources with
                 queryExpansionClient = None
                 keywordGenerationClient = None
                 disposeKeywordGenerationClient = false
-                useCaseProfile = st.useCase.profile
-                useCaseFingerprint = FsVoice.QA.UseCaseDefinition.fingerprint st.useCase
+                plugInProfile = st.plugIn.profile
+                plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint st.plugIn
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
@@ -162,17 +152,17 @@ module QaAgent =
 
         new FsVoice.QA.FsColbertContextProvider(options) :> FsVoice.QA.IQaContextProvider
 
-    let private createPluginContextProviders st =
+    let private createPlugInContextProviders st =
         try
-            let hostContext: FsVoice.QA.UseCaseHostContext =
-                { storageRoot = storageRoot ()
+            let hostContext: FsVoice.QA.PlugInHostContext =
+                { storageRoot = st.storageRoot
                   packageRoot = None
-                  settings = st.useCaseSettings
+                  settings = st.plugInSettings
                   report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
 
-            st.useCasePlugin.GetContextProviders hostContext
+            st.qaPlugIn.GetContextProviders hostContext
         with ex ->
-            st.bus.PostToAgent(Ag_Log $"Use-case context providers failed to load: {ex.Message}")
+            st.bus.PostToAgent(Ag_Log $"PlugIn context providers failed to load: {ex.Message}")
             []
 
     let private configureSession st flags mode sources (session: FsVoice.QA.IQaOrchestrator) =
@@ -180,7 +170,7 @@ module QaAgent =
             KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
 
             let provider = createContextProvider st flags mode sources
-            let providers = createPluginContextProviders st @ [ provider ]
+            let providers = createPlugInContextProviders st @ [ provider ]
             let! errors = session.ConfigureAsync(providers, CancellationToken.None) |> Async.AwaitTask
 
             for err in errors do
@@ -288,14 +278,6 @@ module QaAgent =
         async {
             match msg with
             | Ag_SourcesUpdated(mode, sources, flags) ->
-                let flags: SourceFlags =
-                    { logExpansions = flags.logExpansions
-                      logChunks = flags.logChunks
-                      useLexicalFilter = flags.useLexicalFilter
-                      elaborateIndexKeywords = flags.elaborateIndexKeywords
-                      useHybridPdfParsing = flags.useHybridPdfParsing
-                      useLayoutAnalysis = flags.useLayoutAnalysis }
-
                 if st.session.IsSome && sameSourceConfiguration st mode sources flags then
                     st.bus.PostToAgent(
                         Ag_Log
@@ -330,21 +312,14 @@ module QaAgent =
             | _ -> return st
         }
 
-    let start apiKey useCase useCasePlugin useCaseSettings retrievalMode sources flags bus =
-        let flags: SourceFlags =
-            { logExpansions = flags.logExpansions
-              logChunks = flags.logChunks
-              useLexicalFilter = flags.useLexicalFilter
-              elaborateIndexKeywords = flags.elaborateIndexKeywords
-              useHybridPdfParsing = flags.useHybridPdfParsing
-              useLayoutAnalysis = flags.useLayoutAnalysis }
-
+    let start storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus =
         let st0 =
             { bus = bus
+              storageRoot = storageRoot
               apiKey = apiKey
-              useCase = FsVoice.QA.UseCaseDefinition.sanitize useCase
-              useCasePlugin = useCasePlugin
-              useCaseSettings = useCaseSettings
+              plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
+              qaPlugIn = qaPlugIn
+              plugInSettings = plugInSettings
               session = None
               retrievalMode = retrievalMode
               sources = sources

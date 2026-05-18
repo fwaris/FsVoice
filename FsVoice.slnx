@@ -1,11 +1,18 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FsVoice.QA.Abstractions/FsVoice.QA.Abstractions.fsproj" />
+    <Project Path="src/FsVoice.Abstractions/FsVoice.Abstractions.fsproj" />
+    <Project Path="src/FsVoice.Core/FsVoice.Core.fsproj" />
+    <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
+    <Project Path="src/FsVoice.Testing/FsVoice.Testing.fsproj" />
     <Project Path="src/FsVoice.QA/FsVoice.QA.fsproj" />
     <Project Path="src/FsVoice.PdfRasterization/FsVoice.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
     <Project Path="src/FsVoice.Tests/FsVoice.Tests.fsproj" />
     <Project Path="src/FsVoice.Tools/FsVoice.Tools.fsproj" />
+    <Project Path="src/FsVoice.Types/FsVoice.Types.fsproj" />
+    <Project Path="src/FsVoice.RTFlow/FsVoice.RTFlow.fsproj" />
+    <Project Path="src/FsVoiceDemo.Orchestration/FsVoiceDemo.Orchestration.fsproj" />
     <Project Path="src/FsVoiceDemo/FsVoiceDemo.fsproj" />
   </Folder>
 </Solution>

@@ -9,6 +9,7 @@ module App =
         match model.currentPage with
         | Main -> Views.MainView.contentPage model
         | Settings -> Views.SettingsView.contentPage model
+        | IndexPreview _ -> Views.IndexPreviewView.contentPage model
 
     let program =
         Program.statefulWithCmd Update.init Update.update

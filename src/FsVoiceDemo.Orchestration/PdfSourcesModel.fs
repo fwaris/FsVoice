@@ -1,11 +1,44 @@
 namespace FsVoiceDemo
 
 open System
+open System.IO
 
 type DocumentKind =
     | PdfFile
     | MarkdownFile
     | JsonFile
+
+type PickedSourceFileKind =
+    | PickedDocument
+    | PickedIndexBundle
+    | UnsupportedPickedSourceFile
+
+module PickedSourceFiles =
+    let kind (fileName: string) =
+        let extension =
+            fileName
+            |> Option.ofObj
+            |> Option.defaultValue ""
+            |> Path.GetExtension
+            |> fun value -> value.ToLowerInvariant()
+
+        match extension with
+        | ".pdf"
+        | ".md" -> PickedDocument
+        | ".zip" -> PickedIndexBundle
+        | _ -> UnsupportedPickedSourceFile
+
+    let isDocument fileName =
+        match kind fileName with
+        | PickedDocument -> true
+        | PickedIndexBundle
+        | UnsupportedPickedSourceFile -> false
+
+    let isIndexBundle fileName =
+        match kind fileName with
+        | PickedIndexBundle -> true
+        | PickedDocument
+        | UnsupportedPickedSourceFile -> false
 
 type PdfProcessingStatus =
     | Queued
