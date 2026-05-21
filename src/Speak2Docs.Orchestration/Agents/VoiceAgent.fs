@@ -64,6 +64,7 @@ module VoiceAgent =
           transcriberPrompt: string
           instructions: string
           speechResultInstructions: string
+          initialSourceCount: int
           answerMaxOutputTokens: int
           memoryRequestTimeout: TimeSpan
           functionCallTimeout: TimeSpan }
@@ -79,6 +80,7 @@ module VoiceAgent =
           pendingSpeakByCallId: Map<string, string>
           userSpeechState: UserSpeechState
           responseCreatedState: ResponseCreatedState
+          pendingGreeting: string option
           pendingSpeakTexts: string list
           outputQueue: AsyncPriorityQueue<Q>
           bus: WBus<FlowMsg, AgentMsg> }
@@ -87,7 +89,7 @@ module VoiceAgent =
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
 
-    let private plugInConfig (plugIn: FsVoice.QA.PlugInDefinition) =
+    let private plugInConfig initialSourceCount (plugIn: FsVoice.QA.PlugInDefinition) =
         let plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
         let realtime = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Realtime plugIn
         let transcriber = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Transcriber plugIn
@@ -104,6 +106,7 @@ module VoiceAgent =
           speechResultInstructions =
             plugIn.prompts.speechResultInstruction
             |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.speechResultInstruction
+          initialSourceCount = max 0 initialSourceCount
           answerMaxOutputTokens =
             answer.maxOutputTokens
             |> Option.defaultValue Speak2Docs.RuntimeSettings.DefaultAnswerMaxOutputTokens
@@ -213,6 +216,14 @@ module VoiceAgent =
                       {| text = $"Speak this oracle answer exactly, without adding facts:\n\n{answer}" |} ] }
         |> ConversationItem.Message
 
+    let private greetingInput greeting =
+        { ContentMessage.Default with
+            role = "user"
+            content =
+                [ MessageContent.Input_text
+                      {| text = $"Speak this greeting exactly, without adding facts or calling tools:\n\n{greeting}" |} ] }
+        |> ConversationItem.Message
+
     let private responseCreateEvent (responseInstructions: string) (input: ConversationItem list option) =
         let response =
             { Response.Default with
@@ -230,6 +241,16 @@ module VoiceAgent =
 
     let private responseInstructionsForOracleAnswer baseInstructions answer =
         $"{baseInstructions}\n\nOracle answer to speak exactly, without adding facts:\n\n{answer}"
+
+    let private responseInstructionsForGreeting baseInstructions greeting =
+        $"{baseInstructions}\n\nGreeting to speak exactly, without adding facts or calling tools:\n\n{greeting}"
+
+    let private greetingForSourceCount sourceCount =
+        match sourceCount with
+        | count when count <= 0 ->
+            "Hello. I do not see any selected documents yet. Select or add a document, then I can answer questions about it."
+        | 1 -> "Hello. I am seeing 1 selected document that I can answer questions about."
+        | count -> $"Hello. I am seeing {count} selected documents that I can answer questions about."
 
     let private createFunctionOutputEvent (result: ContentFunctionCallOutput) =
         { ConversationItemCreate.Default with
@@ -302,6 +323,25 @@ module VoiceAgent =
                 responseCreatedState = ActiveResponse {| id = None |}
                 pendingSpeakTexts = remaining }
         | _ -> st
+
+    let private tryScheduleGreeting (st: VoiceState) =
+        match st.userSpeechState, st.responseCreatedState, st.pendingGreeting with
+        | Silent, NoActiveResponse, Some greeting ->
+            responseCreateEvent
+                (responseInstructionsForGreeting st.config.speechResultInstructions greeting)
+                (Some [ greetingInput greeting ])
+            |> SendClientEvent
+            |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
+
+            st.bus.PostToAgent(Ag_Log $"Realtime greeting requested: sources={st.config.initialSourceCount}.")
+
+            { st with
+                pendingGreeting = None
+                responseCreatedState = ActiveResponse {| id = None |} }
+        | _ -> st
+
+    let private tryScheduleAudio (st: VoiceState) =
+        st |> tryScheduleGreeting |> tryScheduleSpeak
 
     let private toolQuestion (content: string) =
         let content =
@@ -569,7 +609,7 @@ module VoiceAgent =
                         realtimeSession = s.session }
             | ServerEvent.SessionUpdated ev ->
                 st.bus.PostToAgent(Ag_Log "Realtime session updated.")
-                return { st with realtimeSession = ev.session }
+                return { st with realtimeSession = ev.session } |> tryScheduleGreeting
             | ServerEvent.ConversationItemAdded ev ->
                 return acknowledgeFunctionOutput st "conversation.item.added" ev.item
             | ServerEvent.ConversationItemDone ev ->
@@ -591,10 +631,14 @@ module VoiceAgent =
                 return
                     { st with
                         responseCreatedState = NoActiveResponse }
-                    |> tryScheduleSpeak
-            | ServerEvent.InputAudioBufferSpeechStarted _ -> return { st with userSpeechState = Speaking }
+                    |> tryScheduleAudio
+            | ServerEvent.InputAudioBufferSpeechStarted _ ->
+                return
+                    { st with
+                        userSpeechState = Speaking
+                        pendingGreeting = None }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
-                return { st with userSpeechState = Silent } |> tryScheduleSpeak
+                return { st with userSpeechState = Silent } |> tryScheduleAudio
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
                 let previous =
                     st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
@@ -673,15 +717,16 @@ module VoiceAgent =
               pendingSpeakByCallId = Map.empty
               userSpeechState = Silent
               responseCreatedState = NoActiveResponse
+              pendingGreeting = Some(greetingForSourceCount config.initialSourceCount)
               pendingSpeakTexts = []
               outputQueue = outputQueue
               bus = bus }
 
         bus.AgentBus.RunAsync("voice", st, update)
 
-    let start plugIn voiceConnection bus =
+    let start plugIn initialSourceCount voiceConnection bus =
         let outputQueue = AsyncPriorityQueue<Q>()
-        let config = plugInConfig plugIn
+        let config = plugInConfig initialSourceCount plugIn
 
         async {
             let! outputPump = Async.StartChild(startOutputPump voiceConnection bus outputQueue)

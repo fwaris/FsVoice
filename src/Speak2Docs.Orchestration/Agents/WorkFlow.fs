@@ -35,7 +35,7 @@ module StateMachine =
                 ss.flags
                 ss.bus
 
-            VoiceAgent.start ss.plugIn ss.voiceConnection ss.bus
+            VoiceAgent.start ss.plugIn ss.sources.Length ss.voiceConnection ss.bus
         }
 
     let rec private terminate isAbnormal ss =
