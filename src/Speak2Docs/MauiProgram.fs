@@ -1,0 +1,33 @@
+﻿namespace Speak2Docs
+
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
+open Microsoft.Maui.Hosting
+open Fabulous.Maui
+open FsVoice.PdfRasterization
+
+type MauiProgram =
+    static member CreateMauiApp() =
+        PdfRasterizer.register ()
+        StorageMigration.migrateFromLegacyProduct ()
+
+        let builder =
+            MauiApp
+                .CreateBuilder()
+                .UseFabulousApp(App.view)
+                .ConfigureFonts(fun fonts ->
+                    fonts
+                        .AddFont("OpenSans-Regular.ttf", "OpenSansRegular")
+                        .AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold")
+                        .AddFont("MaterialSymbols.ttf", "MaterialSymbols")
+                    |> ignore)
+
+        builder.Services.AddLogging(fun logging ->
+            logging.AddConsole() |> ignore
+            logging.AddFilter("Speak2DocsLog", LogLevel.Information) |> ignore
+            logging.AddFilter("RTOpenAILog", LogLevel.Warning) |> ignore)
+        |> ignore
+
+        let app = builder.Build()
+        FSharp.DI.DI.init app.Services
+        app

@@ -1,15 +1,15 @@
-# FsVoice Settings Help
+# Speak2Docs Settings Help
 
 ## OpenAI API Key
 
-FsVoice uses your OpenAI API key to connect to OpenAI services for realtime voice interaction, answers, and optional keyword enrichment.
+Speak2Docs uses your OpenAI API key to connect to OpenAI services for realtime voice interaction, answers, and optional keyword enrichment.
 
 To create a key:
 
 1. Sign in to the OpenAI platform.
 2. Open the API keys page.
 3. Create a new secret key.
-4. Copy the key and paste it into the OpenAI API key field in FsVoice Settings.
+4. Copy the key and paste it into the OpenAI API key field in Speak2Docs Settings.
 
 Use a separate API key for each app, device, automation, or experiment when practical. This makes it easier to monitor usage, rotate one key without interrupting other workflows, and revoke only the key that is no longer needed.
 
@@ -23,8 +23,8 @@ Good API key practices:
 
 ## Models
 
-FsVoice uses separate model roles for realtime voice, transcription, answers, planning, keyword generation, and query expansion. The defaults are selected for the built-in Generic QA plugin, and advanced users can override model ids in Settings.
+Speak2Docs uses separate model roles for realtime voice, transcription, answers, planning, keyword generation, and query expansion. The defaults are selected for the built-in Generic QA plugin, and advanced users can override model ids in Settings.
 
 ## Retrieval
 
-Retrieval settings control how selected documents are searched before the answer model responds. FsColbert mode uses persisted local indexes when available, with fallback behavior for source matching. Lexical filtering and keyword indexing can improve source targeting for document questions.
+Retrieval settings control how selected documents are searched before the answer model responds. Indexed retrieval uses persisted local indexes when available, with fallback behavior for source matching. Lexical filtering and keyword indexing can improve source targeting for document questions.

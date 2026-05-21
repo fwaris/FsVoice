@@ -1,10 +1,10 @@
 # Store Privacy Notes
 
-Use this as the source checklist for Apple App Privacy and Google Play Data safety. It is not a privacy policy by itself.
+Use this as the source checklist for Speak2Docs Apple App Privacy and Google Play Data safety. It is not a privacy policy by itself.
 
 ## Data Handled By The App
 
-- OpenAI API key: entered by the user and used to connect to OpenAI services.
+- OpenAI API key: entered by the user in Speak2Docs and used to connect to OpenAI services.
 - Microphone audio: captured only after the user starts a realtime voice session and grants microphone permission.
 - User documents: PDFs, Markdown, and JSON files selected by the user for local retrieval and indexing.
 - Extracted document text and keywords: generated from selected documents for retrieval and optional keyword enrichment.
@@ -44,4 +44,4 @@ At minimum, review these categories:
 - App activity or diagnostics: only if logs/diagnostics are exported or transmitted.
 - Security practices: data is encrypted in transit; API keys should be stored using secure platform storage.
 
-If the app does not create accounts, say that users do not need an account in the app, but explain that they need an OpenAI API key.
+Speak2Docs does not create app accounts. Say that users do not need an account in the app, but explain that they need an OpenAI API key for realtime question answering.

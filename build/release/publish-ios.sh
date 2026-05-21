@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT="$ROOT_DIR/src/FsVoiceDemo/FsVoiceDemo.fsproj"
+PROJECT="$ROOT_DIR/src/Speak2Docs/Speak2Docs.fsproj"
 
 if [ -f "$ROOT_DIR/build/release/release.env" ]; then
   set -a
@@ -19,6 +19,12 @@ fi
 : "${IOS_CODESIGN_PROVISION:?Set IOS_CODESIGN_PROVISION in release.env or the environment.}"
 
 IOS_RUNTIME_IDENTIFIER="${IOS_RUNTIME_IDENTIFIER:-ios-arm64}"
+
+dotnet clean "$PROJECT" \
+  -f net10.0-ios \
+  -c Release \
+  -r "$IOS_RUNTIME_IDENTIFIER" \
+  -v:minimal
 
 dotnet publish "$PROJECT" \
   -f net10.0-ios \

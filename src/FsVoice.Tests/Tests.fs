@@ -455,6 +455,11 @@ let private prebuiltFolder storageRoot =
     Directory.CreateDirectory folder |> ignore
     folder
 
+let private speak2DocsPrebuiltFolder storageRoot =
+    let folder = Path.Combine(storageRoot, "Speak2Docs", "FsColbert", "Prebuilt")
+    Directory.CreateDirectory folder |> ignore
+    folder
+
 let private persistedIndexFolder storageRoot =
     let folder = Path.Combine(storageRoot, "FsVoice", "FsColbert", "Indexes")
     Directory.CreateDirectory folder |> ignore
@@ -462,32 +467,55 @@ let private persistedIndexFolder storageRoot =
 
 [<Fact>]
 let ``picked source files classify supported extensions`` () =
-    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedDocument, FsVoiceDemo.PickedSourceFiles.kind "guide.pdf")
-    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedDocument, FsVoiceDemo.PickedSourceFiles.kind "guide.md")
-    Assert.Equal(FsVoiceDemo.PickedSourceFileKind.PickedIndexBundle, FsVoiceDemo.PickedSourceFiles.kind "bundle.zip")
-    Assert.True(FsVoiceDemo.PickedSourceFiles.isDocument "guide.pdf")
-    Assert.True(FsVoiceDemo.PickedSourceFiles.isDocument "guide.md")
-    Assert.True(FsVoiceDemo.PickedSourceFiles.isIndexBundle "bundle.zip")
+    Assert.Equal(Speak2Docs.PickedSourceFileKind.PickedDocument, Speak2Docs.PickedSourceFiles.kind "guide.pdf")
+    Assert.Equal(Speak2Docs.PickedSourceFileKind.PickedDocument, Speak2Docs.PickedSourceFiles.kind "guide.md")
+    Assert.Equal(Speak2Docs.PickedSourceFileKind.PickedIndexBundle, Speak2Docs.PickedSourceFiles.kind "bundle.zip")
+    Assert.True(Speak2Docs.PickedSourceFiles.isDocument "guide.pdf")
+    Assert.True(Speak2Docs.PickedSourceFiles.isDocument "guide.md")
+    Assert.True(Speak2Docs.PickedSourceFiles.isIndexBundle "bundle.zip")
 
 [<Fact>]
 let ``picked source files reject unsupported extensions`` () =
     Assert.Equal(
-        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
-        FsVoiceDemo.PickedSourceFiles.kind "guide.markdown"
+        Speak2Docs.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        Speak2Docs.PickedSourceFiles.kind "guide.markdown"
     )
 
     Assert.Equal(
-        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
-        FsVoiceDemo.PickedSourceFiles.kind "notes.txt"
+        Speak2Docs.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        Speak2Docs.PickedSourceFiles.kind "notes.txt"
     )
 
     Assert.Equal(
-        FsVoiceDemo.PickedSourceFileKind.UnsupportedPickedSourceFile,
-        FsVoiceDemo.PickedSourceFiles.kind "index.fsci"
+        Speak2Docs.PickedSourceFileKind.UnsupportedPickedSourceFile,
+        Speak2Docs.PickedSourceFiles.kind "index.fsci"
     )
 
-    Assert.False(FsVoiceDemo.PickedSourceFiles.isDocument "guide.markdown")
-    Assert.False(FsVoiceDemo.PickedSourceFiles.isIndexBundle "index.fsci")
+    Assert.False(Speak2Docs.PickedSourceFiles.isDocument "guide.markdown")
+    Assert.False(Speak2Docs.PickedSourceFiles.isIndexBundle "index.fsci")
+
+[<Fact>]
+let ``ready built-in documents can be selected`` () =
+    let builtInDoc: Speak2Docs.PdfDocumentSource =
+        { id = "prebuilt-example"
+          kind = Speak2Docs.MarkdownFile
+          displayName = "Built-in"
+          storedPath = "/tmp/built-in.md"
+          originalPath = "app://FsColbertIndexes/documents/built-in.md"
+          selected = true
+          status = Speak2Docs.Ready
+          chunkCount = 3
+          error = None }
+
+    let failedBuiltInDoc =
+        { builtInDoc with
+            status = Speak2Docs.Failed
+            selected = false
+            error = Some "Failed" }
+
+    Assert.True(Speak2Docs.PdfDocuments.isBuiltIn builtInDoc)
+    Assert.True(Speak2Docs.PdfDocuments.canSelect builtInDoc)
+    Assert.False(Speak2Docs.PdfDocuments.canSelect failedBuiltInDoc)
 
 [<Theory>]
 [<InlineData("gpt-5.5")>]
@@ -1391,6 +1419,88 @@ let ``index preview loads bundled prebuilt index`` () =
     | Ok preview ->
         Assert.Equal(1, preview.records.Length)
         Assert.Equal<string list>([ "bundle keyword" ], preview.records.Head.keywords)
+
+[<Fact>]
+let ``index preview loads Speak2Docs installed prebuilt index`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "us-constitution-knowledge-pack.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "U.S. Constitution markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let folder = speak2DocsPrebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "prebuilt-us-constitution-knowledge-pack.md.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Article I establishes Congress." [ "article i"; "congress" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let installed: KnowledgeSources.InstalledPrebuiltIndex array =
+        [| { id = "prebuilt-us-constitution-knowledge-pack.md"
+             kind = "markdown"
+             displayName = "U.S. Constitution Knowledge Pack"
+             storedPath = sourcePath
+             indexPath = indexPath } |]
+
+    File.WriteAllText(Path.Combine(folder, "prebuilt-indexes.installed.json"), JsonSerializer.Serialize installed)
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(1, preview.totalChunks)
+        Assert.Equal(1, preview.records.Length)
+        Assert.Contains("Article I", preview.records.Head.text)
+        Assert.Equal<string list>([ "article i"; "congress" ], preview.records.Head.keywords)
+
+[<Fact>]
+let ``index preview uses installed prebuilt entry before incompatible bundle manifest`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-installed.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview installed markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "preview-installed.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Installed prebuilt waiting period text." [ "installed keyword" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let installed: KnowledgeSources.InstalledPrebuiltIndex array =
+        [| { id = "preview-installed"
+             kind = "markdown"
+             displayName = "Preview Installed"
+             storedPath = sourcePath
+             indexPath = indexPath } |]
+
+    File.WriteAllText(Path.Combine(folder, "prebuilt-indexes.installed.json"), JsonSerializer.Serialize installed)
+
+    FsColbert.IndexBundle.create
+        "preview-installed"
+        "1.0.0"
+        "wrong/model"
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ { sourceId = sourcePath
+            sourceDisplayName = "Preview Installed"
+            sourceLocation = Some sourcePath
+            sourceKind = Some "markdown"
+            indexFile = "preview-installed.fsci" } ]
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(folder, "index-bundle.json"))
+
+    match KnowledgeSources.loadIndexPreview storageRoot ignore KnowledgeSources.PdfParsingMode.Hybrid 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(1, preview.records.Length)
+        Assert.Contains("Installed prebuilt waiting period text.", preview.records.Head.text)
+        Assert.Equal<string list>([ "installed keyword" ], preview.records.Head.keywords)
 
 [<Fact>]
 let ``index preview returns at most requested random records`` () =
@@ -2387,26 +2497,26 @@ let private demoVoiceContext () : VoiceOrchestrationContext =
       report = ignore }
 
 let private demoRuntimeSettings values =
-    let settings = FsVoiceDemo.RuntimeSettings.empty ()
-    FsVoiceDemo.RuntimeSettings.replace settings (Map.ofList values)
+    let settings = Speak2Docs.RuntimeSettings.empty ()
+    Speak2Docs.RuntimeSettings.replace settings (Map.ofList values)
     settings
 
 let private demoOrchestration settings =
     let qaPlugIn = FsVoice.QA.GenericQaPlugIn() :> IQaPlugIn
 
-    let options: FsVoiceDemo.WorkFlow.DemoVoiceOrchestrationOptions =
+    let options: Speak2Docs.WorkFlow.DemoVoiceOrchestrationOptions =
         { settings = settings
           plugIn = PlugInDefinition.generic
           qaPlugIn = qaPlugIn
-          retrievalMode = FsVoiceDemo.InternalDocumentIndex
+          retrievalMode = Speak2Docs.InternalDocumentIndex
           sources = [] }
 
-    FsVoiceDemo.WorkFlow.DemoVoiceOrchestration(options)
-    :> IVoiceOrchestration<FsVoiceDemo.WorkFlow.ToHost, FsVoiceDemo.WorkFlow.FromHost>
+    Speak2Docs.WorkFlow.DemoVoiceOrchestration(options)
+    :> IVoiceOrchestration<Speak2Docs.WorkFlow.ToHost, Speak2Docs.WorkFlow.FromHost>
 
 let private readDemoToHostUntil
-    (session: IVoiceSession<FsVoiceDemo.WorkFlow.ToHost, FsVoiceDemo.WorkFlow.FromHost>)
-    (predicate: FsVoiceDemo.WorkFlow.ToHost -> 'T option)
+    (session: IVoiceSession<Speak2Docs.WorkFlow.ToHost, Speak2Docs.WorkFlow.FromHost>)
+    (predicate: Speak2Docs.WorkFlow.ToHost -> 'T option)
     =
     task {
         use cts = new CancellationTokenSource(TimeSpan.FromSeconds 10.)
@@ -2423,9 +2533,9 @@ let private readDemoToHostUntil
     }
 
 [<Fact>]
-let ``FsVoiceDemo orchestration has no UI or RTOpenAI Api references`` () =
+let ``Speak2Docs orchestration has no UI or RTOpenAI Api references`` () =
     let references =
-        typeof<FsVoiceDemo.WorkFlow.DemoVoiceOrchestration>.Assembly.GetReferencedAssemblies()
+        typeof<Speak2Docs.WorkFlow.DemoVoiceOrchestration>.Assembly.GetReferencedAssemblies()
         |> Array.map _.Name
         |> Set.ofArray
 
@@ -2446,7 +2556,7 @@ let ``demo orchestration start requests realtime connection`` () =
 
         let! requested =
             readDemoToHostUntil session (function
-                | FsVoiceDemo.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
                 | _ -> None)
 
         Assert.True(requested.model |> Option.exists (String.IsNullOrWhiteSpace >> not))
@@ -2467,21 +2577,21 @@ let ``demo orchestration accepts source changes from host`` () =
 
         do!
             readDemoToHostUntil session (function
-                | FsVoiceDemo.WorkFlow.RequestRealtimeConnection _ -> Some()
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection _ -> Some()
                 | _ -> None)
 
         do!
             session.SendFromHostAsync(
-                FsVoiceDemo.WorkFlow.SourcesChanged(FsVoiceDemo.FsColbertWithFallback, []),
+                Speak2Docs.WorkFlow.SourcesChanged(Speak2Docs.FsColbertWithFallback, []),
                 CancellationToken.None
             )
 
         let expectedMode =
-            FsVoiceDemo.RetrievalModes.displayName FsVoiceDemo.FsColbertWithFallback
+            Speak2Docs.RetrievalModes.displayName Speak2Docs.FsColbertWithFallback
 
         let! logLine =
             readDemoToHostUntil session (function
-                | FsVoiceDemo.WorkFlow.Log text when
+                | Speak2Docs.WorkFlow.Log text when
                     text.Contains("Host sources changed") && text.Contains($"mode={expectedMode}")
                     ->
                     Some text
@@ -2495,17 +2605,17 @@ let ``demo orchestration accepts source changes from host`` () =
 [<Fact>]
 let ``demo orchestration sees replaced runtime settings snapshots`` () =
     let settings =
-        demoRuntimeSettings [ FsVoiceDemo.RuntimeSettings.UseLexicalFilter, "false" ]
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.UseLexicalFilter, "false" ]
 
     let first =
-        FsVoiceDemo.RuntimeSettings.snapshot settings
-        |> FsVoiceDemo.RuntimeSettings.sourceFlags
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
 
-    FsVoiceDemo.RuntimeSettings.replace settings (Map.ofList [ FsVoiceDemo.RuntimeSettings.UseLexicalFilter, "true" ])
+    Speak2Docs.RuntimeSettings.replace settings (Map.ofList [ Speak2Docs.RuntimeSettings.UseLexicalFilter, "true" ])
 
     let second =
-        FsVoiceDemo.RuntimeSettings.snapshot settings
-        |> FsVoiceDemo.RuntimeSettings.sourceFlags
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
 
     Assert.False first.useLexicalFilter
     Assert.True second.useLexicalFilter

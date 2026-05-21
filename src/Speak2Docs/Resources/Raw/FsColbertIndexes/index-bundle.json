@@ -1,0 +1,26 @@
+{
+  "schema_name": "FsColbertIndexBundle",
+  "manifest_version": 1,
+  "bundle_id": "healthy-eating-index-rag-paper",
+  "bundle_version": "1.0.0",
+  "model_id": "lightonai/mxbai-edge-colbert-v0-32m-onnx:int8",
+  "created_at": "2026-05-21T13:03:09.9281870\u002B00:00",
+  "chunk_options": {
+    "max_chars": 1800,
+    "overlap_chars": 250,
+    "min_chars": 20
+  },
+  "tfidf_options": {
+    "text_weight": 1,
+    "keyword_weight": 3
+  },
+  "sources": [
+    {
+      "source_id": "healthy-eating-index-rag-paper.pdf",
+      "source_display_name": "Healthy Eating Index RAG Paper",
+      "source_location": "documents/healthy-eating-index-rag-paper.pdf",
+      "source_kind": "pdf",
+      "index_file": "indexes/ebebfbe0286dd1e63ce57aa863cfdb9c46b2fb7e25b95e9c6bada932740c802c.fsci"
+    }
+  ]
+}

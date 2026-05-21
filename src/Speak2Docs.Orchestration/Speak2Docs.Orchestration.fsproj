@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Speak2Docs.Orchestration</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>Speak2Docs.Orchestration</PackageId>
+    <Description>Platform-neutral Speak2Docs orchestration and domain workflow.</Description>
+    <NoWarn>$(NoWarn);57</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Utils.fs" />
+    <Compile Include="PdfSourcesModel.fs" />
+    <Compile Include="PlugIns.fs" />
+    <Compile Include="WorkFlowTypes.fs" />
+    <Compile Include="RuntimeSettings.fs" />
+    <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="DurableMemory.fs" />
+    <Compile Include="Agents\AsyncPriorityQueue.fs" />
+    <Compile Include="Agents\VoiceAgent.fs" />
+    <Compile Include="Agents\HostAgent.fs" />
+    <Compile Include="Agents\QaAgent.fs" />
+    <Compile Include="Agents\WorkFlow.fs" />
+    <Compile Include="DemoVoiceOrchestration.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Types\FsVoice.Types.fsproj" />
+    <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" />
+    <PackageReference Include="FSharp.SystemTextJson" />
+    <PackageReference Include="FsColbert" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="OpenAI" />
+    <PackageReference Include="RTOpenAI.Events" />
+    <PackageReference Include="RTFlow" />
+  </ItemGroup>
+
+</Project>

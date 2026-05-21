@@ -1,8 +1,8 @@
 # FsVoice
 
-FsVoice is a work-in-progress F#/.NET platform for constructing voice-enabled applications. The repository contains reusable voice runtime packages, plugin/tool contracts, event and session infrastructure, host bridge components, test helpers, and a .NET MAUI demo app. Question answering over selected sources is the current primary use case built on top of the platform.
+FsVoice is an F#/.NET platform for constructing voice-enabled applications. The repository contains reusable voice runtime packages, plugin/tool contracts, event and session infrastructure, host bridge components, test helpers, and a .NET MAUI app. Question answering over selected sources is the current primary use case built on top of the platform.
 
-The current demo app, `FsVoiceDemo`, showcases the QA use case: a user can add local PDF or Markdown sources, import zipped FsColbert index bundles, build or load local retrieval indexes, and ask questions by realtime voice through OpenAI models. The same platform pieces are intended to support other voice-enabled workflows with different plugins, tools, prompts, transports, and host experiences.
+The current mobile app lets a user add local PDF or Markdown sources, import zipped FsColbert index bundles, build or load local retrieval indexes, and ask questions by realtime voice through OpenAI models. The same platform pieces are intended to support other voice-enabled workflows with different plugins, tools, prompts, transports, and host experiences.
 
 ## What Is In This Repo
 
@@ -17,8 +17,8 @@ The current demo app, `FsVoiceDemo`, showcases the QA use case: a user can add l
 - `src/FsVoice.Tools`: reusable QA tool providers, currently including a current-time provider.
 - `src/FsVoice.Testing`: deterministic text runtime and fake transport helpers for tests.
 - `src/FsVoice.Cli`: command-line QA, indexing, and evaluation utilities.
-- `src/FsVoiceDemo.Orchestration`: platform-neutral demo workflow and realtime/QA agents.
-- `src/FsVoiceDemo`: .NET MAUI app for Android, iOS, and Mac Catalyst.
+- `src/Speak2Docs.Orchestration`: platform-neutral mobile workflow and realtime/QA agents.
+- `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst.
 - `src/FsVoice.Tests`: xUnit test suite.
 
 ## Platform Capabilities
@@ -29,7 +29,7 @@ The current demo app, `FsVoiceDemo`, showcases the QA use case: a user can add l
 - Test/runtime helpers for deterministic text-mode and fake-transport workflows.
 - Plugin-oriented configuration for prompts, model roles, runtime options, settings fields, tools, and context providers.
 
-## QA Demo Features
+## QA Features
 
 - Realtime voice session using `gpt-realtime-2` by default.
 - Backend answer/oracle model using `gpt-5.5` by default.
@@ -52,7 +52,7 @@ QA plugins implement `IQaPlugIn` from `FsVoice.QA.Abstractions`. A QA plugin pro
 - optional QA tool providers;
 - optional context providers.
 
-The demo host scans bundled assemblies and, where supported, `AppData/plug-ins/*.dll`. It falls back to the built-in Generic QA plugin when no active plugin is available. The host then applies user overrides for model roles, retrieval mode, lexical filtering, keyword indexing, and plugin settings before starting the realtime and QA agents.
+The app host scans bundled assemblies and, where supported, `AppData/plug-ins/*.dll`. It falls back to the built-in Generic QA plugin when no active plugin is available. The host then applies user overrides for model roles, retrieval mode, lexical filtering, keyword indexing, and plugin settings before starting the realtime and QA agents.
 
 At the lower platform layer, `FsVoice.Abstractions` and `FsVoice.Core` define more general voice-plugin, tool, runtime, event, memory, and transport contracts that are not tied to document QA.
 
@@ -65,12 +65,12 @@ dotnet restore FsVoice.slnx
 dotnet build FsVoice.slnx --no-restore
 ```
 
-MAUI demo targets:
+MAUI app targets:
 
 ```bash
-dotnet build src/FsVoiceDemo/FsVoiceDemo.fsproj -f net10.0-android --no-restore --nologo
-dotnet build src/FsVoiceDemo/FsVoiceDemo.fsproj -f net10.0-ios --no-restore --nologo
-dotnet build src/FsVoiceDemo/FsVoiceDemo.fsproj -f net10.0-maccatalyst -r maccatalyst-arm64 --no-restore --nologo
+dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-android --no-restore --nologo
+dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-ios --no-restore --nologo
+dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-maccatalyst -r maccatalyst-arm64 --no-restore --nologo
 ```
 
 Android builds require minSdk 24 because ONNX Runtime's Android package declares that minimum. Some Android builds currently emit native-library page-size and duplicate WebRTC library warnings; these are non-fatal in the current debug build.

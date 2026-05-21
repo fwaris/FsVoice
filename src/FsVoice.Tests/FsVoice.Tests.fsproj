@@ -26,7 +26,7 @@
     <ProjectReference Include="..\FsVoice.Testing\FsVoice.Testing.fsproj" />
     <ProjectReference Include="..\FsVoice.Tools\FsVoice.Tools.fsproj" />
     <ProjectReference Include="..\FsVoice.Types\FsVoice.Types.fsproj" />
-    <ProjectReference Include="..\FsVoiceDemo.Orchestration\FsVoiceDemo.Orchestration.fsproj" />
+    <ProjectReference Include="..\Speak2Docs.Orchestration\Speak2Docs.Orchestration.fsproj" />
   </ItemGroup>
 
 </Project>

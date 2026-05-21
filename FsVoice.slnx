@@ -12,7 +12,7 @@
     <Project Path="src/FsVoice.Tools/FsVoice.Tools.fsproj" />
     <Project Path="src/FsVoice.Types/FsVoice.Types.fsproj" />
     <Project Path="src/FsVoice.RTFlow/FsVoice.RTFlow.fsproj" />
-    <Project Path="src/FsVoiceDemo.Orchestration/FsVoiceDemo.Orchestration.fsproj" />
-    <Project Path="src/FsVoiceDemo/FsVoiceDemo.fsproj" />
+    <Project Path="src/Speak2Docs.Orchestration/Speak2Docs.Orchestration.fsproj" />
+    <Project Path="src/Speak2Docs/Speak2Docs.fsproj" />
   </Folder>
 </Solution>

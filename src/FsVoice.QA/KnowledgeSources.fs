@@ -1005,6 +1005,11 @@ Query: {query}
         Directory.CreateDirectory path |> ignore
         path
 
+    let private knownPrebuiltFolders storageRoot =
+        [ Path.Combine(storageRoot, "FsVoice", "FsColbert", "Prebuilt")
+          Path.Combine(storageRoot, "Speak2Docs", "FsColbert", "Prebuilt") ]
+        |> List.distinctBy (fun path -> Path.GetFullPath(path).ToLowerInvariant())
+
     let private prebuiltManifestPath storageRoot =
         Path.Combine(prebuiltFolder storageRoot, "prebuilt-indexes.installed.json")
 
@@ -1775,9 +1780,9 @@ Passages:
         with _ ->
             None
 
-    let private tryLoadPrebuiltManifest storageRoot =
+    let private tryLoadPrebuiltManifestFromFolder folder =
         try
-            let path = prebuiltManifestPath storageRoot
+            let path = Path.Combine(folder, "prebuilt-indexes.installed.json")
 
             if File.Exists path then
                 JsonSerializer.Deserialize<InstalledPrebuiltIndex array>(File.ReadAllText path)
@@ -1788,6 +1793,10 @@ Passages:
                 []
         with _ ->
             []
+
+    let private tryLoadPrebuiltManifest storageRoot =
+        knownPrebuiltFolders storageRoot
+        |> List.collect tryLoadPrebuiltManifestFromFolder
 
     let private bindIndexToSource (source: KnowledgeSource) (index: FsColbert.ColbertIndex) =
         let passages =
@@ -1916,8 +1925,8 @@ Passages:
             String.Equals(value, source.location, StringComparison.OrdinalIgnoreCase)
             || String.Equals(value, source.DisplayName, StringComparison.OrdinalIgnoreCase))
 
-    let private tryLoadPrebuiltBundleIndex storageRoot (source: KnowledgeSource) =
-        let manifestPath = prebuiltBundleManifestPath storageRoot
+    let private tryLoadPrebuiltBundleIndexFromFolder folder (source: KnowledgeSource) =
+        let manifestPath = Path.Combine(folder, "index-bundle.json")
 
         if not (File.Exists manifestPath) then
             Ok None
@@ -1931,6 +1940,18 @@ Passages:
                 |> List.tryFind (prebuiltBundleSourceMatches source)
                 |> Option.map (fun entry -> bindIndexToSource source entry.index)
                 |> Ok
+
+    let private tryLoadPrebuiltBundleIndex storageRoot (source: KnowledgeSource) =
+        let rec loop folders =
+            match folders with
+            | [] -> Ok None
+            | folder :: remaining ->
+                match tryLoadPrebuiltBundleIndexFromFolder folder source with
+                | Ok(Some index) -> Ok(Some index)
+                | Ok None -> loop remaining
+                | Error err -> Error err
+
+        loop (knownPrebuiltFolders storageRoot)
 
     let private tryLoadLegacyPrebuiltIndex storageRoot (source: KnowledgeSource) =
         tryLoadPrebuiltManifest storageRoot
@@ -1946,10 +1967,10 @@ Passages:
                 | Error err -> Error err
 
     let tryLoadPrebuiltIndex storageRoot (source: KnowledgeSource) =
-        match tryLoadPrebuiltBundleIndex storageRoot source with
+        match tryLoadLegacyPrebuiltIndex storageRoot source with
         | Ok(Some index) -> Ok(Some index)
         | Error err -> Error err
-        | Ok None -> tryLoadLegacyPrebuiltIndex storageRoot source
+        | Ok None -> tryLoadPrebuiltBundleIndex storageRoot source
 
     let private vectorValueSample maxValues (embedding: FsColbert.MultiVector) =
         embedding.vectors |> Array.truncate maxValues |> Array.toList

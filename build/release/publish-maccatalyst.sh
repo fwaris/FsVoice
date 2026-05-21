@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT="$ROOT_DIR/src/FsVoiceDemo/FsVoiceDemo.fsproj"
+PROJECT="$ROOT_DIR/src/Speak2Docs/Speak2Docs.fsproj"
 
 if [ -f "$ROOT_DIR/build/release/release.env" ]; then
   set -a
@@ -16,6 +16,12 @@ fi
 : "${APP_BUILD:?Set APP_BUILD in release.env or the environment.}"
 
 MACCATALYST_RUNTIME_IDENTIFIER="${MACCATALYST_RUNTIME_IDENTIFIER:-maccatalyst-arm64}"
+
+dotnet clean "$PROJECT" \
+  -f net10.0-maccatalyst \
+  -c Release \
+  -r "$MACCATALYST_RUNTIME_IDENTIFIER" \
+  -v:minimal
 
 publish_args=(
   dotnet publish "$PROJECT"
