@@ -137,4 +137,5 @@ module InfoView =
                     .padding (18.)
             )
         )
+            .background(Theme.pageBackgroundColor model.appTheme)
             .title ("Info")

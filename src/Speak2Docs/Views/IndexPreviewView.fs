@@ -151,4 +151,5 @@ module IndexPreviewView =
             })
                 .padding (18.)
         )
+            .background(Theme.pageBackgroundColor model.appTheme)
             .title ("Index Preview")

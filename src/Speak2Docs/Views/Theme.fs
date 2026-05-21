@@ -4,12 +4,25 @@ open Microsoft.Maui.ApplicationModel
 open Microsoft.Maui.Graphics
 
 module Theme =
-    let private isDark appTheme =
+    let private resolve appTheme =
         match appTheme with
+        | AppTheme.Unspecified ->
+            match AppInfo.Current.RequestedTheme with
+            | AppTheme.Unspecified -> AppTheme.Light
+            | requestedTheme -> requestedTheme
+        | requestedTheme -> requestedTheme
+
+    let private isDark appTheme =
+        match resolve appTheme with
         | AppTheme.Dark -> true
         | AppTheme.Light
-        | AppTheme.Unspecified -> false
         | _ -> false
+
+    let pageBackgroundColor appTheme =
+        if isDark appTheme then
+            Color.FromArgb("#111111")
+        else
+            Colors.White
 
     let textColor appTheme =
         if isDark appTheme then Colors.White else Colors.Black

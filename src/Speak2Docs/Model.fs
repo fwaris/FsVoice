@@ -67,6 +67,7 @@ and Model =
       documentProcessingCancellation: CancellationTokenSource option
       logExpansions: bool
       logChunks: bool
+      answerMaxOutputTokens: string
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
@@ -116,6 +117,7 @@ and Msg =
     | NotificationExpired of int
     | ThemeChanged of AppTheme
     | EventError of exn
+    | AnswerMaxOutputTokensChanged of string
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool

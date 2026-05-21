@@ -126,10 +126,11 @@ module SettingsView =
 
     let private modelsSection model canEdit =
         let roles = FsVoice.QA.ModelRole.all
+        let tokenRow = roles.Length + 1
 
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows roles.Length) {
+            ((Grid(columns, sectionRows tokenRow) {
                 sectionTitle "Models"
 
                 for row, role in roles |> List.indexed do
@@ -144,6 +145,16 @@ module SettingsView =
                         .gridColumn(1)
                         .gridColumnSpan(2)
                         .margin (2.)
+
+                ViewControls.formLabel "Max Answer Tokens" tokenRow
+
+                Entry(model.answerMaxOutputTokens, AnswerMaxOutputTokensChanged)
+                    .placeholder("900")
+                    .isEnabled(canEdit)
+                    .gridRow(tokenRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
             })
                 .padding (10.))
 
@@ -350,4 +361,5 @@ module SettingsView =
                     .padding (18.)
             )
         )
+            .background(Theme.pageBackgroundColor model.appTheme)
             .title ("Settings")

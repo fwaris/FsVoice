@@ -326,6 +326,16 @@ module Settings =
 
     let private contains (key: string) = Preferences.Default.ContainsKey(key)
 
+    let private clamp minValue maxValue value = value |> max minValue |> min maxValue
+
+    let normalizeAnswerMaxOutputTokens value =
+        value |> clamp C.MIN_ANSWER_MAX_OUTPUT_TOKENS C.MAX_ANSWER_MAX_OUTPUT_TOKENS
+
+    let private parseAnswerMaxOutputTokens fallback value =
+        match Int32.TryParse(defaultArg (Option.ofObj value) "") with
+        | true, parsed -> normalizeAnswerMaxOutputTokens parsed
+        | false, _ -> fallback
+
     let private getScopedString (plugInId: string) (suffix: string) (legacyKey: string option) (fallback: string) =
         let key = plugInScopedKey plugInId suffix
 
@@ -436,6 +446,19 @@ module Settings =
 
     let setLogChunks value =
         Preferences.Default.Set(C.SETTINGS_LOG_CHUNKS, value)
+
+    let answerMaxOutputTokens () =
+        let fallback = C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
+
+        if Preferences.Default.ContainsKey(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS) then
+            Preferences.Default.Get(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, fallback)
+        else
+            Preferences.Default.Get(C.LEGACY_SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, fallback)
+        |> normalizeAnswerMaxOutputTokens
+
+    let setAnswerMaxOutputTokens value =
+        let tokens = value |> parseAnswerMaxOutputTokens C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
+        Preferences.Default.Set(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, tokens)
 
     let useLexicalFilter () =
         if Preferences.Default.ContainsKey(C.SETTINGS_USE_LEXICAL_FILTER) then

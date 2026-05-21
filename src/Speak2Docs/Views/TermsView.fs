@@ -8,15 +8,13 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module TermsView =
-    let private bgColor = Colors.White
-    let private primaryColor = Colors.Black
     let private accentColor = Colors.DarkMagenta
     let private controlWidth = 280.
 
-    let private message text =
+    let private message appTheme text =
         Label(text)
             .font(size = 15.)
-            .textColor(primaryColor)
+            .textColor(Theme.textColor appTheme)
             .lineBreakMode(LineBreakMode.WordWrap)
             .horizontalTextAlignment(TextAlignment.Center)
             .width (320.)
@@ -39,31 +37,31 @@ module TermsView =
             .width(controlWidth)
             .height (52.)
 
-    let private secondaryButton text (msg: Msg) =
+    let private secondaryButton appTheme text (msg: Msg) =
         Button(text, msg)
             .font(size = 16., attributes = FontAttributes.Bold)
             .background(Colors.Transparent)
-            .textColor(primaryColor)
+            .textColor(Theme.textColor appTheme)
             .cornerRadius(8)
             .width(controlWidth)
             .height (52.)
 
-    let private page () =
+    let private page appTheme =
         ContentPage(
             Grid([ Dimension.Star ], [ Dimension.Star ]) {
                 (VStack(spacing = 14.) {
-                    message "Review the Terms of Use and Privacy Policy before continuing."
+                    message appTheme "Review the Terms of Use and Privacy Policy before continuing."
                     linkButton "Terms of Use" TermsOfUse
                     linkButton "Privacy Policy" PrivacyPolicy
                     actionButton "Accept Terms & Privacy" TermsAccepted
-                    secondaryButton "Do Not Accept" TermsDeclined
+                    secondaryButton appTheme "Do Not Accept" TermsDeclined
                 })
                     .padding(24.)
                     .centerHorizontal()
                     .centerVertical ()
             }
         )
-            .background(bgColor)
+            .background(Theme.pageBackgroundColor appTheme)
             .title ("Terms")
 
-    let contentPage (_model: Model) = page ()
+    let contentPage (model: Model) = page model.appTheme

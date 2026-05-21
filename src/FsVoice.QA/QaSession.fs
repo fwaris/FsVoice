@@ -172,6 +172,16 @@ type QaSession(options: QaSessionOptions) =
     let emptyAnswerFallback =
         "I could not produce an answer from the selected context. Please try again."
 
+    let tokenLimitFallback maxOutputTokens =
+        $"I was unable to obtain a complete answer. The answer model appears to have exceeded the current max answer token limit of {maxOutputTokens}. Increase Max Answer Tokens in Settings and try again."
+
+    let emptyAnswerFallbackWithLimit maxOutputTokens =
+        $"I was unable to obtain an answer from the oracle. The answer model returned empty text with the current max answer token limit of {maxOutputTokens}. Increase Max Answer Tokens in Settings or ask a narrower question and try again."
+
+    let isFallbackAnswer (answer: string) =
+        answer = emptyAnswerFallback
+        || answer.StartsWith("I was unable to obtain", StringComparison.OrdinalIgnoreCase)
+
     let nullableValue (value: Nullable<'T>) =
         if value.HasValue then string value.Value else "n/a"
 
@@ -191,6 +201,16 @@ type QaSession(options: QaSessionOptions) =
                 response.Messages.Count
 
         $"finish={finishReason}; {usage}; messages={messageCount}"
+
+    let isTokenLimitFinish (response: ChatResponse) =
+        if isNull response then
+            false
+        else
+            let finishReason = response.FinishReason |> nullableValue
+
+            finishReason.Contains("length", StringComparison.OrdinalIgnoreCase)
+            || finishReason.Contains("max_tokens", StringComparison.OrdinalIgnoreCase)
+            || finishReason.Contains("max output", StringComparison.OrdinalIgnoreCase)
 
     let renderTemplate replacements (template: string) =
         replacements
@@ -585,7 +605,12 @@ type QaSession(options: QaSessionOptions) =
                 let maxOutputTokens = roleMaxTokens Answer 900
                 let! response, answer = answerAttempt maxOutputTokens
 
-                if not (String.IsNullOrWhiteSpace answer) then
+                if isTokenLimitFinish response then
+                    report
+                        $"Answer model hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {responseDiagnostics response}."
+
+                    return tokenLimitFallback maxOutputTokens
+                elif not (String.IsNullOrWhiteSpace answer) then
                     return answer
                 else
                     report
@@ -594,7 +619,12 @@ type QaSession(options: QaSessionOptions) =
                     let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
                     let! retryResponse, retryAnswer = answerAttempt retryMaxOutputTokens
 
-                    if not (String.IsNullOrWhiteSpace retryAnswer) then
+                    if isTokenLimitFinish retryResponse then
+                        report
+                            $"Answer model retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+
+                        return tokenLimitFallback retryMaxOutputTokens
+                    elif not (String.IsNullOrWhiteSpace retryAnswer) then
                         report
                             $"Answer model retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responseDiagnostics retryResponse}."
 
@@ -603,14 +633,14 @@ type QaSession(options: QaSessionOptions) =
                         report
                             $"Answer model retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
 
-                        return emptyAnswerFallback
+                        return emptyAnswerFallbackWithLimit retryMaxOutputTokens
         }
 
     let applyWriteback (snapshot: TranscriptSnapshot) (answer: string) =
         if
             options.autoWriteback
             && not (String.IsNullOrWhiteSpace answer)
-            && answer <> emptyAnswerFallback
+            && not (isFallbackAnswer answer)
         then
             let proposals = memoryService.ProposalsFromExchange(snapshot, answer)
             let updates, logs = memoryService.CommitProposals proposals

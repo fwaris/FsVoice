@@ -64,6 +64,7 @@ module VoiceAgent =
           transcriberPrompt: string
           instructions: string
           speechResultInstructions: string
+          answerMaxOutputTokens: int
           memoryRequestTimeout: TimeSpan
           functionCallTimeout: TimeSpan }
 
@@ -78,7 +79,6 @@ module VoiceAgent =
           pendingSpeakByCallId: Map<string, string>
           userSpeechState: UserSpeechState
           responseCreatedState: ResponseCreatedState
-          assistantSpeechStarted: bool
           pendingSpeakTexts: string list
           outputQueue: AsyncPriorityQueue<Q>
           bus: WBus<FlowMsg, AgentMsg> }
@@ -91,6 +91,7 @@ module VoiceAgent =
         let plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
         let realtime = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Realtime plugIn
         let transcriber = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Transcriber plugIn
+        let answer = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer plugIn
 
         { realtimeModel = realtime.modelId
           transcriberModel = transcriber.modelId
@@ -103,6 +104,9 @@ module VoiceAgent =
           speechResultInstructions =
             plugIn.prompts.speechResultInstruction
             |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.speechResultInstruction
+          answerMaxOutputTokens =
+            answer.maxOutputTokens
+            |> Option.defaultValue Speak2Docs.RuntimeSettings.DefaultAnswerMaxOutputTokens
           memoryRequestTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.realtimeMemoryTimeoutMs)
           functionCallTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.functionCallTimeoutMs) }
 
@@ -116,16 +120,6 @@ module VoiceAgent =
                                 { language = "en"
                                   model = config.transcriberModel
                                   prompt = Some config.transcriberPrompt }
-                                |> Some
-                                |> Include
-                            turn_detection =
-                                VAD.Server_Vad
-                                    {| create_response = true
-                                       idle_timeout_ms = Skip
-                                       interrupt_response = true
-                                       prefix_padding_ms = 300
-                                       silence_duration_ms = 200
-                                       threshold = 0.5 |}
                                 |> Some
                                 |> Include }
                 ) }
@@ -237,19 +231,14 @@ module VoiceAgent =
     let private responseInstructionsForOracleAnswer baseInstructions answer =
         $"{baseInstructions}\n\nOracle answer to speak exactly, without adding facts:\n\n{answer}"
 
-    let private responseCancelEvent () =
-        { ResponseCancel.Default with
-            event_id = Utils.newId () }
-        |> ClientEvent.ResponseCancel
-
     let private createFunctionOutputEvent (result: ContentFunctionCallOutput) =
         { ConversationItemCreate.Default with
             event_id = Utils.newId ()
             item = ConversationItem.Function_call_output result }
         |> ClientEvent.ConversationItemCreate
 
-    let private fallbackToolOutput (snapshot: TranscriptSnapshot) =
-        $"I cannot answer that from the available tools and context right now. The user asked: {snapshot.text}"
+    let private fallbackToolOutput maxOutputTokens (_snapshot: TranscriptSnapshot) =
+        $"I was unable to obtain an answer from the oracle. The request may have exceeded the current max answer token limit of {maxOutputTokens}, or the backend may have timed out. Try increasing Max Answer Tokens in Settings or ask a narrower question."
 
     let private speechFriendlyMarkdown (text: string) =
         let replace (pattern: string) (replacement: string) (value: string) =
@@ -295,11 +284,6 @@ module VoiceAgent =
           deadline = DateTimeOffset.UtcNow + config.memoryRequestTimeout
           cancellationToken = cancellationToken
           completion = TaskCompletionSource<MemoryContext>(TaskCreationOptions.RunContinuationsAsynchronously) }
-
-    let private isResponseActive =
-        function
-        | ActiveResponse _ -> true
-        | NoActiveResponse -> false
 
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
@@ -436,6 +420,7 @@ module VoiceAgent =
                   callId = fc.call_id
                   content = fc.arguments
                   snapshot = snapshot
+                  answerMaxOutputTokens = st.config.answerMaxOutputTokens
                   cancellation = cancellation
                   timeout = st.config.functionCallTimeout
                   task =
@@ -484,7 +469,7 @@ module VoiceAgent =
                 let output =
                     match candidate with
                     | Some candidate -> oracleToolOutput snapshot candidate
-                    | None -> fallbackToolOutput snapshot
+                    | None -> fallbackToolOutput st.config.answerMaxOutputTokens snapshot
 
                 ContentFunctionCallOutput.Create call.callId output
                 |> call.task.TrySetResult
@@ -513,7 +498,7 @@ module VoiceAgent =
 
         let output =
             if outputWasBlank then
-                "The oracle returned an empty answer. Please try again."
+                $"I was unable to obtain an answer from the oracle. The oracle returned empty text with the current max answer token limit of {st.config.answerMaxOutputTokens}. Try increasing Max Answer Tokens in Settings or ask a narrower question."
             else
                 output
 
@@ -529,12 +514,12 @@ module VoiceAgent =
             |> enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY
 
             st.bus.PostToAgent(
-                Ag_Log
-                    $"Oracle tool output ready for call {callId}; output_chars={output.Length}; waiting for realtime item acknowledgement."
+                Ag_Log $"Oracle tool output ready for call {callId}; output_chars={output.Length}; scheduling speech."
             )
 
             { st with
-                pendingSpeakByCallId = st.pendingSpeakByCallId |> Map.add callId output }
+                pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }
+            |> tryScheduleSpeak
 
     let private acknowledgeFunctionOutput (st: VoiceState) (eventName: string) (item: ConversationItem) =
         match item with
@@ -563,7 +548,10 @@ module VoiceAgent =
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, result.output))
             with ex ->
                 toolCall.cancellation.Cancel()
-                let output = "The oracle took too long to answer. Please try again."
+
+                let output =
+                    $"I was unable to obtain an answer from the oracle before the timeout. The request may have exceeded the current max answer token limit of {toolCall.answerMaxOutputTokens}, or the backend may still be working. Try increasing Max Answer Tokens in Settings or ask a narrower question."
+
                 bus.PostToAgent(Ag_Log $"Oracle tool call timed out for {toolCall.callId}: {ex.Message}")
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))
         }
@@ -595,10 +583,6 @@ module VoiceAgent =
                 return
                     { st with
                         responseCreatedState = ActiveResponse {| id = responseId |} }
-            | ServerEvent.OutputAudioBufferStarted _ ->
-                return
-                    { st with
-                        assistantSpeechStarted = true }
             | ServerEvent.ResponseOutputItemDone responseItem ->
                 match responseItem.item with
                 | Function_call fc -> return dispatchToolCall st fc
@@ -606,19 +590,9 @@ module VoiceAgent =
             | ServerEvent.ResponseDone _ ->
                 return
                     { st with
-                        responseCreatedState = NoActiveResponse
-                        assistantSpeechStarted = false }
+                        responseCreatedState = NoActiveResponse }
                     |> tryScheduleSpeak
-            | ServerEvent.ResponseOutputAudioDone _ ->
-                return
-                    { st with
-                        assistantSpeechStarted = false }
-            | ServerEvent.InputAudioBufferSpeechStarted _ ->
-                if st.assistantSpeechStarted || isResponseActive st.responseCreatedState then
-                    responseCancelEvent () |> enqueueClientEvent st
-                    st.bus.PostToAgent(Ag_Log "User interrupted; cancelling response.")
-
-                return { st with userSpeechState = Speaking }
+            | ServerEvent.InputAudioBufferSpeechStarted _ -> return { st with userSpeechState = Speaking }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
                 return { st with userSpeechState = Silent } |> tryScheduleSpeak
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
@@ -699,7 +673,6 @@ module VoiceAgent =
               pendingSpeakByCallId = Map.empty
               userSpeechState = Silent
               responseCreatedState = NoActiveResponse
-              assistantSpeechStarted = false
               pendingSpeakTexts = []
               outputQueue = outputQueue
               bus = bus }

@@ -248,6 +248,7 @@ type VoiceToolCall =
       callId: string
       content: string
       snapshot: TranscriptSnapshot
+      answerMaxOutputTokens: int
       cancellation: CancellationTokenSource
       timeout: TimeSpan
       task: TaskCompletionSource<ContentFunctionCallOutput> }

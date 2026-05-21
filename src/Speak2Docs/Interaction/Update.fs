@@ -60,10 +60,15 @@ module Update =
     let private currentAppTheme () =
         let app = Application.Current
 
-        if isNull app then
-            Microsoft.Maui.ApplicationModel.AppTheme.Unspecified
-        else
-            app.RequestedTheme
+        let requestedTheme =
+            if isNull app then
+                AppInfo.Current.RequestedTheme
+            else
+                app.RequestedTheme
+
+        match requestedTheme with
+        | AppTheme.Unspecified -> AppInfo.Current.RequestedTheme
+        | appTheme -> appTheme
 
     let private sources model =
         KnowledgeSources.selectedSources model.pdfDocuments
@@ -109,6 +114,7 @@ module Update =
             yield RuntimeSettings.OpenAiKey, model.openAiKey
             yield RuntimeSettings.LogExpansions, string model.logExpansions
             yield RuntimeSettings.LogChunks, string model.logChunks
+            yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
             yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
             yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
@@ -162,6 +168,7 @@ module Update =
         Settings.setPlugInRetrievalMode model.activePlugIn.id model.retrievalMode
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
+        Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
@@ -554,6 +561,7 @@ module Update =
               documentProcessingCancellation = None
               logExpansions = Settings.logExpansions ()
               logChunks = Settings.logChunks ()
+              answerMaxOutputTokens = string (Settings.answerMaxOutputTokens ())
               useLexicalFilter =
                 Settings.plugInUseLexicalFilter
                     loadedPlugIn.definition.id
@@ -579,6 +587,7 @@ module Update =
 
             { model with
                 currentPage = Main
+                appTheme = currentAppTheme ()
                 log =
                     $"Accepted Speak2Docs Terms of Use and Privacy Policy version {C.TERMS_VERSION}."
                     :: model.log
@@ -594,6 +603,17 @@ module Update =
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | None -> { model with openAiKey = value } |> refreshRuntimeSettings, Cmd.none
+        | AnswerMaxOutputTokensChanged value ->
+            match sourceConfigBlocked model "Changing max answer tokens" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    answerMaxOutputTokens = value }
+                |> refreshRuntimeSettings,
+                Cmd.none
         | ModelRoleModelChanged(role, value) ->
             match sourceConfigBlocked model $"Changing {FsVoice.QA.ModelRole.storageName role} model" with
             | Some msg ->

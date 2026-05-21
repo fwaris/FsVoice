@@ -213,7 +213,7 @@
 
   <Target Name="RemoveAndroid16IncompatibleNativeLibraries" AfterTargets="_GetLibraryImports" Condition="$(TargetPlatformIdentifier) == 'android'">
     <ItemGroup>
-      <AndroidNativeLibrary Remove="@(AndroidNativeLibrary)" Condition="'%(Filename)%(Extension)' == 'libjingle_peerconnection_so.so'" />
+      <!-- Do not remove libjingle_peerconnection_so.so; WebRTC requires it at runtime for realtime voice. -->
       <AndroidNativeLibrary Remove="@(AndroidNativeLibrary)" Condition="'%(Filename)%(Extension)' == 'libonnxruntime_extensions4j_jni.so'" />
       <AndroidNativeLibrary Remove="@(AndroidNativeLibrary)" Condition="'%(Filename)%(Extension)' == 'libortextensions.so'" />
     </ItemGroup>

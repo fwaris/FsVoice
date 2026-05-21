@@ -93,4 +93,5 @@ module MainView =
             })
                 .padding (18.)
         )
+            .background(Theme.pageBackgroundColor model.appTheme)
             .title ("Realtime QA over PDFs")

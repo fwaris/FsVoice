@@ -174,6 +174,26 @@ type SequencedChatClient(responseTexts: string list) =
         member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type LengthFinishChatClient(responseText: string) =
+    let mutable maxOutputTokens = Nullable<int>()
+
+    member _.MaxOutputTokens = maxOutputTokens
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            if not (isNull options) then
+                maxOutputTokens <- options.MaxOutputTokens
+
+            let response = ChatResponse(ChatMessage(ChatRole.Assistant, responseText))
+            response.FinishReason <- Nullable(ChatFinishReason.Length)
+            Task.FromResult(response)
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type FakeQaToolHost() =
     interface IQaToolHost with
         member _.Report _ = ()
@@ -644,6 +664,47 @@ let ``qa session retries empty answer response with larger output budget`` () =
         Assert.True(client.Calls[1].Value >= 1200)
         Assert.Contains(logs, fun log -> log.Contains("Answer model returned empty text"))
         Assert.Contains(logs, fun log -> log.Contains("Answer model retry succeeded"))
+    }
+
+[<Fact>]
+let ``qa session reports token limit when answer response is length finished`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake"
+              enabled = true }
+
+        let client = new LengthFinishChatClient("partial answer")
+        let logs = ResizeArray<string>()
+
+        let answerConfig =
+            { ModelRoleConfig.create "gpt-5.5" with
+                maxOutputTokens = Some 321 }
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some client }
+                answerModelId = answerConfig.modelId
+                modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Give me a long answer."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Contains("max answer token limit of 321", answer.answer)
+        Assert.Equal(321, client.MaxOutputTokens.Value)
+        Assert.Contains(logs, fun log -> log.Contains("Answer model hit output token limit"))
     }
 
 [<Fact>]
@@ -1433,7 +1494,9 @@ let ``index preview loads Speak2Docs installed prebuilt index`` () =
           enabled = true }
 
     let folder = speak2DocsPrebuiltFolder storageRoot
-    let indexPath = Path.Combine(folder, "prebuilt-us-constitution-knowledge-pack.md.fsci")
+
+    let indexPath =
+        Path.Combine(folder, "prebuilt-us-constitution-knowledge-pack.md.fsci")
 
     fakeColbertIndex [ fakeIndexedPassage source 0 "Article I establishes Congress." [ "article i"; "congress" ] ]
     |> FsColbert.IndexPersistence.save indexPath
@@ -2619,3 +2682,18 @@ let ``demo orchestration sees replaced runtime settings snapshots`` () =
 
     Assert.False first.useLexicalFilter
     Assert.True second.useLexicalFilter
+
+[<Fact>]
+let ``runtime settings apply answer max output tokens to answer model`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AnswerMaxOutputTokens, "2500" ]
+
+    let plugIn =
+        FsVoice.QA.PlugInDefinition.generic
+        |> Speak2Docs.RuntimeSettings.composePlugIn
+            Speak2Docs.InternalDocumentIndex
+            (Speak2Docs.RuntimeSettings.snapshot settings)
+
+    let answer = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer plugIn
+
+    Assert.Equal(2500, answer.maxOutputTokens |> Option.defaultValue 0)

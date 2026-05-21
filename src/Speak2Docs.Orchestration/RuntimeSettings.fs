@@ -15,6 +15,9 @@ module RuntimeSettings =
     let LogChunks = "retrieval.logChunks"
 
     [<Literal>]
+    let AnswerMaxOutputTokens = "answer.maxOutputTokens"
+
+    [<Literal>]
     let UseLexicalFilter = "retrieval.useLexicalFilter"
 
     [<Literal>]
@@ -25,6 +28,15 @@ module RuntimeSettings =
 
     [<Literal>]
     let UseLayoutAnalysis = "pdf.useLayoutAnalysis"
+
+    [<Literal>]
+    let DefaultAnswerMaxOutputTokens = 900
+
+    [<Literal>]
+    let MinAnswerMaxOutputTokens = 128
+
+    [<Literal>]
+    let MaxAnswerMaxOutputTokens = 32000
 
     let empty () : RuntimeSettings = ref Map.empty
 
@@ -46,6 +58,22 @@ module RuntimeSettings =
             | true, parsed -> Some parsed
             | false, _ -> None)
         |> Option.defaultValue fallback
+
+    let int key fallback values =
+        values
+        |> tryGet key
+        |> Option.bind (fun value ->
+            match System.Int32.TryParse value with
+            | true, parsed -> Some parsed
+            | false, _ -> None)
+        |> Option.defaultValue fallback
+
+    let private clamp minValue maxValue value = value |> max minValue |> min maxValue
+
+    let answerMaxOutputTokens values =
+        values
+        |> int AnswerMaxOutputTokens DefaultAnswerMaxOutputTokens
+        |> clamp MinAnswerMaxOutputTokens MaxAnswerMaxOutputTokens
 
     let modelRoleKey role =
         $"model.{FsVoice.QA.ModelRole.storageName role}"
@@ -79,9 +107,20 @@ module RuntimeSettings =
         (values: Map<string, string>)
         (definition: FsVoice.QA.PlugInDefinition)
         =
-        PlugInComposer.withHostOverrides
-            (modelRoleOverrides values)
-            retrievalMode
-            (bool UseLexicalFilter definition.runtime.useLexicalFilter values)
-            (bool ElaborateIndexKeywords definition.runtime.elaborateIndexKeywords values)
-            definition
+        let definition =
+            PlugInComposer.withHostOverrides
+                (modelRoleOverrides values)
+                retrievalMode
+                (bool UseLexicalFilter definition.runtime.useLexicalFilter values)
+                (bool ElaborateIndexKeywords definition.runtime.elaborateIndexKeywords values)
+                definition
+
+        let answerModel = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer definition
+
+        { definition with
+            models =
+                definition.models
+                |> Map.add
+                    FsVoice.QA.Answer
+                    { answerModel with
+                        maxOutputTokens = Some(answerMaxOutputTokens values) } }
