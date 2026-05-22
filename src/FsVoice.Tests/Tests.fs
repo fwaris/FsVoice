@@ -705,6 +705,7 @@ let ``qa session reports token limit when answer response is length finished`` (
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Contains("max answer token limit of 321", answer.answer)
+        Assert.Contains("Disconnect, open Settings, increase Max Answer Tokens", answer.answer)
         Assert.Equal(321, client.MaxOutputTokens.Value)
         Assert.Contains(logs, fun log -> log.Contains("Answer model hit output token limit"))
     }

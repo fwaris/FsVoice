@@ -60,10 +60,11 @@ module Connect =
     let private connectRealtime
         (mailbox: Channel<Msg>)
         (session: IVoiceSession<ToHost, FromHost>)
-        token
-        apiKey
+        (token: CancellationToken)
+        (apiKey: string)
+        (connectionId: string)
         (connection: Connection)
-        realtimeSession
+        (realtimeSession: RTOpenAI.Events.Session)
         =
         task {
             try
@@ -72,10 +73,17 @@ module Connect =
                         session = realtimeSession }
 
                 let! ephemeralKey = Connection.getEphemeralKey apiKey keyRequest
+                token.ThrowIfCancellationRequested()
                 do! Connection.connect ephemeralKey connection
+                token.ThrowIfCancellationRequested()
             with ex ->
-                mailbox.Writer.TryWrite(RealtimeConnectFailed ex.Message) |> ignore
-                notifyHost session token (RealtimeConnectionFailed ex.Message)
+                if token.IsCancellationRequested then
+                    log mailbox $"Realtime connect canceled for connection {connectionId}."
+                else
+                    mailbox.Writer.TryWrite(RealtimeConnectFailed(connectionId, ex.Message))
+                    |> ignore
+
+                    notifyHost session token (RealtimeConnectionFailed ex.Message)
         }
         |> ignore
 
@@ -84,6 +92,7 @@ module Connect =
         (session: IVoiceSession<ToHost, FromHost>)
         token
         apiKey
+        connectionId
         (connection: Connection)
         =
         async {
@@ -93,12 +102,12 @@ module Connect =
                     |> AsyncSeq.iter (function
                         | Log text -> log mailbox text
                         | RequestRealtimeConnection realtimeSession ->
-                            connectRealtime mailbox session token apiKey connection realtimeSession
+                            connectRealtime mailbox session token apiKey connectionId connection realtimeSession
                         | TranscriptFinalized _ -> ()
                         | ContextReady(_, chunks, inventory) ->
                             log mailbox $"Context ready: {chunks.Length} chunk(s), {inventory.Length} source(s)."
                         | OracleResponseReady(_, Some candidate) ->
-                            log mailbox $"Oracle response ready: {Text.truncate 220 candidate.answer}"
+                            log mailbox $"Oracle final response: {Text.normalizeWhitespace candidate.answer}"
                         | OracleResponseReady(_, None) -> log mailbox "Oracle response unavailable."
                         | FlowEnded abnormal ->
                             if abnormal then
@@ -141,7 +150,9 @@ module Connect =
 
                         let stateSubscription =
                             conn.WebRtcClient.StateChanged.Subscribe(fun state ->
-                                parms.mailbox.Writer.TryWrite(WebRTC_StateChanged state) |> ignore
+                                parms.mailbox.Writer.TryWrite(WebRTC_StateChanged(parms.connectionId, state))
+                                |> ignore
+
                                 notifyHost session cancellation.Token (RealtimeStateChanged(realtimeState state)))
 
                         let conn =
@@ -150,13 +161,14 @@ module Connect =
 
                         startClientPump parms.mailbox conn clientEvents cancellation.Token
                         startServerPump parms.mailbox conn serverEvents cancellation.Token
-                        startHostPump parms.mailbox session cancellation.Token apiKey conn
+                        startHostPump parms.mailbox session cancellation.Token apiKey parms.connectionId conn
 
                         do! session.StartAsync cancellation.Token |> Async.AwaitTask
 
                         return
                             Ok
-                                { session = session
+                                { id = parms.connectionId
+                                  session = session
                                   connection = conn
                                   serverEvents = serverEvents
                                   clientEvents = clientEvents
@@ -168,17 +180,47 @@ module Connect =
 
     let stop (bundle: ConnectionBundle) : Async<Result<unit, exn>> =
         async {
+            let mutable firstError: exn option = None
+
+            let captureError ex label =
+                Log.exn (ex, label)
+
+                if firstError.IsNone then
+                    firstError <- Some ex
+
+            let tryStep label action =
+                async {
+                    try
+                        do! action
+                    with ex ->
+                        captureError ex label
+                }
+
             try
                 bundle.cancellation.Cancel()
-                bundle.serverEvents.Writer.TryComplete() |> ignore
-                bundle.clientEvents.Writer.TryComplete() |> ignore
-
-                do! bundle.session.StopAsync CancellationToken.None |> Async.AwaitTask
-                Connection.close bundle.connection
-                bundle.cancellation.Dispose()
-
-                return Ok()
             with ex ->
-                Log.exn (ex, "Connect.stop")
-                return Error ex
+                captureError ex "Connect.stop cancel"
+
+            bundle.serverEvents.Writer.TryComplete() |> ignore
+            bundle.clientEvents.Writer.TryComplete() |> ignore
+
+            do! tryStep "Connect.stop session stop" (bundle.session.StopAsync CancellationToken.None |> Async.AwaitTask)
+
+            do! tryStep "Connect.stop session dispose" (bundle.session.DisposeAsync().AsTask() |> Async.AwaitTask)
+
+            try
+                Connection.close bundle.connection
+            with ex ->
+                captureError ex "Connect.stop connection close"
+
+            try
+                bundle.cancellation.Dispose()
+            with ex ->
+                captureError ex "Connect.stop cancellation dispose"
+
+            do! Async.Sleep 300
+
+            match firstError with
+            | None -> return Ok()
+            | Some ex -> return Error ex
         }

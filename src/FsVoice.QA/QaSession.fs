@@ -172,11 +172,14 @@ type QaSession(options: QaSessionOptions) =
     let emptyAnswerFallback =
         "I could not produce an answer from the selected context. Please try again."
 
+    let maxAnswerTokensSettingsGuidance =
+        "Disconnect, open Settings, increase Max Answer Tokens, then reconnect and try again."
+
     let tokenLimitFallback maxOutputTokens =
-        $"I was unable to obtain a complete answer. The answer model appears to have exceeded the current max answer token limit of {maxOutputTokens}. Increase Max Answer Tokens in Settings and try again."
+        $"I was unable to obtain a complete answer. The answer model appears to have exceeded the current max answer token limit of {maxOutputTokens}. {maxAnswerTokensSettingsGuidance}"
 
     let emptyAnswerFallbackWithLimit maxOutputTokens =
-        $"I was unable to obtain an answer from the oracle. The answer model returned empty text with the current max answer token limit of {maxOutputTokens}. Increase Max Answer Tokens in Settings or ask a narrower question and try again."
+        $"I was unable to obtain an answer from the oracle. The answer model returned empty text with the current max answer token limit of {maxOutputTokens}. {maxAnswerTokensSettingsGuidance} You can also ask a narrower question."
 
     let isFallbackAnswer (answer: string) =
         answer = emptyAnswerFallback

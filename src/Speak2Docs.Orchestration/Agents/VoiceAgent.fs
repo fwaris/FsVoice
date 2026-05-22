@@ -249,8 +249,11 @@ module VoiceAgent =
             item = ConversationItem.Function_call_output result }
         |> ClientEvent.ConversationItemCreate
 
+    let private maxAnswerTokensSettingsGuidance =
+        "Disconnect, open Settings, increase Max Answer Tokens, then reconnect and try again."
+
     let private fallbackToolOutput maxOutputTokens (_snapshot: TranscriptSnapshot) =
-        $"I was unable to obtain an answer from the oracle. The request may have exceeded the current max answer token limit of {maxOutputTokens}, or the backend may have timed out. Try increasing Max Answer Tokens in Settings or ask a narrower question."
+        $"I was unable to obtain an answer from the oracle. The request may have exceeded the current max answer token limit of {maxOutputTokens}, or the backend may have timed out. {maxAnswerTokensSettingsGuidance} You can also ask a narrower question."
 
     let private speechFriendlyMarkdown (text: string) =
         let replace (pattern: string) (replacement: string) (value: string) =
@@ -525,7 +528,7 @@ module VoiceAgent =
 
         let output =
             if outputWasBlank then
-                $"I was unable to obtain an answer from the oracle. The oracle returned empty text with the current max answer token limit of {st.config.answerMaxOutputTokens}. Try increasing Max Answer Tokens in Settings or ask a narrower question."
+                $"I was unable to obtain an answer from the oracle. The oracle returned empty text with the current max answer token limit of {st.config.answerMaxOutputTokens}. {maxAnswerTokensSettingsGuidance} You can also ask a narrower question."
             else
                 output
 
@@ -577,7 +580,7 @@ module VoiceAgent =
                 toolCall.cancellation.Cancel()
 
                 let output =
-                    $"I was unable to obtain an answer from the oracle before the timeout. The request may have exceeded the current max answer token limit of {toolCall.answerMaxOutputTokens}, or the backend may still be working. Try increasing Max Answer Tokens in Settings or ask a narrower question."
+                    $"I was unable to obtain an answer from the oracle before the timeout. The request may have exceeded the current max answer token limit of {toolCall.answerMaxOutputTokens}, or the backend may still be working. {maxAnswerTokensSettingsGuidance} You can also ask a narrower question."
 
                 bus.PostToAgent(Ag_Log $"Oracle tool call timed out for {toolCall.callId}: {ex.Message}")
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))

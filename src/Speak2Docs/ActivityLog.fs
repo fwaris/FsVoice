@@ -131,11 +131,12 @@ module ActivityLog =
           "Document structure layout page"
           "Document structure Heron layout page"
           "Document structure preparing layout ONNX model"
-          "Document structure preparing figure classifier" ]
+          "Document structure preparing figure classifier"
+          "Oracle final response:"
+          "Oracle response ready:" ]
 
     let private verbosePrefixes =
         [ "Context ready:"
-          "Oracle response ready:"
           "Persisted document library:"
           "Realtime state changed:"
           "Realtime session created"

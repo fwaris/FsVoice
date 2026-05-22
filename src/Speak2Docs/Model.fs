@@ -16,7 +16,8 @@ type AppPage =
     | IndexPreview of documentId: string
 
 type ConnectionBundle =
-    { session: IVoiceSession<ToHost, FromHost>
+    { id: string
+      session: IVoiceSession<ToHost, FromHost>
       connection: Connection
       serverEvents: Channel<JsonElement>
       clientEvents: Channel<JsonElement>
@@ -29,7 +30,8 @@ type AppLink =
     | SettingsHelp
 
 type StartParams =
-    { apiKey: string
+    { connectionId: string
+      apiKey: string
       orchestration: IVoiceOrchestration<ToHost, FromHost>
       context: VoiceOrchestrationContext
       mailbox: Channel<Msg>
@@ -51,6 +53,7 @@ and Model =
     { currentPage: AppPage
       mailbox: Channel<Msg>
       bundle: ConnectionBundle option
+      pendingConnectionId: string option
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
       activePlugIn: FsVoice.QA.PlugInDefinition
@@ -108,10 +111,10 @@ and Msg =
     | IndexPreviewLoaded of string * Result<KnowledgeSources.IndexPreview, exn>
     | ApplySources
     | StartStop
-    | StartCompleted of Result<ConnectionBundle, exn>
-    | StopCompleted of Result<unit, exn>
-    | WebRTC_StateChanged of RTOpenAI.WebRTC.State
-    | RealtimeConnectFailed of string
+    | StartCompleted of string * Result<ConnectionBundle, exn>
+    | StopCompleted of string * Result<unit, exn>
+    | WebRTC_StateChanged of string * RTOpenAI.WebRTC.State
+    | RealtimeConnectFailed of string * string
     | Log_Append of string
     | Log_Clear
     | LogFont_Increase

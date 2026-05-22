@@ -553,26 +553,64 @@ module Update =
             (fun result -> PdfProcessingCompleted(docs, result))
             EventError
 
-    let private cleanupFailedRealtimeConnection error model =
+    let private stopBundleCommand (bundle: ConnectionBundle) =
+        Cmd.OfAsync.either Connect.stop bundle (fun result -> StopCompleted(bundle.id, result)) EventError
+
+    let private currentRealtimeConnectionId model =
+        model.bundle |> Option.map _.id |> Option.orElse model.pendingConnectionId
+
+    let private isCurrentRealtimeConnection connectionId model =
+        currentRealtimeConnectionId model
+        |> Option.exists (fun current -> String.Equals(current, connectionId, StringComparison.OrdinalIgnoreCase))
+
+    let private cleanupFailedRealtimeConnection connectionId error model =
         let log =
             $"Realtime connection failed: {error}" :: model.log |> List.truncate C.MAX_LOG
 
-        match model.bundle with
-        | Some bundle when not model.isBusy ->
-            { model with
-                bundle = None
-                sessionState = RTOpenAI.WebRTC.State.Disconnected
-                isBusy = true
-                log = log },
-            Cmd.OfAsync.either Connect.stop bundle StopCompleted EventError
-        | _ ->
-            { model with
-                sessionState = RTOpenAI.WebRTC.State.Disconnected
-                isBusy = false
-                log = log },
-            Cmd.none
+        if not (isCurrentRealtimeConnection connectionId model) then
+            model, Cmd.none
+        else
+            match model.bundle with
+            | Some bundle when
+                String.Equals(bundle.id, connectionId, StringComparison.OrdinalIgnoreCase)
+                && not model.isBusy
+                ->
+                { model with
+                    pendingConnectionId = None
+                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    isBusy = true
+                    log = log },
+                stopBundleCommand bundle
+            | _ ->
+                { model with
+                    bundle = None
+                    pendingConnectionId = None
+                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    isBusy = false
+                    log = log },
+                Cmd.none
 
-    let private startParams model =
+    let private handleRealtimeStateChanged connectionId state model =
+        if not (isCurrentRealtimeConnection connectionId model) then
+            model, Cmd.none
+        elif state = RTOpenAI.WebRTC.State.Disconnected then
+            match model.bundle with
+            | Some bundle when
+                String.Equals(bundle.id, connectionId, StringComparison.OrdinalIgnoreCase)
+                && not model.isBusy
+                ->
+                { model with
+                    sessionState = state
+                    isBusy = true
+                    log =
+                        "Realtime connection disconnected; cleaning up session." :: model.log
+                        |> List.truncate C.MAX_LOG },
+                stopBundleCommand bundle
+            | _ -> { model with sessionState = state }, Cmd.none
+        else
+            { model with sessionState = state }, Cmd.none
+
+    let private startParams connectionId model =
         refreshRuntimeSettings model |> ignore
 
         let orchestrationOptions =
@@ -585,7 +623,8 @@ module Update =
         let orchestration =
             DemoVoiceOrchestration(orchestrationOptions) :> IVoiceOrchestration<ToHost, FromHost>
 
-        { apiKey = model.openAiKey
+        { connectionId = connectionId
+          apiKey = model.openAiKey
           orchestration = orchestration
           context =
             { storageRoot = FileSystem.AppDataDirectory
@@ -623,6 +662,7 @@ module Update =
             { currentPage = if Settings.hasAcceptedCurrentTerms () then Main else Terms
               mailbox = Channel.CreateBounded<Msg>(100)
               bundle = None
+              pendingConnectionId = None
               sessionState = RTOpenAI.WebRTC.State.Disconnected
               openAiKey = Settings.openAiKey ()
               activePlugIn = loadedPlugIn.definition
@@ -1280,37 +1320,65 @@ module Update =
                 | None -> showNotification "Set your OpenAI API key in Settings before connecting." model
                 | Some _ ->
                     saveSettings model
+                    let connectionId = Guid.NewGuid().ToString("N")
 
                     { model with
                         isBusy = true
+                        pendingConnectionId = Some connectionId
+                        sessionState = RTOpenAI.WebRTC.State.Connecting
                         log = "Starting realtime Speak2Docs flow..." :: model.log },
-                    Cmd.OfAsync.either Connect.start (startParams model) StartCompleted EventError
-            | Some bundle ->
-                { model with isBusy = true }, Cmd.OfAsync.either Connect.stop bundle StopCompleted EventError
-        | StartCompleted(Ok bundle) ->
-            { model with
-                bundle = Some bundle
-                isBusy = false
-                log = "Realtime flow started." :: model.log },
-            Cmd.none
-        | StartCompleted(Error ex) ->
-            { model with
-                isBusy = false
-                log = $"Start failed: {ex.Message}" :: model.log },
-            Cmd.none
-        | StopCompleted(Ok()) ->
-            { model with
-                bundle = None
-                isBusy = false
-                log = "Realtime flow stopped." :: model.log },
-            Cmd.none
-        | StopCompleted(Error ex) ->
-            { model with
-                isBusy = false
-                log = $"Stop failed: {ex.Message}" :: model.log },
-            Cmd.none
-        | WebRTC_StateChanged state -> { model with sessionState = state }, Cmd.none
-        | RealtimeConnectFailed error -> cleanupFailedRealtimeConnection error model
+                    Cmd.OfAsync.either
+                        Connect.start
+                        (startParams connectionId model)
+                        (fun result -> StartCompleted(connectionId, result))
+                        EventError
+            | Some bundle -> { model with isBusy = true }, stopBundleCommand bundle
+        | StartCompleted(connectionId, Ok bundle) ->
+            match model.pendingConnectionId with
+            | Some pendingId when String.Equals(pendingId, connectionId, StringComparison.OrdinalIgnoreCase) ->
+                { model with
+                    bundle = Some bundle
+                    pendingConnectionId = None
+                    sessionState = bundle.connection.WebRtcClient.State
+                    isBusy = false
+                    log = "Realtime flow started." :: model.log },
+                Cmd.none
+            | _ -> model, stopBundleCommand bundle
+        | StartCompleted(connectionId, Error ex) ->
+            match model.pendingConnectionId with
+            | Some pendingId when String.Equals(pendingId, connectionId, StringComparison.OrdinalIgnoreCase) ->
+                { model with
+                    bundle = None
+                    pendingConnectionId = None
+                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    isBusy = false
+                    log = $"Start failed: {ex.Message}" :: model.log },
+                Cmd.none
+            | _ -> model, Cmd.none
+        | StopCompleted(connectionId, Ok()) ->
+            match model.bundle with
+            | Some bundle when String.Equals(bundle.id, connectionId, StringComparison.OrdinalIgnoreCase) ->
+                { model with
+                    bundle = None
+                    pendingConnectionId = None
+                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    isBusy = false
+                    log = "Realtime flow stopped." :: model.log },
+                Cmd.none
+            | _ -> model, Cmd.none
+        | StopCompleted(connectionId, Error ex) ->
+            match model.bundle with
+            | Some bundle when String.Equals(bundle.id, connectionId, StringComparison.OrdinalIgnoreCase) ->
+                { model with
+                    bundle = None
+                    pendingConnectionId = None
+                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    isBusy = false
+                    log = $"Stop cleanup reported an issue: {ex.Message}" :: model.log },
+                Cmd.none
+            | _ -> model, Cmd.none
+        | WebRTC_StateChanged(connectionId, state) -> handleRealtimeStateChanged connectionId state model
+        | RealtimeConnectFailed(connectionId, error) -> cleanupFailedRealtimeConnection connectionId error model
         | Log_Append text ->
             { model with
                 log = text :: model.log |> List.truncate C.MAX_LOG },
