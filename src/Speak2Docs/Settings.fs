@@ -308,23 +308,9 @@ module Settings =
         with _ ->
             ()
 
-    let private setOracleModel (value: string) =
-        let value =
-            match Text.notEmpty value with
-            | Some v -> v
-            | None -> C.DEFAULT_ORACLE_MODEL
-
-        Preferences.Default.Set(C.SETTINGS_ORACLE_MODEL, value)
-
     let private plugInScopedKey (plugInId: string) (suffix: string) =
         let id = plugInId |> Text.notEmpty |> Option.defaultValue "generic"
         $"FsVoice.PlugIns.{id}.{suffix}"
-
-    let private legacyPlugInScopedKey (plugInId: string) (suffix: string) =
-        let id = plugInId |> Text.notEmpty |> Option.defaultValue "generic"
-        $"{C.LEGACY_PRODUCT_NAME}.PlugIns.{id}.{suffix}"
-
-    let private contains (key: string) = Preferences.Default.ContainsKey(key)
 
     let private clamp minValue maxValue value = value |> max minValue |> min maxValue
 
@@ -336,43 +322,18 @@ module Settings =
         | true, parsed -> normalizeAnswerMaxOutputTokens parsed
         | false, _ -> fallback
 
-    let private getScopedString (plugInId: string) (suffix: string) (legacyKey: string option) (fallback: string) =
+    let private getScopedString (plugInId: string) (suffix: string) (fallback: string) =
         let key = plugInScopedKey plugInId suffix
+        Preferences.Default.Get(key, fallback).Trim()
 
-        let legacyScopedKey = legacyPlugInScopedKey plugInId suffix
-
-        if contains key then
-            Preferences.Default.Get(key, fallback).Trim()
-        elif contains legacyScopedKey then
-            Preferences.Default.Get(legacyScopedKey, fallback).Trim()
-        else
-            match legacyKey with
-            | Some legacy -> Preferences.Default.Get(legacy, fallback).Trim()
-            | None -> fallback
-
-    let private getScopedBool (plugInId: string) (suffix: string) (legacyKey: string option) (fallback: bool) =
+    let private getScopedBool (plugInId: string) (suffix: string) (fallback: bool) =
         let key = plugInScopedKey plugInId suffix
-
-        let legacyScopedKey = legacyPlugInScopedKey plugInId suffix
-
-        if contains key then
-            Preferences.Default.Get(key, fallback)
-        elif contains legacyScopedKey then
-            Preferences.Default.Get(legacyScopedKey, fallback)
-        else
-            match legacyKey with
-            | Some legacy -> Preferences.Default.Get(legacy, fallback)
-            | None -> fallback
+        Preferences.Default.Get(key, fallback)
 
     let modelRoleModelId plugInId role fallback =
-        let legacy =
-            match role with
-            | FsVoice.QA.Answer -> Some C.LEGACY_SETTINGS_ORACLE_MODEL
-            | _ -> None
-
         let suffix = $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
 
-        getScopedString plugInId suffix legacy fallback
+        getScopedString plugInId suffix fallback
         |> Text.notEmpty
         |> Option.defaultValue fallback
 
@@ -389,27 +350,15 @@ module Settings =
 
         Preferences.Default.Set(key, value)
 
-        if role = FsVoice.QA.Answer then
-            setOracleModel value
-
     let activePlugInId () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_ACTIVE_PLUG_IN) then
-            Preferences.Default.Get(C.SETTINGS_ACTIVE_PLUG_IN, "generic").Trim()
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_ACTIVE_PLUG_IN, "generic").Trim()
+        Preferences.Default.Get(C.SETTINGS_ACTIVE_PLUG_IN, "generic").Trim()
 
     let setActivePlugInId (value: string) =
         let value = value |> Text.notEmpty |> Option.defaultValue "generic"
         Preferences.Default.Set(C.SETTINGS_ACTIVE_PLUG_IN, value)
 
     let retrievalMode () =
-        let key =
-            if Preferences.Default.ContainsKey(C.SETTINGS_RETRIEVAL_MODE) then
-                C.SETTINGS_RETRIEVAL_MODE
-            else
-                C.LEGACY_SETTINGS_RETRIEVAL_MODE
-
-        Preferences.Default.Get(key, RetrievalModes.toStorageValue FsColbertWithFallback)
+        Preferences.Default.Get(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue FsColbertWithFallback)
         |> RetrievalModes.ofStorageValue
 
     let setRetrievalMode mode =
@@ -417,11 +366,7 @@ module Settings =
 
     let plugInRetrievalMode plugInId fallback =
         let value =
-            getScopedString
-                plugInId
-                "Runtime.RetrievalMode"
-                (Some C.LEGACY_SETTINGS_RETRIEVAL_MODE)
-                (RetrievalModes.toStorageValue fallback)
+            getScopedString plugInId "Runtime.RetrievalMode" (RetrievalModes.toStorageValue fallback)
 
         RetrievalModes.ofStorageValue value
 
@@ -430,30 +375,28 @@ module Settings =
         setRetrievalMode mode
 
     let logExpansions () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_LOG_EXPANSIONS) then
-            Preferences.Default.Get(C.SETTINGS_LOG_EXPANSIONS, false)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_LOG_EXPANSIONS, false)
+        Preferences.Default.Get(C.SETTINGS_LOG_EXPANSIONS, false)
 
     let setLogExpansions value =
         Preferences.Default.Set(C.SETTINGS_LOG_EXPANSIONS, value)
 
     let logChunks () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_LOG_CHUNKS) then
-            Preferences.Default.Get(C.SETTINGS_LOG_CHUNKS, false)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_LOG_CHUNKS, false)
+        Preferences.Default.Get(C.SETTINGS_LOG_CHUNKS, false)
 
     let setLogChunks value =
         Preferences.Default.Set(C.SETTINGS_LOG_CHUNKS, value)
 
+    let activityLogVerbosity () =
+        Preferences.Default.Get(C.SETTINGS_ACTIVITY_LOG_LEVEL, ActivityLog.toStorageValue Informational)
+        |> ActivityLog.ofStorageValue
+
+    let setActivityLogVerbosity value =
+        Preferences.Default.Set(C.SETTINGS_ACTIVITY_LOG_LEVEL, ActivityLog.toStorageValue value)
+
     let answerMaxOutputTokens () =
         let fallback = C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
 
-        if Preferences.Default.ContainsKey(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS) then
-            Preferences.Default.Get(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, fallback)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, fallback)
+        Preferences.Default.Get(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, fallback)
         |> normalizeAnswerMaxOutputTokens
 
     let setAnswerMaxOutputTokens value =
@@ -461,61 +404,45 @@ module Settings =
         Preferences.Default.Set(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, tokens)
 
     let useLexicalFilter () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_USE_LEXICAL_FILTER) then
-            Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_LEXICAL_FILTER, true)
+        Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)
 
     let setUseLexicalFilter value =
         Preferences.Default.Set(C.SETTINGS_USE_LEXICAL_FILTER, value)
 
     let plugInUseLexicalFilter plugInId fallback =
-        getScopedBool plugInId "Runtime.UseLexicalFilter" (Some C.LEGACY_SETTINGS_USE_LEXICAL_FILTER) fallback
+        getScopedBool plugInId "Runtime.UseLexicalFilter" fallback
 
     let setPlugInUseLexicalFilter plugInId value =
         Preferences.Default.Set(plugInScopedKey plugInId "Runtime.UseLexicalFilter", value)
         setUseLexicalFilter value
 
     let elaborateIndexKeywords () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_ELABORATE_INDEX_KEYWORDS) then
-            Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
+        Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
 
     let setElaborateIndexKeywords value =
         Preferences.Default.Set(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, value)
 
     let plugInElaborateIndexKeywords plugInId fallback =
-        getScopedBool
-            plugInId
-            "Runtime.ElaborateIndexKeywords"
-            (Some C.LEGACY_SETTINGS_ELABORATE_INDEX_KEYWORDS)
-            fallback
+        getScopedBool plugInId "Runtime.ElaborateIndexKeywords" fallback
 
     let setPlugInElaborateIndexKeywords plugInId value =
         Preferences.Default.Set(plugInScopedKey plugInId "Runtime.ElaborateIndexKeywords", value)
         setElaborateIndexKeywords value
 
     let useHybridPdfParsing () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_USE_HYBRID_PDF_PARSING) then
-            Preferences.Default.Get(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_HYBRID_PDF_PARSING, true)
+        Preferences.Default.Get(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
 
     let setUseHybridPdfParsing value =
         Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, value)
 
     let useLayoutAnalysis () =
-        if Preferences.Default.ContainsKey(C.SETTINGS_USE_LAYOUT_ANALYSIS) then
-            Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, true)
-        else
-            Preferences.Default.Get(C.LEGACY_SETTINGS_USE_LAYOUT_ANALYSIS, true)
+        Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, true)
 
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
 
     let plugInSetting plugInId key fallback =
-        getScopedString plugInId $"Settings.{key}" None fallback
+        getScopedString plugInId $"Settings.{key}" fallback
 
     let setPlugInSetting plugInId key value =
         Preferences.Default.Set(plugInScopedKey plugInId $"Settings.{key}", value)

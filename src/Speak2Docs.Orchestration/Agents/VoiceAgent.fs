@@ -113,18 +113,29 @@ module VoiceAgent =
           memoryRequestTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.realtimeMemoryTimeoutMs)
           functionCallTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.functionCallTimeoutMs) }
 
+    let private speakerphoneTurnDetection =
+        VAD.Server_Vad
+            {| create_response = true
+               idle_timeout_ms = Skip
+               interrupt_response = true
+               prefix_padding_ms = 300
+               silence_duration_ms = 350
+               threshold = 0.7 |}
+
     let private sessionAudio config =
         { Audio.Default with
             input =
                 Include(
                     Some
                         { AudioInput.Default with
+                            noise_reduction = Include(Some { ``type`` = "far_field" })
                             transcription =
                                 { language = "en"
                                   model = config.transcriberModel
                                   prompt = Some config.transcriberPrompt }
                                 |> Some
-                                |> Include }
+                                |> Include
+                            turn_detection = Include(Some speakerphoneTurnDetection) }
                 ) }
 
     let private oracleTool =
@@ -208,30 +219,10 @@ module VoiceAgent =
             session = updateSession config session }
         |> ClientEvent.SessionUpdate
 
-    let private oracleAnswerInput answer =
-        { ContentMessage.Default with
-            role = "user"
-            content =
-                [ MessageContent.Input_text
-                      {| text = $"Speak this oracle answer exactly, without adding facts:\n\n{answer}" |} ] }
-        |> ConversationItem.Message
-
-    let private greetingInput greeting =
-        { ContentMessage.Default with
-            role = "user"
-            content =
-                [ MessageContent.Input_text
-                      {| text = $"Speak this greeting exactly, without adding facts or calling tools:\n\n{greeting}" |} ] }
-        |> ConversationItem.Message
-
-    let private responseCreateEvent (responseInstructions: string) (input: ConversationItem list option) =
+    let private responseCreateEvent (responseInstructions: string) =
         let response =
             { Response.Default with
                 instructions = Include(Some responseInstructions)
-                input =
-                    match input with
-                    | Some items -> Include(Some items)
-                    | None -> Skip
                 output_modalities = Include(Some [ "audio" ]) }
 
         { ResponseCreate.Default with
@@ -309,9 +300,7 @@ module VoiceAgent =
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
         | Silent, NoActiveResponse, text :: remaining ->
-            responseCreateEvent
-                (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
-                (Some [ oracleAnswerInput text ])
+            responseCreateEvent (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
@@ -327,9 +316,7 @@ module VoiceAgent =
     let private tryScheduleGreeting (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingGreeting with
         | Silent, NoActiveResponse, Some greeting ->
-            responseCreateEvent
-                (responseInstructionsForGreeting st.config.speechResultInstructions greeting)
-                (Some [ greetingInput greeting ])
+            responseCreateEvent (responseInstructionsForGreeting st.config.speechResultInstructions greeting)
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 

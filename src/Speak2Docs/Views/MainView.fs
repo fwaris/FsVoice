@@ -23,9 +23,18 @@ module MainView =
             .strokeShape(RoundRectangle(CornerRadius(8.)))
             .margin (0., 2., 0., 6.)
 
+    let private aiDisclaimerView model =
+        Label("Uses AI which can make mistakes")
+            .font(size = 12.)
+            .textColor(Theme.secondaryTextColor model.appTheme)
+            .horizontalTextAlignment(TextAlignment.Center)
+            .centerHorizontal()
+            .margin (0., 8., 0., 0.)
+
     let private logView model =
         let logItems =
             model.log
+            |> ActivityLog.visible model.activityLogVerbosity
             |> List.map (fun text ->
                 {| text = text
                    fontSize = model.logFontSize |})
@@ -38,7 +47,7 @@ module MainView =
                   Dimension.Absolute 46. ],
                 [ Dimension.Absolute 44.; Dimension.Star ]
             ) {
-                Label("Activity")
+                Label($"Activity ({ActivityLog.displayName model.activityLogVerbosity})")
                     .font(size = 15., attributes = FontAttributes.Bold)
                     .centerVertical()
                     .gridColumn(0)
@@ -74,22 +83,20 @@ module MainView =
                 [ Dimension.Absolute 54.
                   Dimension.Auto
                   Dimension.Absolute 230.
-                  Dimension.Star ]
+                  Dimension.Star
+                  Dimension.Auto ]
             ) {
                 (ToolbarView.main model).gridRow (0)
 
                 match model.notification with
                 | Some notification -> (notificationView notification).gridRow (1)
-                | None ->
-                    Label("Realtime QA with selected PDF sources")
-                        .font(size = 14.)
-                        .textColor(Theme.secondaryTextColor model.appTheme)
-                        .centerVertical()
-                        .gridRow (1)
+                | None -> ()
 
                 (PdfSourcesView.view model).gridRow (2)
 
                 (logView model).gridRow (3)
+
+                (aiDisclaimerView model).gridRow (4)
             })
                 .padding (18.)
         )

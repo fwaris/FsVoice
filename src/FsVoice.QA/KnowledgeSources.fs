@@ -246,13 +246,14 @@ module KnowledgeSources =
 
                 if hasDoclingSchema json then
                     match FsColbert.DoclingJson.tryDeserialize json with
-                    | Error err -> return Error $"Unable to read Docling JSON knowledge source '{path}': {err}"
+                    | Error err ->
+                        return Error $"Unable to read document structure JSON knowledge source '{path}': {err}"
                     | Ok document ->
                         let passages =
                             FsColbert.DoclingPassages.toPassages fsKameChunkOptions passageSource document
 
                         if List.isEmpty passages then
-                            return Error $"No Docling passages were found in {path}."
+                            return Error $"No document structure passages were found in {path}."
                         else
                             return Ok passages
                 else

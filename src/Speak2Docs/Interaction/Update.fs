@@ -168,6 +168,7 @@ module Update =
         Settings.setPlugInRetrievalMode model.activePlugIn.id model.retrievalMode
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
+        Settings.setActivityLogVerbosity model.activityLogVerbosity
         Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
@@ -184,6 +185,21 @@ module Update =
             | Error error -> $"Document library manifest was not saved: {error}"
 
         saveLog :: log |> List.truncate C.MAX_LOG
+
+    let private mergePrebuiltInstallResult (current: PdfDocumentSource list) (installed: PdfDocumentSource list) =
+        let currentById = current |> List.map (fun doc -> doc.id, doc) |> Map.ofList
+
+        let currentUserDocs = current |> List.filter (PdfDocuments.isBuiltIn >> not)
+
+        let installedBuiltInDocs =
+            installed
+            |> List.filter PdfDocuments.isBuiltIn
+            |> List.map (fun doc ->
+                match currentById |> Map.tryFind doc.id with
+                | Some current -> { doc with selected = current.selected }
+                | None -> doc)
+
+        currentUserDocs @ installedBuiltInDocs
 
     let private processingReport (model: Model) msg =
         let text = $"PDF processing: {msg}"
@@ -456,17 +472,60 @@ module Update =
                     chunkCount = 0
                     error = Some err }
 
-    let private failProcessingDocuments error (docs: PdfDocumentSource list) : PdfDocumentSource list =
+    let private sameDocument (left: PdfDocumentSource) (right: PdfDocumentSource) =
+        String.Equals(left.id, right.id, StringComparison.OrdinalIgnoreCase)
+        || String.Equals(left.storedPath, right.storedPath, StringComparison.OrdinalIgnoreCase)
+        || String.Equals(left.displayName, right.displayName, StringComparison.OrdinalIgnoreCase)
+
+    let private pairAvailable processedDocs results =
+        let rec pair acc processed results =
+            match processed, results with
+            | processedDoc :: remainingDocs, result :: remainingResults ->
+                pair ((processedDoc, result) :: acc) remainingDocs remainingResults
+            | _ -> List.rev acc
+
+        pair [] processedDocs results
+
+    let private processingResultForDocument
+        (processedDocs: PdfDocumentSource list)
+        (results: PdfProcessResult list)
+        (doc: PdfDocumentSource)
+        =
+        let pairedResults = pairAvailable processedDocs results
+
+        pairedResults
+        |> List.tryFind (fun (processedDoc, result) ->
+            sameDocument doc processedDoc
+            || String.Equals(doc.id, result.id, StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun (_, result) -> { result with id = doc.id })
+
+    let private wasSubmittedForProcessing processedDocs doc =
+        processedDocs |> List.exists (sameDocument doc)
+
+    let private applyProcessingResults
+        (processedDocs: PdfDocumentSource list)
+        (results: PdfProcessResult list)
+        (docs: PdfDocumentSource list)
+        : PdfDocumentSource list =
+        docs
+        |> List.map (fun doc ->
+            match processingResultForDocument processedDocs results doc with
+            | Some result -> applyProcessingResult result doc
+            | None -> doc)
+
+    let private failProcessingDocuments processedDocs error (docs: PdfDocumentSource list) : PdfDocumentSource list =
         docs
         |> List.map (fun doc ->
             match doc.status with
             | Processing
-            | Queued ->
+            | Queued when wasSubmittedForProcessing processedDocs doc ->
                 { doc with
                     selected = false
                     status = Failed
                     chunkCount = 0
                     error = Some error }
+            | Processing
+            | Queued
             | Ready
             | Failed -> doc)
 
@@ -491,8 +550,27 @@ module Update =
         Cmd.OfAsync.either
             (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing model.useLayoutAnalysis)
             docs
-            PdfProcessingCompleted
+            (fun result -> PdfProcessingCompleted(docs, result))
             EventError
+
+    let private cleanupFailedRealtimeConnection error model =
+        let log =
+            $"Realtime connection failed: {error}" :: model.log |> List.truncate C.MAX_LOG
+
+        match model.bundle with
+        | Some bundle when not model.isBusy ->
+            { model with
+                bundle = None
+                sessionState = RTOpenAI.WebRTC.State.Disconnected
+                isBusy = true
+                log = log },
+            Cmd.OfAsync.either Connect.stop bundle StopCompleted EventError
+        | _ ->
+            { model with
+                sessionState = RTOpenAI.WebRTC.State.Disconnected
+                isBusy = false
+                log = log },
+            Cmd.none
 
     let private startParams model =
         refreshRuntimeSettings model |> ignore
@@ -556,6 +634,7 @@ module Update =
               pdfDocuments = docs
               log = initialLog
               logFontSize = 12.
+              activityLogVerbosity = Settings.activityLogVerbosity ()
               hideSecrets = true
               isBusy = false
               documentProcessingCancellation = None
@@ -667,6 +746,16 @@ module Update =
                 saveSettings model
                 postSources model
                 model, Cmd.none
+        | ActivityLogVerbosityChanged value ->
+            let model =
+                { model with
+                    activityLogVerbosity = value
+                    log =
+                        $"Activity log set to {ActivityLog.displayName value}." :: model.log
+                        |> List.truncate C.MAX_LOG }
+
+            saveSettings model
+            model, Cmd.none
         | UseLexicalFilterToggled value ->
             match sourceConfigBlocked model "Changing lexical filter" with
             | Some msg ->
@@ -733,6 +822,8 @@ module Update =
                 postSources model
                 model, Cmd.none
         | PrebuiltDocumentsInstalled(Ok(docs, logs)) ->
+            let docs = mergePrebuiltInstallResult model.pdfDocuments docs
+
             let model =
                 { model with
                     pdfDocuments = docs
@@ -826,12 +917,13 @@ module Update =
                 isBusy = false
                 log = $"Source picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
-        | PdfProcessingCompleted(Ok(Completed results)) ->
+        | PdfProcessingCompleted(processedDocs, Ok(Completed results)) ->
             disposeDocumentProcessingCancellation model
 
             let pdfDocuments =
-                results
-                |> List.fold (fun docs result -> docs |> List.map (applyProcessingResult result)) model.pdfDocuments
+                model.pdfDocuments
+                |> applyProcessingResults processedDocs results
+                |> failProcessingDocuments processedDocs "Document processing completed without a result. Tap retry."
 
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
             let failedCount = results.Length - readyCount
@@ -854,13 +946,13 @@ module Update =
 
             postSources model
             model, Cmd.none
-        | PdfProcessingCompleted(Ok(Canceled results)) ->
+        | PdfProcessingCompleted(processedDocs, Ok(Canceled results)) ->
             disposeDocumentProcessingCancellation model
 
             let pdfDocuments =
-                results
-                |> List.fold (fun docs result -> docs |> List.map (applyProcessingResult result)) model.pdfDocuments
-                |> failProcessingDocuments "Document processing canceled. Tap retry."
+                model.pdfDocuments
+                |> applyProcessingResults processedDocs results
+                |> failProcessingDocuments processedDocs "Document processing canceled. Tap retry."
 
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
 
@@ -884,7 +976,7 @@ module Update =
                 postSources model
 
             model, Cmd.none
-        | PdfProcessingCompleted(Error ex) ->
+        | PdfProcessingCompleted(processedDocs, Error ex) ->
             disposeDocumentProcessingCancellation model
 
             let canceled =
@@ -898,7 +990,7 @@ module Update =
                 else
                     $"Document processing failed: {ex.Message}"
 
-            let pdfDocuments = failProcessingDocuments error model.pdfDocuments
+            let pdfDocuments = failProcessingDocuments processedDocs error model.pdfDocuments
 
             let log = error :: model.log |> List.truncate C.MAX_LOG
 
@@ -1218,6 +1310,7 @@ module Update =
                 log = $"Stop failed: {ex.Message}" :: model.log },
             Cmd.none
         | WebRTC_StateChanged state -> { model with sessionState = state }, Cmd.none
+        | RealtimeConnectFailed error -> cleanupFailedRealtimeConnection error model
         | Log_Append text ->
             { model with
                 log = text :: model.log |> List.truncate C.MAX_LOG },

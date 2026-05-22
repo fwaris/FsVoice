@@ -145,7 +145,7 @@ module DoclingHybrid =
                     async {
                         return
                             Error
-                                $"No Docling PDF rasterizer is registered for '{path}'. Reference FsVoice.PdfRasterization and call PdfRasterizer.register() before using Hybrid PDF parsing."
+                                $"No document structure PDF rasterizer is registered for '{path}'. Reference FsVoice.PdfRasterization and call PdfRasterizer.register() before using Hybrid PDF parsing."
                     } }
 
     type private RapidOcrProvider(ocr: RapidOcr) =
@@ -571,7 +571,7 @@ module DoclingHybrid =
                                     let elapsedSeconds = sprintf "%.1f" timer.Elapsed.TotalSeconds
 
                                     report
-                                        $"Docling hybrid layout page {index + 1}/{pages.Length} ({page.pageNo}) produced {prediction.clusters.Length} cluster(s) in {elapsedSeconds}s."
+                                        $"Document structure layout page {index + 1}/{pages.Length} ({page.pageNo}) produced {prediction.clusters.Length} cluster(s) in {elapsedSeconds}s."
 
                                     prediction))
 
@@ -622,12 +622,12 @@ module DoclingHybrid =
         let inputName name =
             session.InputMetadata.Keys
             |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX input '{name}' was not found.")
+            |> Option.defaultWith (fun () -> failwith $"Document structure Heron ONNX input '{name}' was not found.")
 
         let outputName name =
             session.OutputMetadata.Keys
             |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX output '{name}' was not found.")
+            |> Option.defaultWith (fun () -> failwith $"Document structure Heron ONNX output '{name}' was not found.")
 
         let imageInputName = inputName "images"
         let targetSizesInputName = inputName "orig_target_sizes"
@@ -685,7 +685,8 @@ module DoclingHybrid =
         let outputValue name (outputs: IDisposableReadOnlyCollection<DisposableNamedOnnxValue>) =
             outputs
             |> Seq.tryFind (fun output -> String.Equals(output.Name, name, StringComparison.Ordinal))
-            |> Option.defaultWith (fun () -> failwith $"Docling Heron ONNX output '{name}' was not returned.")
+            |> Option.defaultWith (fun () ->
+                failwith $"Document structure Heron ONNX output '{name}' was not returned.")
 
         let clamp limit value =
             Math.Min(float limit, Math.Max(0.0, float value))
@@ -747,13 +748,13 @@ module DoclingHybrid =
                                     timer.Stop()
 
                                     report
-                                        $"Docling Heron layout page {index + 1}/{pages.Length} ({page.pageNo}) produced {prediction.clusters.Length} cluster(s) in {timer.Elapsed.TotalSeconds:F1}s."
+                                        $"Document structure Heron layout page {index + 1}/{pages.Length} ({page.pageNo}) produced {prediction.clusters.Length} cluster(s) in {timer.Elapsed.TotalSeconds:F1}s."
 
                                     prediction))
 
                         return Ok predictions
                     with ex ->
-                        return Error $"Docling Heron layout prediction failed: {ex.Message}"
+                        return Error $"Document structure Heron layout prediction failed: {ex.Message}"
                 }
 
         interface IDisposable with
@@ -763,7 +764,7 @@ module DoclingHybrid =
         interface IDoclingLayoutModelProvider with
             member _.Id = "heron"
 
-            member _.DisplayName = "Docling Heron"
+            member _.DisplayName = "Document structure Heron"
 
             member _.CreateAsync context =
                 async {
@@ -787,7 +788,8 @@ module DoclingHybrid =
                     with
                     | :? OperationCanceledException ->
                         return raise (OperationCanceledException context.cancellationToken)
-                    | ex -> return Error $"Unable to initialize Docling Heron layout ONNX model: {ex.Message}"
+                    | ex ->
+                        return Error $"Unable to initialize document structure Heron layout ONNX model: {ex.Message}"
                 }
 
     let ppDocLayoutMProvider () =
@@ -818,7 +820,7 @@ module DoclingHybrid =
               cancellationToken = cancellationToken }
 
         async {
-            report $"Docling hybrid using {provider.DisplayName} layout model."
+            report $"Document structure parser using {provider.DisplayName} layout model."
             return! provider.CreateAsync context
         }
 
@@ -840,7 +842,7 @@ module DoclingHybrid =
 
                     return Ok(Some(classifier :> IDoclingFigureClassifier), Some(classifier :> IDisposable))
                 with ex ->
-                    return Error $"Unable to initialize Docling figure classifier ONNX model: {ex.Message}"
+                    return Error $"Unable to initialize document structure figure classifier ONNX model: {ex.Message}"
         }
 
     let buildPageInputsWithCancellation
@@ -860,33 +862,35 @@ module DoclingHybrid =
                 | :? ICancelableDoclingPageRasterizer as cancelable ->
                     cancelable.RasterizeAsync(path, cancellationToken)
                 | _ -> rasterizer.RasterizeAsync path
-                |> timed report $"Docling hybrid rasterizing {Path.GetFileName path} at {max 36 options.rasterDpi} DPI"
+                |> timed
+                    report
+                    $"Document structure parser rasterizing {Path.GetFileName path} at {max 36 options.rasterDpi} DPI"
                 |> withTimeout
                     45000
-                    $"Docling hybrid rasterization timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
+                    $"Document structure rasterization timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
 
             throwIfCanceled cancellationToken
 
             match rasterized with
             | Error err -> return Error err
             | Ok(rasterized: DoclingRasterPage list) ->
-                report $"Docling hybrid rasterized {rasterized.Length} page(s) for {Path.GetFileName path}."
+                report $"Document structure parser rasterized {rasterized.Length} page(s) for {Path.GetFileName path}."
 
                 throwIfCanceled cancellationToken
 
                 let! nativeResult =
                     nativeTextProvider path
-                    |> timed report $"Docling hybrid reading native PDF text for {Path.GetFileName path}"
+                    |> timed report $"Document structure parser reading native PDF text for {Path.GetFileName path}"
                     |> withTimeout
                         30000
-                        $"Docling hybrid native text extraction timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
+                        $"Document structure native text extraction timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
 
                 throwIfCanceled cancellationToken
 
                 match nativeResult with
                 | Error err -> return Error err
                 | Ok nativePages ->
-                    report $"Docling hybrid read native text from {nativePages.Length} page(s)."
+                    report $"Document structure parser read native text from {nativePages.Length} page(s)."
 
                     let nativeByPage =
                         nativePages |> List.map (fun page -> page.pageNo, page) |> Map.ofList
@@ -930,10 +934,10 @@ module DoclingHybrid =
                                             | :? ICancelableDoclingOcrProvider as cancelable ->
                                                 cancelable.RecognizeAsync(page, cancellationToken)
                                             | _ -> ocrProvider.RecognizeAsync page
-                                            |> timed report $"Docling hybrid OCR page {page.pageNo}"
+                                            |> timed report $"Document structure OCR page {page.pageNo}"
                                             |> withTimeout
                                                 30000
-                                                $"Docling hybrid OCR timed out on page {page.pageNo}; falling back to legacy PDF parsing."
+                                                $"Document structure OCR timed out on page {page.pageNo}; falling back to legacy PDF parsing."
 
                                         throwIfCanceled cancellationToken
 
@@ -981,7 +985,7 @@ module DoclingHybrid =
         async {
             throwIfCanceled cancellationToken
             let documentName = Path.GetFileNameWithoutExtension path
-            report $"Docling hybrid converting {pageInputs.Length} page(s) for {Path.GetFileName path}."
+            report $"Document structure parser converting {pageInputs.Length} page(s) for {Path.GetFileName path}."
 
             let! document =
                 DoclingStandardHybrid.convertPagesWithOptionsWithCancellation
@@ -992,10 +996,10 @@ module DoclingHybrid =
                     figureClassifier
                     pageInputs
                     cancellationToken
-                |> timed report $"Docling hybrid layout conversion for {Path.GetFileName path}"
+                |> timed report $"Document structure layout conversion for {Path.GetFileName path}"
                 |> withTimeout
                     (layoutConversionTimeoutMs pageInputs.Length)
-                    $"Docling hybrid layout conversion timed out for {Path.GetFileName path} after processing budget for {pageInputs.Length} page(s); falling back to legacy PDF parsing."
+                    $"Document structure layout conversion timed out for {Path.GetFileName path} after processing budget for {pageInputs.Length} page(s); falling back to legacy PDF parsing."
 
             throwIfCanceled cancellationToken
             return document |> Result.map (DoclingPassages.toPassages chunkOptions passageSource)
@@ -1068,11 +1072,11 @@ module DoclingHybrid =
             |> List.choose id
 
         if List.isEmpty textItems then
-            Error $"Docling hybrid native-text conversion found no readable text in {Path.GetFileName path}."
+            Error $"Document structure native-text conversion found no readable text in {Path.GetFileName path}."
         else
             if announce then
                 report
-                    $"Docling hybrid using fast native-text conversion for {Path.GetFileName path}; skipping layout ONNX."
+                    $"Document structure parser using fast native-text conversion for {Path.GetFileName path}; skipping layout ONNX."
 
             { name = documentName
               originFileName = Some(Path.GetFileName path)
@@ -1099,14 +1103,14 @@ module DoclingHybrid =
         let nativeChars = passageTextLength nativePassages
 
         if layoutPassages.Length <= 1 then
-            Some $"Docling hybrid layout conversion produced only {layoutPassages.Length} passage(s)"
+            Some $"Document structure layout conversion produced only {layoutPassages.Length} passage(s)"
         elif
             nativePassages.Length > layoutPassages.Length
             && nativeChars >= 2000L
             && layoutChars * 4L < nativeChars * 3L
         then
             Some
-                $"Docling hybrid layout conversion looked incomplete ({layoutPassages.Length} passage(s), {layoutChars} chars vs {nativeChars} native chars)"
+                $"Document structure layout conversion looked incomplete ({layoutPassages.Length} passage(s), {layoutChars} chars vs {nativeChars} native chars)"
         else
             None
 
@@ -1135,17 +1139,18 @@ module DoclingHybrid =
                         || passageTextLength nativePassages > passageTextLength layoutPassages
                     then
                         report
-                            $"Using Docling native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
+                            $"Using document structure native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
                         Ok nativePassages
                     else
                         report
-                            $"Keeping Docling layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
+                            $"Keeping document structure layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
                         Ok layoutPassages
             | Error nativeError ->
                 if layoutPassages.Length <= 1 then
-                    report $"Docling native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
+                    report
+                        $"Document structure native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
 
                 Ok layoutPassages
 
@@ -1235,15 +1240,15 @@ module DoclingHybrid =
         async {
             throwIfCanceled cancellationToken
             let rasterizer = createRasterizer options
-            report $"Docling hybrid PDF parser starting for {Path.GetFileName path}."
+            report $"Document structure PDF parser starting for {Path.GetFileName path}."
 
             let ocrProviderResult = tryCreateRapidOcrProvider options storageRoot
 
             report (
                 match ocrProviderResult with
-                | Ok(Some _) -> "Docling hybrid OCR provider is enabled."
-                | Ok None -> "Docling hybrid OCR provider is not configured; native PDF text will be required."
-                | Error err -> $"Docling hybrid OCR provider setup failed: {err}"
+                | Ok(Some _) -> "Document structure OCR provider is enabled."
+                | Ok None -> "Document structure OCR provider is not configured; native PDF text will be required."
+                | Error err -> $"Document structure OCR provider setup failed: {err}"
             )
 
             match ocrProviderResult with
@@ -1273,10 +1278,10 @@ module DoclingHybrid =
                         if options.enableLayoutAnalysis then
                             let! layout =
                                 createLayoutPredictor options report storageRoot cancellationToken
-                                |> timed report "Docling hybrid preparing layout ONNX model"
+                                |> timed report "Document structure preparing layout ONNX model"
                                 |> withTimeout
                                     60000
-                                    "Docling hybrid layout model preparation timed out; falling back to legacy PDF parsing."
+                                    "Document structure layout model preparation timed out; falling back to legacy PDF parsing."
 
                             match layout with
                             | Error err -> return Error err
@@ -1286,10 +1291,10 @@ module DoclingHybrid =
                                 try
                                     let! figure =
                                         loadFigureClassifier options storageRoot
-                                        |> timed report "Docling hybrid preparing figure classifier"
+                                        |> timed report "Document structure preparing figure classifier"
                                         |> withTimeout
                                             30000
-                                            "Docling hybrid figure classifier preparation timed out; falling back to legacy PDF parsing."
+                                            "Document structure figure classifier preparation timed out; falling back to legacy PDF parsing."
 
                                     match figure with
                                     | Error err -> return Error err
@@ -1347,13 +1352,13 @@ module DoclingHybrid =
             match! hybrid with
             | Ok passages ->
                 let fileName = Path.GetFileName path
-                report $"Docling hybrid PDF parser produced {passages.Length} passage(s) for {fileName}."
+                report $"Document structure PDF parser produced {passages.Length} passage(s) for {fileName}."
 
                 if passages.Length > 1 then
                     return Ok passages
                 else
                     report
-                        $"Docling hybrid produced only {passages.Length} passage(s) for {fileName}; checking PdfPig fallback chunking."
+                        $"Document structure parser produced only {passages.Length} passage(s) for {fileName}; checking PdfPig fallback chunking."
 
                     let! legacy = legacyReader ()
 
@@ -1367,11 +1372,11 @@ module DoclingHybrid =
                         | Ok _ -> Ok passages
                         | Error legacyError ->
                             report
-                                $"PdfPig fallback check failed for {fileName}; keeping Docling hybrid result: {legacyError}"
+                                $"PdfPig fallback check failed for {fileName}; keeping document structure result: {legacyError}"
 
                             Ok passages
             | Error hybridError ->
-                report $"Docling hybrid PDF parser failed for {Path.GetFileName path}: {hybridError}"
+                report $"Document structure PDF parser failed for {Path.GetFileName path}: {hybridError}"
                 report $"Falling back to PdfPig text extraction for {Path.GetFileName path}."
                 let! legacy = legacyReader ()
 
@@ -1380,7 +1385,7 @@ module DoclingHybrid =
                     | Ok passages -> Ok passages
                     | Error legacyError ->
                         Error
-                            $"Docling hybrid PDF parser failed: {hybridError}{Environment.NewLine}Legacy PdfPig parser also failed: {legacyError}"
+                            $"Document structure PDF parser failed: {hybridError}{Environment.NewLine}Legacy PdfPig parser also failed: {legacyError}"
         }
 
     let readPdfPassagesWithOptionsWithFallback
@@ -1398,7 +1403,7 @@ module DoclingHybrid =
                     try
                         return! readPdfPassages options report storageRoot chunkOptions passageSource path
                     with ex ->
-                        return Error $"Docling hybrid PDF parser could not start: {ex.Message}"
+                        return Error $"Document structure PDF parser could not start: {ex.Message}"
                 }
 
             return! fallbackToLegacy report path hybrid legacyReader
@@ -1448,7 +1453,7 @@ module DoclingHybrid =
                                 cancellationToken
                     with
                     | :? OperationCanceledException -> return raise (OperationCanceledException cancellationToken)
-                    | ex -> return Error $"Docling hybrid PDF parser could not start: {ex.Message}"
+                    | ex -> return Error $"Document structure PDF parser could not start: {ex.Message}"
                 }
 
             throwIfCanceled cancellationToken

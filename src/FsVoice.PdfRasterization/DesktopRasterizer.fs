@@ -44,7 +44,7 @@ module PdfRasterizer =
                         else
                             return Ok pages
                     with ex ->
-                        return Error $"Unable to rasterize PDF '{path}' for Docling hybrid parsing: {ex.Message}"
+                        return Error $"Unable to rasterize PDF '{path}' for document structure parsing: {ex.Message}"
                 }
 
     let register () =

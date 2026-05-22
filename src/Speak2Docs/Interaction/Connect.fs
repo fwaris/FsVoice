@@ -74,7 +74,7 @@ module Connect =
                 let! ephemeralKey = Connection.getEphemeralKey apiKey keyRequest
                 do! Connection.connect ephemeralKey connection
             with ex ->
-                log mailbox $"Realtime connection failed: {ex.Message}"
+                mailbox.Writer.TryWrite(RealtimeConnectFailed ex.Message) |> ignore
                 notifyHost session token (RealtimeConnectionFailed ex.Message)
         }
         |> ignore

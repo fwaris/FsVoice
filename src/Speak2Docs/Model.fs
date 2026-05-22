@@ -62,6 +62,7 @@ and Model =
       pdfDocuments: PdfDocumentSource list
       log: string list
       logFontSize: float
+      activityLogVerbosity: ActivityLogVerbosity
       hideSecrets: bool
       isBusy: bool
       documentProcessingCancellation: CancellationTokenSource option
@@ -93,7 +94,7 @@ and Msg =
     | ToggleSecretVisibility
     | PickSources
     | PickSourcesCompleted of Result<PickedSourceImportResult, exn>
-    | PdfProcessingCompleted of Result<PdfProcessingOutcome, exn>
+    | PdfProcessingCompleted of PdfDocumentSource list * Result<PdfProcessingOutcome, exn>
     | CancelPdfProcessing
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
@@ -110,10 +111,12 @@ and Msg =
     | StartCompleted of Result<ConnectionBundle, exn>
     | StopCompleted of Result<unit, exn>
     | WebRTC_StateChanged of RTOpenAI.WebRTC.State
+    | RealtimeConnectFailed of string
     | Log_Append of string
     | Log_Clear
     | LogFont_Increase
     | LogFont_Decrease
+    | ActivityLogVerbosityChanged of ActivityLogVerbosity
     | NotificationExpired of int
     | ThemeChanged of AppTheme
     | EventError of exn

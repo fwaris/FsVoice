@@ -12,8 +12,10 @@ Speak2Docs source code is licensed under MIT. Third-party packages retain their 
 
 ## Built-in sample document
 
-Speak2Docs includes a built-in sample index for "An LLM-RAG Approach for Healthy Eating Index-Informed Personalized Food Recommendations" by Yibin Wang, Yanjie Yang, Grace Melo Guerrero, Rodolfo M. Nayga, and Azlan Zahid, arXiv:2605.15213, submitted May 11, 2026. The paper is licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/
+Speak2Docs includes a built-in sample index for "AI on the Pulse: Real-Time Health Anomaly Detection with Wearable and Ambient Intelligence" by Davide Gabrielli, Bardh Prenkaj, Paola Velardi, and Stefano Faralli, arXiv:2508.03436, submitted August 5, 2025. The paper is licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/
 
-Source: https://arxiv.org/abs/2605.15213
+Source: https://arxiv.org/abs/2508.03436
+
+PDF: https://arxiv.org/pdf/2508.03436
 
 The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text for offline retrieval inside the app.

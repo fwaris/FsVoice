@@ -55,7 +55,7 @@ ANDROID_APP_ID
 
 The Release iOS configuration disables the Mono interpreter, enables AOT, and disables assembly IL stripping because the current toolchain crashes stripping `FSharp.Core.dll`.
 
-Before App Review, provide reviewer instructions and a test OpenAI API key or another reviewer-access path. Speak2Docs ships a built-in Healthy Eating Index RAG paper sample index, licensed under CC BY 4.0, so reviewers can ask document questions immediately after entering the key.
+Before App Review, provide reviewer instructions and a test OpenAI API key or another reviewer-access path. Speak2Docs ships a built-in wearable health anomaly-detection study sample index, licensed under CC BY 4.0, so reviewers can ask document questions immediately after entering the key.
 
 ## Mac Catalyst
 

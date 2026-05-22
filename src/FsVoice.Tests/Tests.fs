@@ -6,6 +6,7 @@ open System.IO
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
+open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Channels
 open System.Threading.Tasks
@@ -18,6 +19,7 @@ open FsVoice.Hosting.AspNetCore
 open FsVoice.QA
 open FsVoice.Testing
 open FsVoice.Types
+open RTOpenAI.Events
 
 type MockChatClient() =
     interface IChatClient with
@@ -1065,7 +1067,7 @@ let ``docling hybrid provider path falls back to native text when layout collaps
             Assert.True(passages.Length > 1)
             Assert.Contains(passages, fun passage -> passage.text.Contains("beta"))
             Assert.Contains(reports, fun message -> message.Contains("layout conversion produced only 1 passage"))
-            Assert.Contains(reports, fun message -> message.Contains("Using Docling native-text conversion"))
+            Assert.Contains(reports, fun message -> message.Contains("Using document structure native-text conversion"))
     }
     |> Async.RunSynchronously
 
@@ -1137,7 +1139,7 @@ let ``docling hybrid provider path falls back to native text when layout is spar
             Assert.Contains(passages, fun passage -> passage.text.Contains("gamma"))
             Assert.Contains(passages, fun passage -> passage.text.Contains("delta"))
             Assert.Contains(reports, fun message -> message.Contains("layout conversion looked incomplete"))
-            Assert.Contains(reports, fun message -> message.Contains("Using Docling native-text conversion"))
+            Assert.Contains(reports, fun message -> message.Contains("Using document structure native-text conversion"))
     }
     |> Async.RunSynchronously
 
@@ -2544,12 +2546,46 @@ let ``FsVoice Types public contract does not reference RTFlow`` () =
         fun name -> not (isNull name) && name.Contains("RTFlow", StringComparison.OrdinalIgnoreCase)
     )
 
-let private demoVoiceConnection () =
+let private demoVoiceConnectionWithChannels () =
     let inbound = Channel.CreateUnbounded<JsonElement>()
     let outbound = Channel.CreateUnbounded<JsonElement>()
 
     { VoiceConnection.receiver = inbound.Reader
-      sender = outbound.Writer }
+      sender = outbound.Writer },
+    inbound,
+    outbound
+
+let private demoVoiceConnection () =
+    let connection, _, _ = demoVoiceConnectionWithChannels ()
+    connection
+
+let private writeServerEvent<'T> (writer: ChannelWriter<JsonElement>) (event: 'T) =
+    task {
+        let json = JsonSerializer.Serialize(event, SerDe.serOpts)
+        use document = JsonDocument.Parse(json)
+        do! writer.WriteAsync(document.RootElement.Clone(), CancellationToken.None).AsTask()
+    }
+
+let private readClientEventUntil (reader: ChannelReader<JsonElement>) predicate =
+    task {
+        use cts = new CancellationTokenSource(TimeSpan.FromSeconds 10.)
+        let mutable result: JsonElement option = None
+
+        while result.IsNone do
+            let! message = reader.ReadAsync(cts.Token).AsTask()
+
+            if predicate message then
+                result <- Some message
+
+        return result.Value
+    }
+
+let private hasEventType expected (message: JsonElement) =
+    let mutable typeProperty = Unchecked.defaultof<JsonElement>
+
+    message.TryGetProperty("type", &typeProperty)
+    && typeProperty.ValueKind = JsonValueKind.String
+    && typeProperty.GetString() = expected
 
 let private demoVoiceContext () : VoiceOrchestrationContext =
     let storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
@@ -2623,6 +2659,84 @@ let ``demo orchestration start requests realtime connection`` () =
                 | _ -> None)
 
         Assert.True(requested.model |> Option.exists (String.IsNullOrWhiteSpace >> not))
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration configures realtime audio for iOS speakerphone barge-in`` () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+
+        let! session =
+            orchestration.CreateSessionAsync(demoVoiceContext (), demoVoiceConnection (), CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        let! requested =
+            readDemoToHostUntil session (function
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | _ -> None)
+
+        match requested.audio with
+        | Include(Some audio) ->
+            match audio.input with
+            | Include(Some input) ->
+                match input.noise_reduction with
+                | Include(Some noiseReduction) -> Assert.Equal("far_field", noiseReduction.``type``)
+                | _ -> failwith "Expected realtime input noise reduction."
+
+                match input.turn_detection with
+                | Include(Some(VAD.Server_Vad turnDetection)) ->
+                    Assert.True turnDetection.create_response
+                    Assert.True turnDetection.interrupt_response
+                    Assert.Equal(0.7, turnDetection.threshold)
+                    Assert.Equal(300, turnDetection.prefix_padding_ms)
+                    Assert.Equal(350, turnDetection.silence_duration_ms)
+                | _ -> failwith "Expected realtime server VAD settings."
+            | _ -> failwith "Expected realtime audio input settings."
+        | _ -> failwith "Expected realtime audio settings."
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration greeting response does not create synthetic user input`` () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+        let voiceConnection, serverEvents, clientEvents = demoVoiceConnectionWithChannels ()
+
+        let! session = orchestration.CreateSessionAsync(demoVoiceContext (), voiceConnection, CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        let! requested =
+            readDemoToHostUntil session (function
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | _ -> None)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-created"
+                  ``type`` = EventTypes.SessionCreated
+                  session = requested }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-updated"
+                  ``type`` = EventTypes.SessionUpdated
+                  session = requested }
+
+        let! responseCreate = readClientEventUntil clientEvents.Reader (hasEventType "response.create")
+
+        let response = responseCreate.GetProperty("response")
+        let mutable inputProperty = Unchecked.defaultof<JsonElement>
+
+        Assert.False(response.TryGetProperty("input", &inputProperty))
 
         do! session.StopAsync CancellationToken.None
     }

@@ -88,8 +88,8 @@ Common options:
 Index-folder options:
   --index-keywords       Generate index-time keyword metadata with OpenAI.
   --keyword-model value  Keyword enrichment model. Defaults to --small-model or gpt-5-nano.
-  --layout-model value   Built-in Docling layout model: heron|pp-doclayout-m. Defaults to heron.
-  --layout-plugin path   Trusted .NET assembly containing an IDoclingLayoutModelProvider.
+  --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to heron.
+  --layout-plugin path   Trusted .NET assembly containing a document structure layout provider.
   --layout-plugin-type value  Full provider type name in --layout-plugin.
 """
 
@@ -290,7 +290,7 @@ Index-folder options:
                         | :? IDoclingLayoutModelProvider as provider -> Ok provider
                         | _ ->
                             Error
-                                $"Layout plugin type '{providerTypeName}' does not implement {nameof IDoclingLayoutModelProvider}."
+                                $"Layout plugin type '{providerTypeName}' does not implement the required document structure layout provider interface."
                 with ex ->
                     Error $"Unable to load layout plugin '{pluginPath}': {ex.Message}"
         | _ ->

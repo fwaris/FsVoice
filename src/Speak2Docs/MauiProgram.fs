@@ -9,7 +9,6 @@ open FsVoice.PdfRasterization
 type MauiProgram =
     static member CreateMauiApp() =
         PdfRasterizer.register ()
-        StorageMigration.migrateFromLegacyProduct ()
 
         let builder =
             MauiApp

@@ -17,12 +17,12 @@ flowchart TD
     J --> K["Resize page image to 640x640"]
     K --> L["Predict layout regions"]
     L --> M["Attach text cells to layout regions"]
-    M --> N["Build Docling document"]
-    N --> O["Convert Docling document to passages"]
+    M --> N["Build document structure representation"]
+    N --> O["Convert document structure representation to passages"]
 
     O --> P{"Layout produced > 1 passage?"}
     P -- "Yes" --> Q["Use layout passages"]
-    P -- "No" --> R["Fallback to Docling native-text conversion"]
+    P -- "No" --> R["Fallback to document structure native-text conversion"]
     R --> S{"Native-text produced more passages?"}
     S -- "Yes" --> T["Use native-text passages"]
     S -- "No" --> Q
@@ -33,4 +33,3 @@ flowchart TD
     U -- "Yes" --> W["Index passages"]
     U -- "No" --> V
     V --> W
-

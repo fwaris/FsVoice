@@ -26,6 +26,12 @@ module SettingsView =
         else
             RetrievalModeChanged InternalDocumentIndex
 
+    let private activityLogToggled enabled =
+        if enabled then
+            ActivityLogVerbosityChanged Verbose
+        else
+            ActivityLogVerbosityChanged Informational
+
     let private roleLabel role =
         $"{FsVoice.QA.ModelRole.storageName role} model"
 
@@ -152,6 +158,26 @@ module SettingsView =
                     .placeholder("900")
                     .isEnabled(canEdit)
                     .gridRow(tokenRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+            })
+                .padding (10.))
+
+    let private activitySection model canEdit =
+        sectionBorder
+            model.appTheme
+            ((Grid(columns, sectionRows 1) {
+                sectionTitle "Activity"
+
+                ViewControls.formLabel "Log Level" 1
+
+                (switchWithText
+                    (model.activityLogVerbosity = Verbose)
+                    activityLogToggled
+                    canEdit
+                    (ActivityLog.displayName model.activityLogVerbosity))
+                    .gridRow(1)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
@@ -340,6 +366,7 @@ module SettingsView =
         VStack(spacing = 12.) {
             accountSection model canEdit
             modelsSection model canEdit
+            activitySection model canEdit
             retrievalSection model canEdit
             pdfParsingSection model canEdit
             runtimeSection model.appTheme
