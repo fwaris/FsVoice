@@ -85,7 +85,9 @@ module Update =
           enabled = true }
 
     let private isRealtimeActive model =
-        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        model.bundle.IsSome
+        || model.pendingConnectionId.IsSome
+        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
 
     let private canMutateDocuments model =
         not model.isBusy && not (isRealtimeActive model)
@@ -1314,25 +1316,29 @@ module Update =
                         |> List.truncate C.MAX_LOG },
                 Cmd.none
         | StartStop ->
-            match model.bundle with
-            | None ->
-                match Text.notEmpty model.openAiKey with
-                | None -> showNotification "Set your OpenAI API key in Settings before connecting." model
-                | Some _ ->
-                    saveSettings model
-                    let connectionId = Guid.NewGuid().ToString("N")
+            if model.isBusy then
+                model, Cmd.none
+            else
+                match model.bundle, model.pendingConnectionId with
+                | None, Some _ -> model, Cmd.none
+                | None, None ->
+                    match Text.notEmpty model.openAiKey with
+                    | None -> showNotification "Set your OpenAI API key in Settings before connecting." model
+                    | Some _ ->
+                        saveSettings model
+                        let connectionId = Guid.NewGuid().ToString("N")
 
-                    { model with
-                        isBusy = true
-                        pendingConnectionId = Some connectionId
-                        sessionState = RTOpenAI.WebRTC.State.Connecting
-                        log = "Starting realtime Speak2Docs flow..." :: model.log },
-                    Cmd.OfAsync.either
-                        Connect.start
-                        (startParams connectionId model)
-                        (fun result -> StartCompleted(connectionId, result))
-                        EventError
-            | Some bundle -> { model with isBusy = true }, stopBundleCommand bundle
+                        { model with
+                            isBusy = true
+                            pendingConnectionId = Some connectionId
+                            sessionState = RTOpenAI.WebRTC.State.Connecting
+                            log = "Starting realtime Speak2Docs flow..." :: model.log },
+                        Cmd.OfAsync.either
+                            Connect.start
+                            (startParams connectionId model)
+                            (fun result -> StartCompleted(connectionId, result))
+                            EventError
+                | Some bundle, _ -> { model with isBusy = true }, stopBundleCommand bundle
         | StartCompleted(connectionId, Ok bundle) ->
             match model.pendingConnectionId with
             | Some pendingId when String.Equals(pendingId, connectionId, StringComparison.OrdinalIgnoreCase) ->

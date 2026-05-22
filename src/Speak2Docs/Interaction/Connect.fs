@@ -96,13 +96,19 @@ module Connect =
         (connection: Connection)
         =
         async {
+            let mutable realtimeConnectionRequested = false
+
             try
                 do!
                     session.ToHost.ReadAllAsync(token)
                     |> AsyncSeq.iter (function
                         | Log text -> log mailbox text
                         | RequestRealtimeConnection realtimeSession ->
-                            connectRealtime mailbox session token apiKey connectionId connection realtimeSession
+                            if realtimeConnectionRequested then
+                                log mailbox "Duplicate realtime connection request ignored."
+                            else
+                                realtimeConnectionRequested <- true
+                                connectRealtime mailbox session token apiKey connectionId connection realtimeSession
                         | TranscriptFinalized _ -> ()
                         | ContextReady(_, chunks, inventory) ->
                             log mailbox $"Context ready: {chunks.Length} chunk(s), {inventory.Length} source(s)."

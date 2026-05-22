@@ -9,7 +9,9 @@ open type Fabulous.Maui.View
 
 module ToolbarView =
     let private isRealtimeActive model =
-        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        model.bundle.IsSome
+        || model.pendingConnectionId.IsSome
+        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
 
     let private connectionColor model =
         match model.sessionState with

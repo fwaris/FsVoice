@@ -15,7 +15,9 @@ module SettingsView =
           "WebRTC bridge", "FsVoice.Hosting.AspNetCore" ]
 
     let private isRealtimeActive model =
-        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        model.bundle.IsSome
+        || model.pendingConnectionId.IsSome
+        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
 
     let private canEditSettings model =
         not model.isBusy && not (isRealtimeActive model)
