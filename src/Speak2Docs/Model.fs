@@ -54,6 +54,7 @@ and Model =
       mailbox: Channel<Msg>
       bundle: ConnectionBundle option
       pendingConnectionId: string option
+      disconnectedConnectionIds: Set<string>
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
       activePlugIn: FsVoice.QA.PlugInDefinition

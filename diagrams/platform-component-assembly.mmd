@@ -1,0 +1,93 @@
+flowchart LR
+    classDef host fill:#f7f7f2,stroke:#59636e,color:#17202a
+    classDef fsvoice fill:#e8f3ff,stroke:#27699b,color:#0b2c40
+    classDef app fill:#edf8ef,stroke:#31734a,color:#10351f
+    classDef dev fill:#fff2cc,stroke:#9a6b00,color:#3d2a00
+    classDef external fill:#f4ebff,stroke:#6a49a5,color:#261342
+    classDef note fill:#ffffff,stroke:#8a8f98,color:#20242a,stroke-dasharray:4 3
+
+    subgraph HostShell["Host shell"]
+        MobileHost["Speak2Docs MAUI host\nUI, audio permission, settings, storage"]
+        WebHost["Browser or ASP.NET host\nHTTP endpoints, WebRTC/WebSocket bridge"]
+        CliHost["CLI or test host\ntext turns, deterministic transports"]
+    end
+
+    subgraph AppAssembly["Application assembly"]
+        TypedOrchestration["Typed voice orchestration\nIVoiceOrchestration<'ToHost,'FromHost>"]
+        RtFlowAgents["Workflow agents\nVoiceAgent, QaAgent, HostAgent"]
+        HostMessages["Typed host messages\nToHost and FromHost"]
+    end
+
+    subgraph PlatformRuntime["FsVoice platform runtime"]
+        Contracts["FsVoice.Abstractions\nplugins, tools, events, memory, transports"]
+        Core["FsVoice.Core\nruntime engine, event bus, blackboard, tool dispatcher"]
+        TypedContracts["FsVoice.Types / FsVoice.RTFlow\ntyped sessions and RTFlow adapter"]
+        AspBridge["FsVoice.Hosting.AspNetCore\nBridgeEndpoints, BridgeSession, BridgeTransport"]
+        Testing["FsVoice.Testing\nfake transport and text runtime"]
+    end
+
+    subgraph QaLayer["QA platform layer"]
+        QaContracts["FsVoice.QA.Abstractions\nIQaPlugIn, tools, context providers, sources"]
+        QaRuntime["FsVoice.QA\nQaSession, retrieval, durable memory, planning, built-in tools"]
+        Raster["FsVoice.PdfRasterization\nplatform PDF page rasterizers"]
+        SharedTools["FsVoice.Tools\nreusable QA tool providers"]
+    end
+
+    subgraph DeveloperSupplied["Developer-supplied or app-specific pieces"]
+        AppPlugin["QA or voice plug-in\nprompts, model roles, settings, profile"]
+        AppTools["Tool providers\napp APIs, business actions, integrations"]
+        AppContexts["Context providers\napp data, package data, external retrieval"]
+        AppSources["Knowledge sources\nPDF, Markdown, JSON, FsColbert bundles"]
+        AppPolicy["Runtime policy\nretrieval mode, lexical filtering, timeouts"]
+    end
+
+    subgraph ExternalServices["External services and devices"]
+        Realtime["Realtime model\nspeech in/out, tool calls"]
+        AnswerModels["Answer, planner, keyword, expansion models"]
+        DeviceAudio["Device microphone and speaker"]
+        BrowserClient["Browser client\npolling, signaling, realtime events"]
+    end
+
+    MobileHost --> TypedOrchestration
+    MobileHost --> DeviceAudio
+    TypedOrchestration --> HostMessages
+    TypedOrchestration --> RtFlowAgents
+    RtFlowAgents --> TypedContracts
+    RtFlowAgents --> QaRuntime
+    RtFlowAgents --> Realtime
+    RtFlowAgents --> AnswerModels
+
+    WebHost --> AspBridge
+    BrowserClient --> WebHost
+    AspBridge --> Core
+    AspBridge --> Contracts
+
+    CliHost --> Testing
+    Testing --> Core
+
+    Core --> Contracts
+    TypedContracts --> Contracts
+    QaRuntime --> QaContracts
+    QaRuntime --> Raster
+    QaRuntime --> SharedTools
+    QaRuntime --> AnswerModels
+
+    AppPlugin --> QaContracts
+    AppPlugin --> AppPolicy
+    AppPlugin --> AppTools
+    AppPlugin --> AppContexts
+    AppTools --> QaContracts
+    AppContexts --> QaContracts
+    AppSources --> QaRuntime
+    AppPolicy --> QaRuntime
+
+    AppPlugin -. "adapt with\nVoicePluginAdapters.fromQaPlugIn" .-> Contracts
+    QaContracts -. "implemented by" .-> AppPlugin
+    QaContracts -. "implemented by" .-> AppTools
+    QaContracts -. "implemented by" .-> AppContexts
+
+    class MobileHost,WebHost,CliHost host
+    class Contracts,Core,TypedContracts,AspBridge,Testing,QaContracts,QaRuntime,Raster,SharedTools fsvoice
+    class TypedOrchestration,RtFlowAgents,HostMessages app
+    class AppPlugin,AppTools,AppContexts,AppSources,AppPolicy dev
+    class Realtime,AnswerModels,DeviceAudio,BrowserClient external

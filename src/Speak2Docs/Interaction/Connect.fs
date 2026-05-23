@@ -74,7 +74,7 @@ module Connect =
 
                 let! ephemeralKey = Connection.getEphemeralKey apiKey keyRequest
                 token.ThrowIfCancellationRequested()
-                do! Connection.connect ephemeralKey connection
+                do! (Connection.connect ephemeralKey connection).WaitAsync(token)
                 token.ThrowIfCancellationRequested()
             with ex ->
                 if token.IsCancellationRequested then

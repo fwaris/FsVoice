@@ -111,6 +111,8 @@ The app stores source files, indexes, durable memory, and settings in app-owned 
 
 ## Documentation
 
+- Platform component assembly: `docs/platform-component-assembly.md`
+- Exploded component diagram: `diagrams/platform-component-assembly.mmd`
 - Settings help: `docs/fsvoice/settings.html`
 - Store listing draft: `docs/store-listing.md`
 - Store privacy notes: `docs/store-privacy.md`
