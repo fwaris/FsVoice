@@ -16,8 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
-    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

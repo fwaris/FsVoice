@@ -5,7 +5,7 @@ open System.Text.Json
 open System.Threading
 open System.Threading.Channels
 open FSharp.Control
-open FsVoice.Types
+open FsVoice.Platform
 open Speak2Docs.WorkFlow
 open RTOpenAI.Api
 

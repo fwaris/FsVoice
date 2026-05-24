@@ -7,7 +7,7 @@ open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open FSharp.Control
-open FsVoice.Types
+open FsVoice.Platform
 open RTOpenAI.Events
 open RTFlow
 open RTFlow.Functions

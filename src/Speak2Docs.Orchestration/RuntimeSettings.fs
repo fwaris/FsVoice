@@ -30,7 +30,7 @@ module RuntimeSettings =
     let UseLayoutAnalysis = "pdf.useLayoutAnalysis"
 
     [<Literal>]
-    let DefaultAnswerMaxOutputTokens = 900
+    let DefaultAnswerMaxOutputTokens = 2500
 
     [<Literal>]
     let MinAnswerMaxOutputTokens = 128

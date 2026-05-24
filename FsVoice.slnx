@@ -1,17 +1,16 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FsVoice.QA.Abstractions/FsVoice.QA.Abstractions.fsproj" />
-    <Project Path="src/FsVoice.Abstractions/FsVoice.Abstractions.fsproj" />
-    <Project Path="src/FsVoice.Core/FsVoice.Core.fsproj" />
     <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
-    <Project Path="src/FsVoice.Testing/FsVoice.Testing.fsproj" />
     <Project Path="src/FsVoice.QA/FsVoice.QA.fsproj" />
     <Project Path="src/FsVoice.PdfRasterization/FsVoice.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
     <Project Path="src/FsVoice.Tests/FsVoice.Tests.fsproj" />
     <Project Path="src/FsVoice.Tools/FsVoice.Tools.fsproj" />
-    <Project Path="src/FsVoice.Types/FsVoice.Types.fsproj" />
+    <Project Path="src/FsVoice.Platform/FsVoice.Platform.fsproj" />
     <Project Path="src/FsVoice.RTFlow/FsVoice.RTFlow.fsproj" />
+    <Project Path="src/FsResponses/FsResponses.fsproj" />
+    <Project Path="src/FsResponsesTest/FsResponsesTest.fsproj" />
     <Project Path="src/Speak2Docs.Orchestration/Speak2Docs.Orchestration.fsproj" />
     <Project Path="src/Speak2Docs/Speak2Docs.fsproj" />
   </Folder>

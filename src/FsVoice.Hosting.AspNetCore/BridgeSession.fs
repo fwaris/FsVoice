@@ -1,127 +1,108 @@
 namespace FsVoice.Hosting.AspNetCore
 
 open System
-open System.Collections.Generic
+open System.Text.Json
 open System.Threading
 open System.Threading.Channels
 open System.Threading.Tasks
-open FsVoice
-open FsVoice.Core
+open FsVoice.Platform
 
-type BridgeTransport() =
-    let inbound = Channel.CreateUnbounded<VoiceServerEvent>()
-    let outbound = Channel.CreateUnbounded<VoiceClientEvent>()
-    let mutable closed = false
-
-    member _.TryWriteServerEvent(event: VoiceServerEvent) =
-        if closed then false else inbound.Writer.TryWrite event
-
-    member _.TryReadClientEventAsync(cancellationToken: CancellationToken) =
-        task {
-            let! canRead = outbound.Reader.WaitToReadAsync(cancellationToken).AsTask()
-
-            if canRead then
-                let mutable event = Unchecked.defaultof<VoiceClientEvent>
-
-                if outbound.Reader.TryRead(&event) then
-                    return Some event
-                else
-                    return None
-            else
-                return None
-        }
-
-    member _.Close() =
-        closed <- true
-        inbound.Writer.TryComplete() |> ignore
-        outbound.Writer.TryComplete() |> ignore
-
-    interface IVoiceTransportAdapter with
-        member _.SendAsync(event, cancellationToken) =
-            outbound.Writer.WriteAsync(event, cancellationToken).AsTask()
-
-        member _.ReceiveAsync(cancellationToken) =
-            task {
-                let! canRead = inbound.Reader.WaitToReadAsync(cancellationToken).AsTask()
-
-                if canRead then
-                    let mutable event = Unchecked.defaultof<VoiceServerEvent>
-
-                    if inbound.Reader.TryRead(&event) then
-                        return Some event
-                    else
-                        return None
-                else
-                    return None
-            }
-
-        member this.DisposeAsync() =
-            this.Close()
-            ValueTask()
-
-type BridgeSession(options: BridgeSessionOptions) as this =
-    let transport = new BridgeTransport()
+type BridgeSession<'ToHost, 'FromHost>(options: BridgeSessionOptions<'ToHost, 'FromHost>) as this =
+    let inbound = Channel.CreateUnbounded<JsonElement>()
+    let outbound = Channel.CreateUnbounded<JsonElement>()
+    let connection = VoiceConnection.create inbound.Reader outbound.Writer
     let eventLog = ResizeArray<BridgeServerEvent>()
     let eventSignal = Channel.CreateUnbounded<BridgeServerEvent>()
     let cts = new CancellationTokenSource()
-
-    let runtimeOptions =
-        options.runtimeOptions
-        |> Option.defaultValue
-            { VoiceRuntimeOptions.defaults with
-                sessionId = BridgeSessionId.value options.sessionId }
-
-    let engine =
-        VoiceRuntimeEngine(options.plugin, options.hostContext, transport, runtimeOptions)
+    let mutable session: IVoiceSession<'ToHost, 'FromHost> option = None
+    let mutable started = false
 
     let appendServerEvent event =
         lock eventLog (fun () -> eventLog.Add event)
         eventSignal.Writer.TryWrite event |> ignore
 
-    let runtimeSubscription =
-        engine.Subscribe(BridgeEvents.fromRuntimeEvent >> appendServerEvent)
+    let linkedToken (cancellationToken: CancellationToken) =
+        CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token)
+
+    let startVoiceOutputPump (cancellationToken: CancellationToken) =
+        task {
+            try
+                while not cancellationToken.IsCancellationRequested do
+                    let! canRead = outbound.Reader.WaitToReadAsync(cancellationToken).AsTask()
+
+                    if canRead then
+                        let mutable message = Unchecked.defaultof<JsonElement>
+
+                        while outbound.Reader.TryRead(&message) do
+                            appendServerEvent (BridgeEvents.fromVoiceEvent message)
+                    else
+                        return ()
+            with :? OperationCanceledException ->
+                ()
+        }
+        :> Task
+
+    let startHostOutputPump (activeSession: IVoiceSession<'ToHost, 'FromHost>) (cancellationToken: CancellationToken) =
+        task {
+            match options.hostMessageCodec with
+            | None -> ()
+            | Some codec ->
+                try
+                    while not cancellationToken.IsCancellationRequested do
+                        let! canRead = activeSession.ToHost.WaitToReadAsync(cancellationToken).AsTask()
+
+                        if canRead then
+                            let mutable message = Unchecked.defaultof<'ToHost>
+
+                            while activeSession.ToHost.TryRead(&message) do
+                                appendServerEvent (BridgeEvents.fromHostMessage (codec.encodeToHost message))
+                        else
+                            return ()
+                with :? OperationCanceledException ->
+                    ()
+        }
+        :> Task
 
     member _.SessionId = options.sessionId
-    member _.Engine = engine
+    member _.Connection = connection
 
     member _.SnapshotEvents() =
         lock eventLog (fun () -> eventLog |> Seq.toList)
 
     member _.StartAsync(cancellationToken: CancellationToken) =
         task {
-            use linked =
-                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cts.Token)
+            if not started then
+                started <- true
 
-            do! engine.StartAsync linked.Token
+                use linked = linkedToken cancellationToken
+
+                let! activeSession = options.orchestration.CreateSessionAsync(options.context, connection, linked.Token)
+
+                session <- Some activeSession
+
+                startVoiceOutputPump cts.Token |> ignore
+                startHostOutputPump activeSession cts.Token |> ignore
+
+                do! activeSession.StartAsync linked.Token
         }
 
     member _.AcceptClientEventAsync(event: BridgeClientEvent, cancellationToken: CancellationToken) =
         task {
             match event.kind with
-            | Close -> do! (this :> IAsyncDisposable).DisposeAsync().AsTask()
-            | BrowserEvent ->
-                appendServerEvent
-                    { eventId = event.eventId
-                      kind = RuntimeEvent
-                      eventType = $"browser.{event.eventType}"
-                      payload = event.payload
-                      createdAt = DateTimeOffset.UtcNow }
-            | WebRtcSignal ->
-                appendServerEvent
-                    { eventId = event.eventId
-                      kind = RuntimeEvent
-                      eventType = $"webrtc.{event.eventType}"
-                      payload = event.payload
-                      createdAt = DateTimeOffset.UtcNow }
-            | RealtimeServerEvent ->
-                let serverEvent =
-                    { eventId = event.eventId
-                      eventType = event.eventType
-                      payload = event.payload }
-
-                transport.TryWriteServerEvent serverEvent |> ignore
-
-            do! Task.CompletedTask
+            | BridgeClientEventKind.Close -> do! (this :> IAsyncDisposable).DisposeAsync().AsTask()
+            | BridgeClientEventKind.HostMessage ->
+                match session, options.hostMessageCodec, event.payload with
+                | Some activeSession, Some codec, Some payload ->
+                    match codec.decodeFromHost payload with
+                    | Ok message -> do! activeSession.SendFromHostAsync(message, cancellationToken)
+                    | Error error -> invalidArg (nameof event.payload) error
+                | Some _, None, _ -> invalidOp "Bridge session does not have a host message codec."
+                | None, _, _ -> invalidOp "Bridge session has not been started."
+                | _, _, None -> invalidArg (nameof event.payload) "Host message events require a payload."
+            | BridgeClientEventKind.BrowserEvent
+            | BridgeClientEventKind.WebRtcSignal
+            | BridgeClientEventKind.RealtimeServerEvent ->
+                do! inbound.Writer.WriteAsync(BridgeEvents.rawClientPayload event, cancellationToken).AsTask()
         }
 
     member _.WaitForServerEventAsync(cancellationToken: CancellationToken) =
@@ -139,22 +120,21 @@ type BridgeSession(options: BridgeSessionOptions) as this =
                 return None
         }
 
-    member _.TryReadRealtimeClientEventAsync(cancellationToken: CancellationToken) =
-        task {
-            let! event = transport.TryReadClientEventAsync cancellationToken
-            event |> Option.iter (BridgeEvents.fromRealtimeClientEvent >> appendServerEvent)
-            return event
-        }
-
     interface IAsyncDisposable with
         member _.DisposeAsync() =
             task {
                 if not cts.IsCancellationRequested then
                     cts.Cancel()
-                    do! engine.StopAsync CancellationToken.None
-                    transport.Close()
+                    inbound.Writer.TryComplete() |> ignore
+                    outbound.Writer.TryComplete() |> ignore
+
+                    match session with
+                    | Some activeSession ->
+                        do! activeSession.StopAsync CancellationToken.None
+                        do! activeSession.DisposeAsync().AsTask()
+                    | None -> ()
+
                     appendServerEvent (BridgeEvents.closed options.sessionId)
-                    runtimeSubscription.Dispose()
                     eventSignal.Writer.TryComplete() |> ignore
                     cts.Dispose()
             }

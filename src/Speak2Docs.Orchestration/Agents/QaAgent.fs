@@ -92,12 +92,9 @@ module QaAgent =
                 let planner =
                     createClient st.apiKey (modelConfig FsVoice.QA.Planner st.plugIn).modelId
 
-                let answer =
-                    createClient st.apiKey (modelConfig FsVoice.QA.Answer st.plugIn).modelId
-
                 { queryExpansion = Some queryExpansion
                   toolPlanner = Some planner
-                  answerGenerator = Some answer }
+                  answerGenerator = None }
 
         let storageRoot = st.storageRoot
         let answerModel = modelConfig FsVoice.QA.Answer st.plugIn
@@ -107,6 +104,11 @@ module QaAgent =
             { FsVoice.QA.QaSessionOptions.create storageRoot with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
+                answerTransport =
+                    if String.IsNullOrWhiteSpace st.apiKey then
+                        None
+                    else
+                        Some(FsVoice.QA.QaAnswerTransport.openAIResponsesWebSocket st.apiKey)
                 toolProviders = st.qaPlugIn.GetToolProviders()
                 plugInProfile = st.plugIn.profile
                 prompts = st.plugIn.prompts

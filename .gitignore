@@ -1,0 +1,27 @@
+bin/
+obj/
+**/bin/
+**/obj/
+.DS_Store
+.idea/
+.fake
+temp/
+artifacts/
+# Release signing material and store upload credentials.
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.jks
+*.keystore
+*.p8
+google-play-service-account*.json
+signing.properties
+release.env
+
+# Store build outputs.
+*.ipa
+*.aab
+*.apk
+*.xcarchive
+artifacts/appstore/
+artifacts/playstore/

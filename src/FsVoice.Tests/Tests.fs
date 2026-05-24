@@ -13,12 +13,9 @@ open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.Extensions.AI
 open FSharp.Control
-open FsVoice
-open FsVoice.Core
 open FsVoice.Hosting.AspNetCore
 open FsVoice.QA
-open FsVoice.Testing
-open FsVoice.Types
+open FsVoice.Platform
 open RTOpenAI.Events
 
 type MockChatClient() =
@@ -209,65 +206,6 @@ type FakeQaToolHost() =
         member _.SearchBlackboardAsync(_, _) =
             Task.FromResult("No blackboard context.")
 
-type EchoVoiceTool(pluginId: VoicePluginId) =
-    let toolId =
-        { pluginId = pluginId
-          name = VoiceToolName.create "echo" }
-
-    interface IVoiceTool with
-        member _.Definition =
-            { id = toolId
-              description = "Echoes the input text."
-              parameters =
-                [ { name = "text"
-                    description = "Text to echo."
-                    required = true } ]
-              inputSchema = None
-              timeout = None }
-
-        member _.InvokeAsync(call, _) =
-            task {
-                let text =
-                    match call.arguments.TryGetProperty "text" with
-                    | true, value when value.ValueKind = JsonValueKind.String -> value.GetString()
-                    | _ -> ""
-                    |> Option.ofObj
-                    |> Option.defaultValue ""
-
-                return
-                    Ok
-                        { callId = call.callId
-                          toolId = toolId
-                          content = JsonSerializer.SerializeToElement {| echoed = text |}
-                          metadata = Dictionary<string, string>() :> IReadOnlyDictionary<string, string>
-                          completedAt = DateTimeOffset.UtcNow }
-            }
-
-type FakeVoicePlugin() =
-    let pluginId = VoicePluginId.create "fake"
-
-    interface IVoicePlugin with
-        member _.ContractVersion = 1
-        member _.PluginId = pluginId
-
-        member _.Definition =
-            { id = "fake"
-              version = "0.1.0"
-              displayName = "Fake Plugin"
-              description = None
-              prompts = Map.empty
-              settings = Map.empty }
-
-        member _.GetTools _ =
-            [ EchoVoiceTool(pluginId) :> IVoiceTool ]
-
-        member _.GetAgents _ = []
-
-let private voiceHostContext () : VoicePluginHostContext =
-    { storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
-      settings = Map.empty
-      report = ignore }
-
 type FakeContextProvider(source: KnowledgeSource) =
     interface IQaContextProvider with
         member _.ProviderId = "fake.context"
@@ -287,6 +225,111 @@ type FakeContextProvider(source: KnowledgeSource) =
             Task.FromResult("Fake Context inventory.")
 
         member _.DisposeAsync() = ValueTask()
+
+let private responsesResponse id status output : FsResponses.Response =
+    { id = id
+      ``object`` = Some "response"
+      created_at = None
+      status = status
+      error = None
+      incomplete_details = None
+      instructions = None
+      max_output_tokens = None
+      model = FsResponses.Models.gpt_5
+      metadata = None
+      output = output
+      parallel_tool_calls = Some false
+      previous_response_id = None
+      reasoning = None
+      store = Some false
+      temperature = 1.0f
+      text = None
+      tool_choice = None
+      tools = []
+      top_p = 1.0f
+      truncation = Some "auto"
+      usage = None
+      user = None }
+
+let private responsesCreatedEvent id =
+    FsResponses.ResponseStreamEvent.ResponseCreated
+        { event_id = None
+          sequence_number = None
+          response = responsesResponse id "created" [] }
+
+let private responsesCompletedEventWithOutput id output =
+    FsResponses.ResponseStreamEvent.ResponseCompleted
+        { event_id = None
+          sequence_number = None
+          response = responsesResponse id "completed" output }
+
+let private responsesCompletedEvent id text =
+    responsesCompletedEventWithOutput
+        id
+        [ FsResponses.IOitem.Message
+              { FsResponses.Message.Default with
+                  id = Some $"msg_{id}"
+                  status = Some "completed"
+                  role = "assistant"
+                  content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] } ]
+
+let private responsesFunctionCallEvent id callId name arguments =
+    responsesCompletedEventWithOutput
+        id
+        [ FsResponses.IOitem.Function_call
+              { id = $"fc_{callId}"
+                call_id = callId
+                name = name
+                arguments = arguments } ]
+
+let private previousResponseNotFoundEvent =
+    FsResponses.ResponseStreamEvent.Error
+        { event_id = None
+          sequence_number = None
+          status = Some 404
+          response_id = None
+          error =
+            { code = "previous_response_not_found"
+              message = "Previous response not found."
+              ``type`` = Some "invalid_request_error"
+              param = Some "previous_response_id" } }
+
+let private websocketAnswerTransport handler =
+    QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
+        handler request cancellationToken |> Task.FromResult)
+
+let private inputTextFromResponseRequest (request: FsResponses.WebSocketCreateRequest) =
+    request.input
+    |> List.choose (function
+        | FsResponses.IOitem.Message message ->
+            message.content
+            |> List.choose (function
+                | FsResponses.Content.Input_text text -> Some text.text
+                | _ -> None)
+            |> String.concat "\n"
+            |> Some
+        | _ -> None)
+    |> String.concat "\n"
+
+let private responseToolNames (request: FsResponses.WebSocketCreateRequest) =
+    request.tools
+    |> Option.defaultValue []
+    |> List.choose (function
+        | FsResponses.Tool.Function fn -> Some fn.name
+        | _ -> None)
+
+let private responseFunctionTools (request: FsResponses.WebSocketCreateRequest) =
+    request.tools
+    |> Option.defaultValue []
+    |> List.choose (function
+        | FsResponses.Tool.Function fn -> Some fn
+        | _ -> None)
+
+let private functionOutputsFromResponseRequest (request: FsResponses.WebSocketCreateRequest) =
+    request.input
+    |> List.choose (function
+        | FsResponses.IOitem.Function_call_output output -> Some output
+        | _ -> None)
 
 type FakeDoclingRasterizer(result: Result<FsColbert.DoclingRasterPage list, string>) =
     interface FsColbert.IDoclingPageRasterizer with
@@ -622,6 +665,258 @@ let ``qa session applies custom prompts and answer role options`` () =
         Assert.Equal("CUSTOM SYSTEM", recorder.Messages[0].Text)
         Assert.Contains("Q=What does the fake context say?", recorder.Messages[1].Text)
         Assert.Contains("Fake context for What does the fake context say?", recorder.Messages[1].Text)
+    }
+
+[<Fact>]
+let ``qa session answers through responses websocket transport`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable callNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                callNumber <- callNumber + 1
+
+                match callNumber with
+                | 1 -> [ responsesCreatedEvent "resp_bootstrap_1" ]
+                | _ -> [ responsesCompletedEvent "resp_socket_1" "socket response" ])
+
+        let answerConfig =
+            { ModelRoleConfig.create "gpt-4.1-mini" with
+                maxOutputTokens = Some 123
+                temperature = Some 0.1f }
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport
+                answerModelId = answerConfig.modelId
+                modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
+                prompts =
+                    { PromptSet.empty with
+                        answerSystem = Some "CUSTOM SYSTEM"
+                        answerUserTemplate = Some "Q={{question}}\nCTX={{sourceContext}}\nINV={{sourceInventory}}" } }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("socket response", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal("gpt-4.1-mini", captured[0].model)
+        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(None, captured[0].max_output_tokens)
+        Assert.Equal(Some 0.1f, captured[0].temperature)
+        Assert.Equal(Some false, captured[0].store)
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some "CUSTOM SYSTEM", captured[0].instructions)
+        Assert.Contains("selected_source_search", responseToolNames captured[0])
+        Assert.Contains("source_inventory", responseToolNames captured[0])
+        Assert.Empty(captured[0].input)
+
+        Assert.Equal("gpt-4.1-mini", captured[1].model)
+        Assert.Equal(Some 123, captured[1].max_output_tokens)
+        Assert.Equal(Some 0.1f, captured[1].temperature)
+        Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
+        Assert.Equal(None, captured[1].instructions)
+        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("Q=What does the fake context say?", inputTextFromResponseRequest captured[1])
+        Assert.Contains("Fake context for What does the fake context say?", inputTextFromResponseRequest captured[1])
+    }
+
+[<Fact>]
+let ``qa session websocket answer uses previous response id after first turn`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-append"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable answerNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match request.generate with
+                | Some false -> [ responsesCreatedEvent "resp_bootstrap" ]
+                | _ ->
+                    answerNumber <- answerNumber + 1
+                    [ responsesCompletedEvent $"resp_{answerNumber}" $"socket answer {answerNumber}" ])
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport }
+
+        use session = new QaSession(options)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! first = session.AnswerAsync(request "first question", CancellationToken.None)
+        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
+
+        Assert.Equal("socket answer 1", first.answer)
+        Assert.Equal("socket answer 2", second.answer)
+        Assert.Equal(3, captured.Count)
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some false, captured[0].generate)
+        Assert.Contains("source_inventory", responseToolNames captured[0])
+        Assert.Empty(captured[0].input)
+        Assert.Equal(Some "resp_bootstrap", captured[1].previous_response_id)
+        Assert.Single(captured[1].input) |> ignore
+        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("first question", inputTextFromResponseRequest captured[1])
+        Assert.Equal(Some "resp_1", captured[2].previous_response_id)
+        Assert.Single(captured[2].input) |> ignore
+        Assert.Equal(None, captured[2].tools)
+        Assert.Contains("second question", inputTextFromResponseRequest captured[2])
+    }
+
+[<Fact>]
+let ``qa session websocket answer replays append only history when previous response is missing`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-replay"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable callNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                callNumber <- callNumber + 1
+
+                match callNumber with
+                | 1 -> [ responsesCreatedEvent "resp_bootstrap_1" ]
+                | 2 -> [ responsesCompletedEvent "resp_1" "first socket answer" ]
+                | 3 -> [ previousResponseNotFoundEvent ]
+                | 4 -> [ responsesCreatedEvent "resp_bootstrap_2" ]
+                | _ -> [ responsesCompletedEvent "resp_replayed" "replayed socket answer" ])
+
+        let logs = ResizeArray<string>()
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! first = session.AnswerAsync(request "first question", CancellationToken.None)
+        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
+
+        Assert.Equal("first socket answer", first.answer)
+        Assert.Equal("replayed socket answer", second.answer)
+        Assert.Equal(5, captured.Count)
+        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
+        Assert.Equal(Some "resp_1", captured[2].previous_response_id)
+        Assert.Equal(Some false, captured[3].generate)
+        Assert.Equal(Some "resp_bootstrap_2", captured[4].previous_response_id)
+
+        Assert.True(
+            captured[4].input.Length >= 3,
+            "Replay should include prior user, prior assistant, and current user items."
+        )
+
+        Assert.Contains("first question", inputTextFromResponseRequest captured[4])
+        Assert.Contains("second question", inputTextFromResponseRequest captured[4])
+        Assert.Contains(logs, fun log -> log.Contains("previous_response_id was not found"))
+    }
+
+[<Fact>]
+let ``qa session websocket dispatches model requested tools`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-tools"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match captured.Count with
+                | 1 -> [ responsesCreatedEvent "resp_bootstrap_tools" ]
+                | 2 -> [ responsesFunctionCallEvent "resp_tool_call" "call_inventory" "source_inventory" "{}" ]
+                | _ -> [ responsesCompletedEvent "resp_tool_final" "final answer from tool" ])
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Which sources are selected?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("final answer from tool", answer.answer)
+        Assert.Equal(3, captured.Count)
+        Assert.Equal(Some false, captured[0].generate)
+        Assert.Contains("source_inventory", responseToolNames captured[0])
+        Assert.Contains("selected_source_search", responseToolNames captured[0])
+
+        for tool in responseFunctionTools captured[0] do
+            Assert.True(tool.strict)
+
+            let expectedRequired =
+                tool.parameters.properties |> Map.keys |> Seq.sort |> Seq.toList
+
+            Assert.True((expectedRequired = (tool.parameters.required |> List.sort)))
+
+        Assert.Equal(Some "resp_bootstrap_tools", captured[1].previous_response_id)
+        Assert.Equal(None, captured[1].tools)
+        Assert.Single(captured[1].input) |> ignore
+
+        Assert.Equal(Some "resp_tool_call", captured[2].previous_response_id)
+        Assert.Equal(None, captured[2].tools)
+
+        let output = Assert.Single(functionOutputsFromResponseRequest captured[2])
+        Assert.Equal("call_inventory", output.call_id)
+        Assert.Contains("Fake Context inventory.", output.output)
+
+        let observation = Assert.Single(answer.toolObservations)
+        Assert.Equal("source_inventory", observation.toolName)
+        Assert.Contains("Fake Context inventory.", observation.content)
     }
 
 [<Fact>]
@@ -2198,200 +2493,82 @@ let ``durable memory forget request retracts related current record`` () =
     )
 
 [<Fact>]
-let ``voice event bus preserves publish order`` () =
-    let bus = VoiceEventBus()
-    let seen = ResizeArray<string>()
+let ``blackboard lexical search finds typed tool observations`` () =
+    let observation =
+        { pluginName = "FsVoiceTools"
+          toolName = "selected_source_search"
+          query = "renters claim process"
+          content = "The selected source describes filing a tenant policy claim after damaged property."
+          createdAt = DateTimeOffset.UtcNow }
 
-    use _subscription = bus.Subscribe(fun event -> seen.Add event.name)
+    let board =
+        Blackboard.empty 10
+        |> Blackboard.add (BlackboardRecords.toolObservation "turn_blackboard" observation)
 
-    let publisher = bus :> IVoiceEventPublisher
-    publisher.Publish(VoiceEvents.create "session.started" (Some "s1") None None)
-    publisher.Publish(VoiceEvents.create "turn.completed" (Some "s1") None None)
+    let hits =
+        board
+        |> Blackboard.search
+            { BlackboardSearchOptions.defaults with
+                includeKinds = [ ToolObservation ] }
+            "rental policy damage claim"
 
-    Assert.Equal<string list>([ "session.started"; "turn.completed" ], List.ofSeq seen)
-    Assert.Equal<string list>([ "session.started"; "turn.completed" ], bus.Events |> List.map _.name)
-
-[<Fact>]
-let ``voice tool dispatcher records successful result shape`` () =
-    task {
-        let pluginId = VoicePluginId.create "fake"
-        let dispatcher = VoiceToolDispatcher([ EchoVoiceTool(pluginId) :> IVoiceTool ])
-
-        let call =
-            { callId = "call_1"
-              toolId =
-                { pluginId = pluginId
-                  name = VoiceToolName.create "echo" }
-              arguments = JsonSerializer.SerializeToElement {| text = "hello" |}
-              requestedAt = DateTimeOffset.UtcNow }
-
-        let! result = dispatcher.DispatchAsync(call, CancellationToken.None)
-
-        match result with
-        | ToolSucceeded toolResult ->
-            Assert.Equal("call_1", toolResult.callId)
-            Assert.Equal("hello", toolResult.content.GetProperty("echoed").GetString())
-        | _ -> failwith "Expected tool dispatch to succeed."
-    }
+    Assert.NotEmpty hits
+    Assert.Equal(ToolObservation, hits.Head.record.kind)
+    Assert.Contains("tenant policy claim", hits.Head.record.text, StringComparison.OrdinalIgnoreCase)
 
 [<Fact>]
-let ``voice runtime publishes session and tool events`` () =
+let ``qa session uses blackboard search for previous result followups`` () =
     task {
-        use transport = new FakeVoiceTransport([])
-        let engine = VoiceRuntimeEngine(FakeVoicePlugin(), voiceHostContext (), transport)
+        let source =
+            { kind = Json
+              location = "fake://blackboard-source"
+              enabled = true }
 
-        let pluginId = VoicePluginId.create "fake"
-
-        let call =
-            { callId = "call_2"
-              toolId =
-                { pluginId = pluginId
-                  name = VoiceToolName.create "echo" }
-              arguments = JsonSerializer.SerializeToElement {| text = "runtime" |}
-              requestedAt = DateTimeOffset.UtcNow }
-
-        do! engine.StartAsync CancellationToken.None
-        let! result = engine.DispatchToolAsync(call, CancellationToken.None)
-        do! engine.StopAsync CancellationToken.None
-
-        match result with
-        | ToolSucceeded _ -> ()
-        | _ -> failwith "Expected runtime tool dispatch to succeed."
-
-        let eventNames = engine.Events |> List.map _.name
-
-        Assert.Contains("session.started", eventNames)
-        Assert.Contains("tool.started", eventNames)
-        Assert.Contains("tool.completed", eventNames)
-        Assert.Contains("session.ended", eventNames)
-
-        let observation = Assert.Single engine.Blackboard.toolObservations
-        Assert.Equal("fake.echo", observation.toolName)
-    }
-
-[<Fact>]
-let ``text runtime captures submitted user turn`` () =
-    task {
-        let runtime = VoiceTextRuntime(FakeVoicePlugin(), voiceHostContext ())
-        let! snapshot = runtime.SubmitAsync("what changed?", CancellationToken.None)
-
-        let turn = Assert.Single snapshot.turns
-
-        Assert.Equal("user", turn.role)
-        Assert.Equal("what changed?", turn.text)
-    }
-
-[<Fact>]
-let ``bridge session logs browser and webrtc events`` () =
-    task {
-        let sessionId = BridgeSessionId.newId ()
+        let provider = FakeContextProvider source :> IQaContextProvider
+        let answerClient = new RecordingChatClient("ok")
+        let storageRoot = tempStorageRoot ()
 
         let options =
-            { sessionId = sessionId
-              plugin = FakeVoicePlugin()
-              hostContext = voiceHostContext ()
-              runtimeOptions = None }
+            { QaSessionOptions.create storageRoot with
+                autoWriteback = false
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some answerClient } }
 
-        use session = new BridgeSession(options)
-        do! session.StartAsync CancellationToken.None
+        let session = new QaSession(options)
+        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
 
-        do!
-            session.AcceptClientEventAsync(
-                { eventId = "browser_1"
-                  kind = BrowserEvent
-                  eventType = "connected"
-                  payload = JsonSerializer.SerializeToElement {| tab = "agent" |} |> Some
-                  receivedAt = DateTimeOffset.UtcNow },
-                CancellationToken.None
-            )
+        let firstRequest =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "what documents are selected?"
+              realtimeJudgement = None
+              deadline = None }
 
-        do!
-            session.AcceptClientEventAsync(
-                { eventId = "webrtc_1"
-                  kind = WebRtcSignal
-                  eventType = "offer"
-                  payload = JsonSerializer.SerializeToElement {| sdp = "fake" |} |> Some
-                  receivedAt = DateTimeOffset.UtcNow },
-                CancellationToken.None
-            )
+        let! firstAnswer = session.AnswerAsync(firstRequest, CancellationToken.None)
 
-        let eventTypes = session.SnapshotEvents() |> List.map _.eventType
+        Assert.Empty errors
 
-        Assert.Contains("session.started", eventTypes)
-        Assert.Contains("browser.connected", eventTypes)
-        Assert.Contains("webrtc.offer", eventTypes)
-    }
+        Assert.True(
+            firstAnswer.toolObservations
+            |> List.exists (fun obs -> obs.toolName = "source_inventory")
+        )
 
-[<Fact>]
-let ``bridge session forwards realtime server events into runtime event log`` () =
-    task {
-        let sessionId = BridgeSessionId.newId ()
+        let followup =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "what did the previous result say about fake context inventory?"
+              realtimeJudgement = None
+              deadline = None }
 
-        let options =
-            { sessionId = sessionId
-              plugin = FakeVoicePlugin()
-              hostContext = voiceHostContext ()
-              runtimeOptions = None }
+        let! followupAnswer = session.AnswerAsync(followup, CancellationToken.None)
 
-        use session = new BridgeSession(options)
-        do! session.StartAsync CancellationToken.None
+        let blackboardObservation =
+            followupAnswer.toolObservations
+            |> List.find (fun obs -> obs.toolName = "blackboard_search")
 
-        let runTask = session.Engine.RunUntilClosedAsync(CancellationToken.None)
-
-        do!
-            session.AcceptClientEventAsync(
-                { eventId = "server_1"
-                  kind = RealtimeServerEvent
-                  eventType = "speech.started"
-                  payload = None
-                  receivedAt = DateTimeOffset.UtcNow },
-                CancellationToken.None
-            )
-
-        use waitCts = new CancellationTokenSource(TimeSpan.FromSeconds 2.0)
-        let mutable observedSpeech = false
-
-        while not observedSpeech && not waitCts.IsCancellationRequested do
-            let! event = session.WaitForServerEventAsync waitCts.Token
-
-            observedSpeech <-
-                match event with
-                | Some event -> event.eventType = "speech.started"
-                | None -> false
+        Assert.Contains("source_inventory", blackboardObservation.content, StringComparison.OrdinalIgnoreCase)
+        Assert.Contains("Fake Context inventory", blackboardObservation.content, StringComparison.OrdinalIgnoreCase)
 
         do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
-
-        try
-            do! runTask
-        with :? OperationCanceledException ->
-            ()
-
-        let eventTypes = session.SnapshotEvents() |> List.map _.eventType
-        Assert.True(observedSpeech)
-        Assert.Contains("speech.started", eventTypes)
-    }
-
-[<Fact>]
-let ``bridge session store creates and removes sessions`` () =
-    task {
-        let store = BridgeSessionStore()
-        let sessionId = BridgeSessionId.newId ()
-
-        let options =
-            { sessionId = sessionId
-              plugin = FakeVoicePlugin()
-              hostContext = voiceHostContext ()
-              runtimeOptions = None }
-
-        let! session = store.CreateAsync(options, CancellationToken.None)
-
-        Assert.Equal(1, store.Count)
-        Assert.True(store.TryGet(session.SessionId).IsSome)
-
-        do! store.RemoveAsync session.SessionId
-
-        Assert.Equal(0, store.Count)
-        Assert.True(store.TryGet(session.SessionId).IsNone)
     }
 
 type TestToHost =
@@ -2459,6 +2636,34 @@ let private typedVoiceContext () : VoiceOrchestrationContext =
       settings = Map.empty
       report = ignore }
 
+let private testHostCodec: HostMessageCodec<TestToHost, TestFromHost> =
+    let encodeToHost message =
+        match message with
+        | ShowThing value -> JsonSerializer.SerializeToElement({| case = "ShowThing"; value = value |})
+        | VoiceActivityChanged active ->
+            JsonSerializer.SerializeToElement(
+                {| case = "VoiceActivityChanged"
+                   active = active |}
+            )
+
+    let decodeFromHost (json: JsonElement) =
+        try
+            match json.GetProperty("case").GetString() with
+            | "ScreenShown" -> Ok(ScreenShown(json.GetProperty("value").GetString()))
+            | "ProjectionCompleted" -> Ok(ProjectionCompleted(json.GetProperty("value").GetString()))
+            | value -> Error $"Unsupported test host message: {value}"
+        with ex ->
+            Error ex.Message
+
+    { encodeToHost = encodeToHost
+      decodeFromHost = decodeFromHost }
+
+let private bridgeOptions sessionId orchestration codec : BridgeSessionOptions<TestToHost, TestFromHost> =
+    { sessionId = sessionId
+      orchestration = orchestration
+      context = typedVoiceContext ()
+      hostMessageCodec = codec }
+
 [<Fact>]
 let ``typed voice orchestration emits host messages on start`` () =
     task {
@@ -2506,6 +2711,133 @@ let ``typed voice session stops and completes host streams`` () =
     }
 
 [<Fact>]
+let ``bridge session exposes typed host messages through codec`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration()
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            bridgeOptions sessionId (orchestration :> IVoiceOrchestration<_, _>) (Some testHostCodec)
+
+        use session = new BridgeSession<TestToHost, TestFromHost>(options)
+        do! session.StartAsync CancellationToken.None
+
+        let! event = session.WaitForServerEventAsync(CancellationToken.None)
+
+        match event with
+        | Some event ->
+            Assert.Equal(HostMessage, event.kind)
+            Assert.Equal("host.message", event.eventType)
+            Assert.Equal("ShowThing", event.payload.Value.GetProperty("case").GetString())
+            Assert.Equal("claim-123", event.payload.Value.GetProperty("value").GetString())
+        | None -> failwith "Expected encoded host message."
+    }
+
+[<Fact>]
+let ``bridge session forwards host messages into typed session through codec`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration()
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            bridgeOptions sessionId (orchestration :> IVoiceOrchestration<_, _>) (Some testHostCodec)
+
+        use session = new BridgeSession<TestToHost, TestFromHost>(options)
+        do! session.StartAsync CancellationToken.None
+
+        do!
+            session.AcceptClientEventAsync(
+                { eventId = "host_1"
+                  kind = BridgeClientEventKind.HostMessage
+                  eventType = "host.message"
+                  payload =
+                    JsonSerializer.SerializeToElement(
+                        {| case = "ScreenShown"
+                           value = "sources" |}
+                    )
+                    |> Some
+                  receivedAt = DateTimeOffset.UtcNow },
+                CancellationToken.None
+            )
+
+        let! message = orchestration.Session.FromHost.ReadAsync(CancellationToken.None).AsTask()
+
+        Assert.Equal(ScreenShown "sources", message)
+    }
+
+[<Fact>]
+let ``bridge session forwards raw voice events both directions`` () =
+    task {
+        let orchestration = FakeTypedVoiceOrchestration()
+        let sessionId = BridgeSessionId.newId ()
+
+        let options =
+            bridgeOptions sessionId (orchestration :> IVoiceOrchestration<_, _>) None
+
+        use session = new BridgeSession<TestToHost, TestFromHost>(options)
+        do! session.StartAsync CancellationToken.None
+
+        do!
+            session.AcceptClientEventAsync(
+                { eventId = "server_1"
+                  kind = RealtimeServerEvent
+                  eventType = "input_audio_buffer.speech_started"
+                  payload =
+                    JsonSerializer.SerializeToElement(
+                        {| event_id = "server_1"
+                           ``type`` = "input_audio_buffer.speech_started" |}
+                    )
+                    |> Some
+                  receivedAt = DateTimeOffset.UtcNow },
+                CancellationToken.None
+            )
+
+        let! inbound = session.Connection.receiver.ReadAsync(CancellationToken.None).AsTask()
+        Assert.Equal("input_audio_buffer.speech_started", inbound.GetProperty("type").GetString())
+
+        do!
+            session.Connection.sender
+                .WriteAsync(
+                    JsonSerializer.SerializeToElement(
+                        {| event_id = "client_1"
+                           ``type`` = "response.create" |}
+                    ),
+                    CancellationToken.None
+                )
+                .AsTask()
+
+        let! outbound = session.WaitForServerEventAsync(CancellationToken.None)
+
+        match outbound with
+        | Some event ->
+            Assert.Equal(VoiceEvent, event.kind)
+            Assert.Equal("response.create", event.eventType)
+            Assert.Equal("client_1", event.eventId)
+        | None -> failwith "Expected raw outbound voice event."
+    }
+
+[<Fact>]
+let ``bridge session store creates and removes typed sessions`` () =
+    task {
+        let store = BridgeSessionStore<TestToHost, TestFromHost>()
+        let sessionId = BridgeSessionId.newId ()
+        let orchestration = FakeTypedVoiceOrchestration()
+
+        let options =
+            bridgeOptions sessionId (orchestration :> IVoiceOrchestration<_, _>) (Some testHostCodec)
+
+        let! session = store.CreateAsync(options, CancellationToken.None)
+
+        Assert.Equal(1, store.Count)
+        Assert.True(store.TryGet(session.SessionId).IsSome)
+
+        do! store.RemoveAsync session.SessionId
+
+        Assert.Equal(0, store.Count)
+        Assert.True(store.TryGet(session.SessionId).IsNone)
+    }
+
+[<Fact>]
 let ``pure voice orchestration can use unit host messages`` () =
     task {
         let toHost = Channel.CreateUnbounded<unit>()
@@ -2535,12 +2867,15 @@ let ``pure voice orchestration can use unit host messages`` () =
     }
 
 [<Fact>]
-let ``FsVoice Types public contract does not reference RTFlow`` () =
+let ``FsVoice Platform public contract stays dependency light`` () =
     let assembly = typeof<IVoiceOrchestration<unit, unit>>.Assembly
     let references = assembly.GetReferencedAssemblies() |> Array.map _.Name
     let publicApi = assembly.GetExportedTypes() |> Array.map _.FullName
 
     Assert.DoesNotContain("RTFlow", references)
+    Assert.DoesNotContain("FsVoice.QA", references)
+    Assert.DoesNotContain("Microsoft.Maui", references)
+    Assert.DoesNotContain("OpenAI", references)
 
     Assert.DoesNotContain(
         publicApi,

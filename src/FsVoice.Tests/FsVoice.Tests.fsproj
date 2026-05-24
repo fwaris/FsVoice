@@ -19,13 +19,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
-    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
-    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Hosting.AspNetCore\FsVoice.Hosting.AspNetCore.fsproj" />
-    <ProjectReference Include="..\FsVoice.Testing\FsVoice.Testing.fsproj" />
     <ProjectReference Include="..\FsVoice.Tools\FsVoice.Tools.fsproj" />
-    <ProjectReference Include="..\FsVoice.Types\FsVoice.Types.fsproj" />
+    <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
     <ProjectReference Include="..\Speak2Docs.Orchestration\Speak2Docs.Orchestration.fsproj" />
   </ItemGroup>
 

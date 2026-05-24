@@ -1,15 +1,30 @@
-﻿namespace FsVoice.Types
+namespace FsVoice.Platform
 
 open System
-open System.Threading
-open System.Threading.Tasks
-open System.Threading.Channels
+open System.Collections.Generic
 open System.Text.Json
+open System.Threading
+open System.Threading.Channels
+open System.Threading.Tasks
 
-/// Abstract voice connection with channels for receiving and sending transport events.
+/// Raw bidirectional voice connection. The platform transports JSON events
+/// without interpreting provider-specific protocol details.
 type VoiceConnection =
     { receiver: ChannelReader<JsonElement>
       sender: ChannelWriter<JsonElement> }
+
+module VoiceConnection =
+    let create receiver sender =
+        { receiver = receiver; sender = sender }
+
+    let channelPair () =
+        let inbound = Channel.CreateUnbounded<JsonElement>()
+        let outbound = Channel.CreateUnbounded<JsonElement>()
+
+        { receiver = inbound.Reader
+          sender = outbound.Writer },
+        inbound,
+        outbound
 
 /// Static metadata for a typed voice orchestration.
 type VoiceOrchestrationDefinition =
@@ -30,8 +45,22 @@ module VoiceOrchestrationDefinition =
 /// Host-provided services and settings available while creating a voice orchestration session.
 type VoiceOrchestrationContext =
     { storageRoot: string
-      settings: Map<string, string>
+      settings: IReadOnlyDictionary<string, string>
       report: string -> unit }
+
+module VoiceOrchestrationContext =
+    let create storageRoot settings report =
+        { storageRoot = storageRoot
+          settings = settings
+          report = report }
+
+    let empty storageRoot =
+        create storageRoot (Dictionary<string, string>() :> IReadOnlyDictionary<string, string>) ignore
+
+/// Optional codec for hosts that must serialize app-owned typed messages.
+type HostMessageCodec<'ToHost, 'FromHost> =
+    { encodeToHost: 'ToHost -> JsonElement
+      decodeFromHost: JsonElement -> Result<'FromHost, string> }
 
 /// Running voice orchestration session with strongly typed host interaction messages.
 type IVoiceSession<'ToHost, 'FromHost> =

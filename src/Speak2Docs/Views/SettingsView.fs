@@ -10,8 +10,8 @@ open type Fabulous.Maui.View
 
 module SettingsView =
     let private runtimeStatusRows =
-        [ "Core engine", "FsVoice.Core"
-          "Text runtime", "FsVoice.Testing"
+        [ "Platform contract", "FsVoice.Platform"
+          "Orchestration", "Speak2Docs.Orchestration"
           "WebRTC bridge", "FsVoice.Hosting.AspNetCore" ]
 
     let private isRealtimeActive model =
@@ -157,7 +157,7 @@ module SettingsView =
                 ViewControls.formLabel "Max Answer Tokens" tokenRow
 
                 Entry(model.answerMaxOutputTokens, AnswerMaxOutputTokensChanged)
-                    .placeholder("900")
+                    .placeholder("2500")
                     .isEnabled(canEdit)
                     .gridRow(tokenRow)
                     .gridColumn(1)

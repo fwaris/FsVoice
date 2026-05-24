@@ -3,7 +3,7 @@ namespace Speak2Docs.WorkFlow
 open System.Threading
 open System.Threading.Channels
 open Speak2Docs
-open FsVoice.Types
+open FsVoice.Platform
 open RTFlow
 
 module StateMachine =

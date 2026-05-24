@@ -20,12 +20,25 @@ module QaModelClients =
           toolPlanner = None
           answerGenerator = None }
 
+type QaAnswerTransport =
+    | OpenAIResponsesWebSocket of FsResponses.ResponseWebSocketConfig
+    | CustomResponsesWebSocket of
+        (FsResponses.WebSocketCreateRequest -> CancellationToken -> Task<FsResponses.ResponseStreamEvent list>)
+
+module QaAnswerTransport =
+    let openAIResponsesWebSocket apiKey =
+        FsResponses.ResponseWebSocketConfig.create apiKey |> OpenAIResponsesWebSocket
+
+    let customResponsesWebSocket createAndCollect =
+        CustomResponsesWebSocket createAndCollect
+
 type QaSessionOptions =
     { storageRoot: string
       memoryStorePath: string option
       toolProviderDirectory: string option
       retrievalMode: RetrievalMode
       clients: QaModelClients
+      answerTransport: QaAnswerTransport option
       plugInProfile: QaPlugInProfile
       prompts: PromptSet
       modelRoles: Map<ModelRole, ModelRoleConfig>
@@ -54,6 +67,7 @@ module QaSessionOptions =
           toolProviderDirectory = None
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
+          answerTransport = None
           plugInProfile = QaPlugInProfile.generic
           prompts = PromptSet.empty
           modelRoles = PlugInDefinition.defaultModels
@@ -92,6 +106,22 @@ type private PlannedToolCallDto =
 type private ToolPlanDto =
     { calls: PlannedToolCallDto list option }
 
+type private AnswerPrompt =
+    { instructions: string
+      userPrompt: string }
+
+type private AnswerConversationState =
+    { previousResponseId: string option
+      items: FsResponses.IOitem list }
+
+type private AnswerModelResult =
+    { answer: string
+      observations: QaToolObservation list }
+
+type private ResponseToolCatalog =
+    { tools: FsResponses.Tool list
+      byName: Map<string, IQaTool> }
+
 type QaSession(options: QaSessionOptions) =
     let mutable contextProviders = options.contextProviders
 
@@ -110,7 +140,7 @@ type QaSession(options: QaSessionOptions) =
         options.memoryService
         |> Option.defaultValue (DurableMemoryService(memoryPath, currentMemoryEncoder) :> IMemoryService)
 
-    let blackboard = ResizeArray<QaToolObservation>()
+    let mutable blackboard = Blackboard.empty 120
 
     let report message = options.report message
 
@@ -136,6 +166,16 @@ type QaSession(options: QaSessionOptions) =
             dict[key] <- value
 
         dict :> IReadOnlyDictionary<string, string>
+
+    let argsToMap (args: IReadOnlyDictionary<string, string>) =
+        args |> Seq.map (fun (KeyValue(name, value)) -> name, value) |> Map.ofSeq
+
+    let plannedToolSummary (call: PlannedToolCall) =
+        { pluginName = call.tool.PluginName
+          toolName = call.tool.Name
+          query = call.query
+          maxResults = call.maxResults
+          arguments = argsToMap call.arguments }
 
     let renderToolInventory (catalog: QaToolCatalog) =
         catalog.tools
@@ -205,6 +245,100 @@ type QaSession(options: QaSessionOptions) =
 
         $"finish={finishReason}; {usage}; messages={messageCount}"
 
+    let responseUsageDiagnostics (usage: FsResponses.Usage option) =
+        usage
+        |> Option.map (fun usage ->
+            $"usage=input:{usage.input_tokens} output:{usage.output_tokens} total:{usage.total_tokens}")
+        |> Option.defaultValue "usage=n/a"
+
+    let responseEventName event =
+        match event with
+        | FsResponses.ResponseStreamEvent.ResponseCreated _ -> "response.created"
+        | FsResponses.ResponseStreamEvent.ResponseInProgress _ -> "response.in_progress"
+        | FsResponses.ResponseStreamEvent.ResponseCompleted _ -> "response.completed"
+        | FsResponses.ResponseStreamEvent.ResponseFailed _ -> "response.failed"
+        | FsResponses.ResponseStreamEvent.ResponseIncomplete _ -> "response.incomplete"
+        | FsResponses.ResponseStreamEvent.OutputItemAdded _ -> "response.output_item.added"
+        | FsResponses.ResponseStreamEvent.OutputItemDone _ -> "response.output_item.done"
+        | FsResponses.ResponseStreamEvent.ContentPartAdded _ -> "response.content_part.added"
+        | FsResponses.ResponseStreamEvent.ContentPartDone _ -> "response.content_part.done"
+        | FsResponses.ResponseStreamEvent.OutputTextDelta _ -> "response.output_text.delta"
+        | FsResponses.ResponseStreamEvent.OutputTextDone _ -> "response.output_text.done"
+        | FsResponses.ResponseStreamEvent.FunctionCallArgumentsDelta _ -> "response.function_call_arguments.delta"
+        | FsResponses.ResponseStreamEvent.FunctionCallArgumentsDone _ -> "response.function_call_arguments.done"
+        | FsResponses.ResponseStreamEvent.Error _ -> "error"
+        | FsResponses.ResponseStreamEvent.Unknown event -> event.eventType
+
+    let responseTerminalResponse events =
+        events
+        |> List.tryPick (function
+            | FsResponses.ResponseStreamEvent.ResponseCompleted event
+            | FsResponses.ResponseStreamEvent.ResponseFailed event
+            | FsResponses.ResponseStreamEvent.ResponseIncomplete event -> Some event.response
+            | _ -> None)
+
+    let responseLifecycleResponse event =
+        match event with
+        | FsResponses.ResponseStreamEvent.ResponseCreated lifecycle
+        | FsResponses.ResponseStreamEvent.ResponseInProgress lifecycle
+        | FsResponses.ResponseStreamEvent.ResponseCompleted lifecycle
+        | FsResponses.ResponseStreamEvent.ResponseFailed lifecycle
+        | FsResponses.ResponseStreamEvent.ResponseIncomplete lifecycle -> Some lifecycle.response
+        | _ -> None
+
+    let responseAnyResponse events =
+        events |> List.rev |> List.tryPick responseLifecycleResponse
+
+    let responseIdFromEvents events =
+        responseAnyResponse events |> Option.map _.id
+
+    let responseError events =
+        events
+        |> List.tryPick (function
+            | FsResponses.ResponseStreamEvent.Error event -> Some event.error
+            | _ -> None)
+
+    let responsesDiagnostics events =
+        let eventNames = events |> List.map responseEventName |> String.concat ","
+
+        let response = responseTerminalResponse events
+
+        let status = response |> Option.map _.status |> Option.defaultValue "n/a"
+        let responseId = response |> Option.map _.id |> Option.defaultValue "n/a"
+        let usage = response |> Option.bind _.usage |> responseUsageDiagnostics
+
+        let errorCode =
+            responseError events |> Option.map _.code |> Option.defaultValue "n/a"
+
+        let errorMessage =
+            responseError events
+            |> Option.map _.message
+            |> Option.map (Text.truncate 240)
+            |> Option.defaultValue "n/a"
+
+        $"responseId={responseId}; status={status}; {usage}; error={errorCode}; errorMessage={errorMessage}; events={eventNames}"
+
+    let isResponsesTokenLimit events =
+        let reason =
+            responseTerminalResponse events
+            |> Option.bind _.incomplete_details
+            |> Option.map _.reason
+            |> Option.defaultValue ""
+
+        let status =
+            responseTerminalResponse events |> Option.map _.status |> Option.defaultValue ""
+
+        status.Contains("incomplete", StringComparison.OrdinalIgnoreCase)
+        && (reason.Contains("max_output", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("token", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("length", StringComparison.OrdinalIgnoreCase))
+
+    let isPreviousResponseNotFound events =
+        responseError events
+        |> Option.exists (fun err ->
+            err.code.Contains("previous_response_not_found", StringComparison.OrdinalIgnoreCase)
+            || err.message.Contains("previous response", StringComparison.OrdinalIgnoreCase))
+
     let isTokenLimitFinish (response: ChatResponse) =
         if isNull response then
             false
@@ -214,6 +348,131 @@ type QaSession(options: QaSessionOptions) =
             finishReason.Contains("length", StringComparison.OrdinalIgnoreCase)
             || finishReason.Contains("max_tokens", StringComparison.OrdinalIgnoreCase)
             || finishReason.Contains("max output", StringComparison.OrdinalIgnoreCase)
+
+    let answerPromptMessages prompt =
+        [ ChatMessage(ChatRole.System, prompt.instructions)
+          ChatMessage(ChatRole.User, prompt.userPrompt) ]
+
+    let answerReasoning (answerConfig: ModelRoleConfig) =
+        answerConfig.reasoningEffort
+        |> Option.map (fun effort ->
+            { FsResponses.Reasoning.Default with
+                effort = Some effort })
+
+    let answerTemperature (answerConfig: ModelRoleConfig) =
+        if ModelCapabilities.supportsTemperature answerConfig.modelId then
+            answerConfig.temperature |> Option.defaultValue 0.2f |> Some
+        else
+            None
+
+    let answerUserItem (prompt: AnswerPrompt) =
+        FsResponses.IOitem.Message
+            { FsResponses.Message.Default with
+                role = "user"
+                content = [ FsResponses.Content.Input_text {| text = prompt.userPrompt |} ] }
+
+    let answerAssistantItem answer =
+        FsResponses.IOitem.Message
+            { FsResponses.Message.Default with
+                status = Some "completed"
+                role = "assistant"
+                content = [ FsResponses.Content.Output_text { text = answer; annotations = None } ] }
+
+    let sanitizeResponseToolName (value: string) =
+        let chars =
+            value.Trim()
+            |> Seq.map (fun ch ->
+                if Char.IsLetterOrDigit ch || ch = '_' || ch = '-' then
+                    ch
+                else
+                    '_')
+            |> Seq.toArray
+
+        let name = String(chars).Trim('_')
+
+        if String.IsNullOrWhiteSpace name then "tool"
+        elif name.Length <= 64 then name
+        else name.Substring(0, 64).TrimEnd('_', '-')
+
+    let responseToolBaseName (tool: IQaTool) =
+        if String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase) then
+            sanitizeResponseToolName tool.Name
+        else
+            sanitizeResponseToolName $"{tool.PluginName}_{tool.Name}"
+
+    let responseToolName usedNames (tool: IQaTool) =
+        let baseName = responseToolBaseName tool
+
+        let rec choose index =
+            let suffix = if index = 0 then "" else $"_{index}"
+
+            let prefix =
+                if baseName.Length + suffix.Length <= 64 then
+                    baseName
+                else
+                    baseName.Substring(0, 64 - suffix.Length).TrimEnd('_', '-')
+
+            let candidate = prefix + suffix
+
+            if Set.contains candidate usedNames then
+                choose (index + 1)
+            else
+                candidate
+
+        choose 0
+
+    let responseToolParameterSchema (parameter: QaToolParameter) =
+        let description = Some parameter.description
+
+        if
+            String.Equals(parameter.name, "max_results", StringComparison.OrdinalIgnoreCase)
+            || parameter.name.EndsWith("_count", StringComparison.OrdinalIgnoreCase)
+        then
+            FsResponses.JsProperty.Integer { description = description }
+        else
+            FsResponses.JsProperty.String
+                { description = description
+                  enum = None }
+
+    let responseWarmupRequest (answerConfig: ModelRoleConfig) (prompt: AnswerPrompt) responseTools =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            instructions = Some prompt.instructions
+            generate = Some false
+            reasoning = answerReasoning answerConfig
+            store = Some false
+            temperature = answerTemperature answerConfig
+            tools = Some responseTools
+            tool_choice = Some FsResponses.ToolChoice.Auto }
+
+    let responseCreateRequest
+        (answerConfig: ModelRoleConfig)
+        maxOutputTokens
+        (prompt: AnswerPrompt)
+        previousResponseId
+        input
+        includeStableContext
+        responseTools
+        =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            input = input
+            instructions =
+                if includeStableContext then
+                    Some prompt.instructions
+                else
+                    None
+            max_output_tokens = Some maxOutputTokens
+            previous_response_id = previousResponseId
+            reasoning = answerReasoning answerConfig
+            store = Some false
+            temperature = answerTemperature answerConfig
+            tools = if includeStableContext then Some responseTools else None
+            tool_choice =
+                if includeStableContext then
+                    Some FsResponses.ToolChoice.Auto
+                else
+                    None }
 
     let renderTemplate replacements (template: string) =
         replacements
@@ -320,8 +579,8 @@ type QaSession(options: QaSessionOptions) =
                   "sourceInventory", inventory
                   "sourceContext", sourceContext ]
 
-        [ ChatMessage(ChatRole.System, systemPrompt)
-          ChatMessage(ChatRole.User, userPrompt) ]
+        { instructions = systemPrompt
+          userPrompt = userPrompt }
 
     let createSnapshot (request: QaTurnRequest) =
         { turnId = request.turnId
@@ -368,6 +627,34 @@ type QaSession(options: QaSessionOptions) =
                         query = question
                         maxResults = options.memoryCandidateChunks
                         arguments = makeArgs [] }
+              | None -> ()
+
+          if
+              containsAny
+                  [ "last result"
+                    "previous result"
+                    "earlier result"
+                    "last tool"
+                    "previous tool"
+                    "tool result"
+                    "what did the tool"
+                    "what did you find"
+                    "found earlier"
+                    "that lookup"
+                    "previous lookup"
+                    "earlier lookup"
+                    "looked up"
+                    "searched earlier"
+                    "blackboard" ]
+                  question
+          then
+              match catalog |> findTool "FsVoiceTools" "blackboard_search" with
+              | Some tool ->
+                  yield
+                      { tool = tool
+                        query = question
+                        maxResults = options.memoryCandidateChunks
+                        arguments = makeArgs [ "query", question ] }
               | None -> ()
 
           if
@@ -545,35 +832,456 @@ type QaSession(options: QaSessionOptions) =
             member _.SearchMemoryAsync(query, maxResults, cancellationToken) =
                 memoryService.SearchAsync(query, maxResults, cancellationToken)
 
-            member _.SearchBlackboardAsync(query, _) =
-                let query = Text.normalizeWhitespace query
+            member _.SearchBlackboardAsync(query, cancellationToken) =
+                task {
+                    let query = Text.normalizeWhitespace query
 
-                let matches =
-                    blackboard
-                    |> Seq.rev
-                    |> Seq.filter (fun observation ->
-                        String.IsNullOrWhiteSpace query
-                        || observation.content.Contains(query, StringComparison.OrdinalIgnoreCase)
-                        || observation.query.Contains(query, StringComparison.OrdinalIgnoreCase))
-                    |> Seq.truncate 8
-                    |> Seq.toList
+                    let options =
+                        { BlackboardSearchOptions.defaults with
+                            maxResults = 8
+                            includeKinds = [ ToolObservation; MemoryEvidence; SourceEvidence; Conflict; FinalAnswer ] }
 
-                let content =
-                    if List.isEmpty matches then
-                        "No matching blackboard observations were found."
-                    else
-                        matches
-                        |> List.mapi (fun index obs -> $"[{index + 1}] {obs.pluginName}.{obs.toolName}\n{obs.content}")
-                        |> String.concat "\n\n"
+                    let lexicalHits = Blackboard.search options query blackboard
 
-                Task.FromResult content }
+                    let! semanticHits =
+                        match currentMemoryEncoder () with
+                        | Some encoder when not (String.IsNullOrWhiteSpace query) ->
+                            BlackboardSemantic.search encoder options query blackboard
+                            |> fun work -> Async.StartAsTask(work, cancellationToken = cancellationToken)
+                        | _ -> Task.FromResult []
+
+                    return
+                        lexicalHits @ semanticHits
+                        |> Blackboard.mergeHits options.maxResults
+                        |> Blackboard.renderHits
+                } }
 
     let mutable catalog =
         QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
 
+    let responseToolCatalog () =
+        let folder (usedNames, byName, tools) (tool: IQaTool) =
+            let name = responseToolName usedNames tool
+
+            let parameters =
+                { FsResponses.Parameters.Default with
+                    properties =
+                        tool.Parameters
+                        |> List.map (fun parameter -> parameter.name, responseToolParameterSchema parameter)
+                        |> Map.ofList
+                    required = tool.Parameters |> List.map _.name
+                    additionalProperties = false }
+
+            let responseTool =
+                FsResponses.Tool.Function
+                    { FsResponses.Function.Default with
+                        name = name
+                        description = tool.Description
+                        parameters = parameters
+                        strict = true }
+
+            Set.add name usedNames, Map.add name tool byName, responseTool :: tools
+
+        let _, byName, tools =
+            catalog.tools
+            |> List.sortBy (fun tool -> tool.PluginName, tool.Name)
+            |> List.fold folder (Set.empty, Map.empty, [])
+
+        { tools = List.rev tools
+          byName = byName }
+
+    let mutable answerConnection: FsResponses.ResponseWebSocket option = None
+
+    let mutable answerConversation =
+        { previousResponseId = None
+          items = [] }
+
     do
         for log in memoryService.StartupLogs @ catalog.logs do
             report log
+
+    let answerConnectionIsOpen (connection: FsResponses.ResponseWebSocket) =
+        connection.socket.State = Net.WebSockets.WebSocketState.Open
+
+    let liveAnswerConnection config cancellationToken =
+        task {
+            match answerConnection with
+            | Some connection when answerConnectionIsOpen connection -> return connection
+            | Some connection ->
+                FsResponses.ResponsesWebSocket.dispose connection
+                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
+                answerConnection <- Some connection
+                return connection
+            | None ->
+                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
+                answerConnection <- Some connection
+                return connection
+        }
+
+    let runResponsesRequest request cancellationToken =
+        task {
+            match options.answerTransport with
+            | Some(QaAnswerTransport.CustomResponsesWebSocket createAndCollect) ->
+                return! createAndCollect request cancellationToken
+            | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
+                let! connection = liveAnswerConnection config cancellationToken
+                return! FsResponses.ResponsesWebSocket.createAndCollect connection request cancellationToken
+            | None -> return []
+        }
+
+    let runResponsesWarmupRequest request cancellationToken =
+        task {
+            match options.answerTransport with
+            | Some(QaAnswerTransport.CustomResponsesWebSocket createAndCollect) ->
+                return! createAndCollect request cancellationToken
+            | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
+                let! connection = liveAnswerConnection config cancellationToken
+                do! FsResponses.ResponsesWebSocket.sendCreate connection request cancellationToken
+                let! event = FsResponses.ResponsesWebSocket.readEvent connection cancellationToken
+                return event |> Option.toList
+            | None -> return []
+        }
+
+    let jsonElementArgument (element: JsonElement) =
+        match element.ValueKind with
+        | JsonValueKind.String -> element.GetString() |> Option.ofObj |> Option.defaultValue ""
+        | JsonValueKind.Null
+        | JsonValueKind.Undefined -> ""
+        | _ -> element.GetRawText()
+
+    let functionArgumentsToDictionary (arguments: string) =
+        let dict = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+
+        if String.IsNullOrWhiteSpace arguments then
+            Ok(dict :> IReadOnlyDictionary<string, string>)
+        else
+            try
+                use document = JsonDocument.Parse(arguments)
+
+                if document.RootElement.ValueKind <> JsonValueKind.Object then
+                    Error "Function call arguments must be a JSON object."
+                else
+                    for property in document.RootElement.EnumerateObject() do
+                        dict[property.Name] <- jsonElementArgument property.Value
+
+                    Ok(dict :> IReadOnlyDictionary<string, string>)
+            with ex ->
+                Error $"Function call arguments were not valid JSON: {ex.Message}"
+
+    let responseFunctionCalls events =
+        let fromItem =
+            function
+            | FsResponses.IOitem.Function_call call -> Some call
+            | _ -> None
+
+        [ for event in events do
+              match event with
+              | FsResponses.ResponseStreamEvent.OutputItemDone itemEvent ->
+                  match fromItem itemEvent.item with
+                  | Some call -> yield call
+                  | None -> ()
+              | FsResponses.ResponseStreamEvent.ResponseCompleted lifecycle ->
+                  for item in lifecycle.response.output do
+                      match fromItem item with
+                      | Some call -> yield call
+                      | None -> ()
+              | _ -> () ]
+        |> List.distinctBy _.call_id
+
+    let responseFunctionOutput callId output =
+        FsResponses.IOitem.Function_call_output { call_id = callId; output = output }
+
+    let responseFunctionQuery (call: FsResponses.FunctionCall) (args: IReadOnlyDictionary<string, string>) =
+        ToolArguments.tryString "query" args
+        |> Option.orElse (ToolArguments.tryString "question" args)
+        |> Option.defaultValue call.arguments
+        |> Text.truncate 240
+
+    let addResponseToolObservation turnId (tool: IQaTool) query content =
+        let observation =
+            { pluginName = tool.PluginName
+              toolName = tool.Name
+              query = query
+              content = content
+              createdAt = DateTimeOffset.UtcNow }
+
+        blackboard <-
+            blackboard
+            |> Blackboard.add (BlackboardRecords.toolObservation turnId observation)
+
+        observation
+
+    let invokeResponseFunctionCall
+        turnId
+        (responseTools: ResponseToolCatalog)
+        (call: FsResponses.FunctionCall)
+        cancellationToken
+        =
+        task {
+            match responseTools.byName |> Map.tryFind call.name with
+            | None ->
+                let output = $"Tool '{call.name}' is not available in this QA session."
+                report output
+                return responseFunctionOutput call.call_id output, None
+            | Some tool ->
+                match functionArgumentsToDictionary call.arguments with
+                | Error error ->
+                    let content = $"Tool {tool.PluginName}.{tool.Name} could not run: {error}"
+                    let observation = addResponseToolObservation turnId tool call.arguments content
+                    report content
+                    return responseFunctionOutput call.call_id content, Some observation
+                | Ok args ->
+                    let query = responseFunctionQuery call args
+
+                    try
+                        let! result = tool.InvokeAsync(args, cancellationToken)
+                        let observation = addResponseToolObservation turnId tool query result.content
+                        return responseFunctionOutput call.call_id result.content, Some observation
+                    with ex ->
+                        let content = $"Tool {tool.PluginName}.{tool.Name} failed: {ex.Message}"
+                        let observation = addResponseToolObservation turnId tool query content
+                        report content
+                        return responseFunctionOutput call.call_id content, Some observation
+        }
+
+    let invokeResponseFunctionCalls turnId responseTools calls cancellationToken =
+        task {
+            let boundedCalls = calls |> List.truncate 8
+
+            let! results =
+                boundedCalls
+                |> List.map (fun call -> invokeResponseFunctionCall turnId responseTools call cancellationToken)
+                |> Task.WhenAll
+
+            let outputs, observations = results |> Array.toList |> List.unzip
+            return outputs, observations |> List.choose id
+        }
+
+    let ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken =
+        async {
+            match answerConversation.previousResponseId with
+            | Some previousResponseId -> return Some previousResponseId
+            | None ->
+                let request = responseWarmupRequest answerConfig prompt responseTools.tools
+                let! events = runResponsesWarmupRequest request cancellationToken |> Async.AwaitTask
+
+                match responseIdFromEvents events with
+                | Some responseId ->
+                    answerConversation <-
+                        { answerConversation with
+                            previousResponseId = Some responseId }
+
+                    return Some responseId
+                | None ->
+                    report
+                        $"Answer Responses WebSocket warmup did not return a response id; sending stable instructions and tools with the next turn. {responsesDiagnostics events}."
+
+                    return None
+        }
+
+    let updateAnswerConversation userItem answer events =
+        responseIdFromEvents events
+        |> Option.iter (fun responseId ->
+            answerConversation <-
+                { previousResponseId = Some responseId
+                  items = answerConversation.items @ [ userItem; answerAssistantItem answer ] })
+
+    let responsesInputItems userItem replayHistory =
+        if replayHistory then
+            answerConversation.items @ [ userItem ]
+        else
+            [ userItem ]
+
+    let responsesCreateAndComplete
+        turnId
+        answerConfig
+        maxOutputTokens
+        prompt
+        responseTools
+        previousResponseId
+        input
+        includeStableContext
+        cancellationToken
+        =
+        async {
+            let request =
+                responseCreateRequest
+                    answerConfig
+                    maxOutputTokens
+                    prompt
+                    previousResponseId
+                    input
+                    includeStableContext
+                    responseTools.tools
+
+            let! initialEvents = runResponsesRequest request cancellationToken |> Async.AwaitTask
+
+            let rec complete remainingToolTurns events observations =
+                async {
+                    let calls = responseFunctionCalls events
+
+                    if List.isEmpty calls then
+                        return
+                            events,
+                            FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace,
+                            observations
+                    elif remainingToolTurns <= 0 then
+                        report
+                            $"Answer Responses WebSocket stopped after reaching the tool-call iteration limit; pendingToolCalls={calls.Length}; {responsesDiagnostics events}."
+
+                        return
+                            events,
+                            FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace,
+                            observations
+                    else
+                        match responseIdFromEvents events with
+                        | None ->
+                            report
+                                $"Answer Responses WebSocket produced tool calls without a response id; pendingToolCalls={calls.Length}; {responsesDiagnostics events}."
+
+                            return
+                                events,
+                                FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace,
+                                observations
+                        | Some responseId ->
+                            let! outputs, newObservations =
+                                invokeResponseFunctionCalls turnId responseTools calls cancellationToken
+                                |> Async.AwaitTask
+
+                            let followUpRequest =
+                                responseCreateRequest
+                                    answerConfig
+                                    maxOutputTokens
+                                    prompt
+                                    (Some responseId)
+                                    outputs
+                                    false
+                                    responseTools.tools
+
+                            let! nextEvents = runResponsesRequest followUpRequest cancellationToken |> Async.AwaitTask
+                            return! complete (remainingToolTurns - 1) nextEvents (observations @ newObservations)
+                }
+
+            return! complete 6 initialEvents []
+        }
+
+    let answerWithResponsesWebSocket
+        (snapshot: TranscriptSnapshot)
+        (decision: SupervisorDecision)
+        (memoryHits: MemoryRecallHit list)
+        (chunks: SourceChunk list)
+        (observations: QaToolObservation list)
+        cancellationToken
+        =
+        async {
+            let answerConfig = modelConfig Answer
+            let prompt = answerPrompt snapshot decision memoryHits chunks observations
+            let userItem = answerUserItem prompt
+
+            let answerAttempt maxOutputTokens replayHistory =
+                async {
+                    let responseTools = responseToolCatalog ()
+                    let! previousResponseId = ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
+
+                    let! events, answer, toolObservations =
+                        responsesCreateAndComplete
+                            snapshot.turnId
+                            answerConfig
+                            maxOutputTokens
+                            prompt
+                            responseTools
+                            previousResponseId
+                            (responsesInputItems userItem replayHistory)
+                            previousResponseId.IsNone
+                            cancellationToken
+
+                    if isPreviousResponseNotFound events && previousResponseId.IsSome then
+                        report
+                            $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={answerConversation.items.Length}; {responsesDiagnostics events}."
+
+                        answerConversation <-
+                            { answerConversation with
+                                previousResponseId = None }
+
+                        let! replayPreviousResponseId =
+                            ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
+
+                        return!
+                            responsesCreateAndComplete
+                                snapshot.turnId
+                                answerConfig
+                                maxOutputTokens
+                                prompt
+                                responseTools
+                                replayPreviousResponseId
+                                (responsesInputItems userItem true)
+                                replayPreviousResponseId.IsNone
+                                cancellationToken
+                    else
+                        return events, answer, toolObservations
+                }
+
+            let maxOutputTokens = roleMaxTokens Answer 2500
+            let! events, answer, toolObservations = answerAttempt maxOutputTokens false
+
+            if isResponsesTokenLimit events then
+                report
+                    $"Answer Responses WebSocket hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {responsesDiagnostics events}."
+
+                return
+                    { answer = tokenLimitFallback maxOutputTokens
+                      observations = toolObservations }
+            elif responseError events |> Option.isSome then
+                report
+                    $"Answer Responses WebSocket returned error: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics events}."
+
+                return
+                    { answer = emptyAnswerFallbackWithLimit maxOutputTokens
+                      observations = toolObservations }
+            elif not (String.IsNullOrWhiteSpace answer) then
+                updateAnswerConversation userItem answer events
+
+                return
+                    { answer = answer
+                      observations = toolObservations }
+            else
+                report
+                    $"Answer Responses WebSocket returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics events}."
+
+                let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
+                let! retryEvents, retryAnswer, retryToolObservations = answerAttempt retryMaxOutputTokens false
+
+                if isResponsesTokenLimit retryEvents then
+                    report
+                        $"Answer Responses WebSocket retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {responsesDiagnostics retryEvents}."
+
+                    return
+                        { answer = tokenLimitFallback retryMaxOutputTokens
+                          observations = retryToolObservations }
+                elif responseError retryEvents |> Option.isSome then
+                    report
+                        $"Answer Responses WebSocket retry returned error: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics retryEvents}."
+
+                    return
+                        { answer = emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                          observations = retryToolObservations }
+                elif not (String.IsNullOrWhiteSpace retryAnswer) then
+                    updateAnswerConversation userItem retryAnswer retryEvents
+
+                    report
+                        $"Answer Responses WebSocket retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responsesDiagnostics retryEvents}."
+
+                    return
+                        { answer = retryAnswer
+                          observations = retryToolObservations }
+                else
+                    report
+                        $"Answer Responses WebSocket retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics retryEvents}."
+
+                    return
+                        { answer = emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                          observations = retryToolObservations }
+        }
 
     let answerWithModel
         (snapshot: TranscriptSnapshot)
@@ -584,59 +1292,76 @@ type QaSession(options: QaSessionOptions) =
         cancellationToken
         =
         async {
-            match options.clients.answerGenerator with
-            | None -> return "No answer model is configured for this QA session."
-            | Some client ->
-                let answerConfig = modelConfig Answer
+            match options.answerTransport with
+            | Some _ ->
+                return! answerWithResponsesWebSocket snapshot decision memoryHits chunks observations cancellationToken
+            | None ->
+                match options.clients.answerGenerator with
+                | None ->
+                    return
+                        { answer = "No answer model is configured for this QA session."
+                          observations = [] }
+                | Some client ->
+                    let answerConfig = modelConfig Answer
 
-                let prompt = answerPrompt snapshot decision memoryHits chunks observations
+                    let prompt = answerPrompt snapshot decision memoryHits chunks observations
+                    let messages = answerPromptMessages prompt
 
-                let answerAttempt maxOutputTokens =
-                    async {
-                        let opts = ChatOptions()
+                    let answerAttempt maxOutputTokens =
+                        async {
+                            let opts = ChatOptions()
 
-                        if ModelCapabilities.supportsTemperature answerConfig.modelId then
-                            opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
+                            if ModelCapabilities.supportsTemperature answerConfig.modelId then
+                                opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
 
-                        opts.MaxOutputTokens <- Nullable(maxOutputTokens)
+                            opts.MaxOutputTokens <- Nullable(maxOutputTokens)
 
-                        let! response = client.GetResponseAsync(prompt, opts, cancellationToken) |> Async.AwaitTask
+                            let! response =
+                                client.GetResponseAsync(messages, opts, cancellationToken) |> Async.AwaitTask
 
-                        return response, response.Text |> Text.normalizeWhitespace
-                    }
+                            return response, response.Text |> Text.normalizeWhitespace
+                        }
 
-                let maxOutputTokens = roleMaxTokens Answer 900
-                let! response, answer = answerAttempt maxOutputTokens
+                    let maxOutputTokens = roleMaxTokens Answer 2500
+                    let! response, answer = answerAttempt maxOutputTokens
 
-                if isTokenLimitFinish response then
-                    report
-                        $"Answer model hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {responseDiagnostics response}."
-
-                    return tokenLimitFallback maxOutputTokens
-                elif not (String.IsNullOrWhiteSpace answer) then
-                    return answer
-                else
-                    report
-                        $"Answer model returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics response}."
-
-                    let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
-                    let! retryResponse, retryAnswer = answerAttempt retryMaxOutputTokens
-
-                    if isTokenLimitFinish retryResponse then
+                    if isTokenLimitFinish response then
                         report
-                            $"Answer model retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+                            $"Answer model hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {responseDiagnostics response}."
 
-                        return tokenLimitFallback retryMaxOutputTokens
-                    elif not (String.IsNullOrWhiteSpace retryAnswer) then
-                        report
-                            $"Answer model retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responseDiagnostics retryResponse}."
-
-                        return retryAnswer
+                        return
+                            { answer = tokenLimitFallback maxOutputTokens
+                              observations = [] }
+                    elif not (String.IsNullOrWhiteSpace answer) then
+                        return { answer = answer; observations = [] }
                     else
                         report
-                            $"Answer model retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+                            $"Answer model returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics response}."
 
-                        return emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                        let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
+                        let! retryResponse, retryAnswer = answerAttempt retryMaxOutputTokens
+
+                        if isTokenLimitFinish retryResponse then
+                            report
+                                $"Answer model retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+
+                            return
+                                { answer = tokenLimitFallback retryMaxOutputTokens
+                                  observations = [] }
+                        elif not (String.IsNullOrWhiteSpace retryAnswer) then
+                            report
+                                $"Answer model retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responseDiagnostics retryResponse}."
+
+                            return
+                                { answer = retryAnswer
+                                  observations = [] }
+                        else
+                            report
+                                $"Answer model retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
+
+                            return
+                                { answer = emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                                  observations = [] }
         }
 
     let applyWriteback (snapshot: TranscriptSnapshot) (answer: string) =
@@ -675,6 +1400,10 @@ type QaSession(options: QaSessionOptions) =
                 |> Task.WhenAll
 
             catalog <- QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
+
+            answerConversation <-
+                { previousResponseId = None
+                  items = [] }
 
             for log in catalog.logs do
                 report log
@@ -727,8 +1456,20 @@ type QaSession(options: QaSessionOptions) =
             let totalSw = Stopwatch.StartNew()
             let snapshot = createSnapshot request
 
+            blackboard <- blackboard |> Blackboard.add (BlackboardRecords.transcript snapshot)
+
+            request.realtimeJudgement
+            |> Option.iter (fun judgement ->
+                blackboard <-
+                    blackboard
+                    |> Blackboard.add (BlackboardRecords.realtimeJudgement snapshot.turnId judgement))
+
             let decision =
                 memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
+
+            blackboard <-
+                blackboard
+                |> Blackboard.add (BlackboardRecords.recallDecision snapshot.turnId decision)
 
             let memoryTask =
                 task {
@@ -751,27 +1492,56 @@ type QaSession(options: QaSessionOptions) =
                 }
 
             let plannerSw = Stopwatch.StartNew()
-            let plannedTools = deterministicPlan catalog snapshot.text
-            let! llmTools = runToolPlanner catalog snapshot.text cancellationToken |> Async.StartAsTask
+
+            let! plannedTools, llmTools =
+                task {
+                    match options.answerTransport with
+                    | Some _ -> return [], []
+                    | None ->
+                        let plannedTools = deterministicPlan catalog snapshot.text
+                        let! llmTools = runToolPlanner catalog snapshot.text cancellationToken |> Async.StartAsTask
+                        return plannedTools, llmTools
+                }
+
             plannerSw.Stop()
 
+            let allPlannedTools = plannedTools @ llmTools
+
+            blackboard <-
+                blackboard
+                |> Blackboard.addMany (
+                    allPlannedTools
+                    |> List.map (plannedToolSummary >> BlackboardRecords.plannedTool snapshot.turnId)
+                )
+
             let toolSw = Stopwatch.StartNew()
-            let! observations = invokeTools (plannedTools @ llmTools) cancellationToken |> Async.StartAsTask
+
+            let! observations =
+                match options.answerTransport with
+                | Some _ -> Task.FromResult []
+                | None -> invokeTools allPlannedTools cancellationToken |> Async.StartAsTask
+
             toolSw.Stop()
 
             let! memoryHits, memoryElapsedMs = memoryTask
             let! chunks, sourceRetrievalElapsedMs = sourceTask
 
-            for observation in observations do
-                blackboard.Add observation
+            blackboard <-
+                blackboard
+                |> Blackboard.addMany (memoryHits |> List.map (BlackboardRecords.memoryEvidence snapshot.turnId))
+                |> Blackboard.addMany (chunks |> List.map (BlackboardRecords.sourceEvidence snapshot.turnId))
+                |> Blackboard.addMany (observations |> List.map (BlackboardRecords.toolObservation snapshot.turnId))
 
             let answerSw = Stopwatch.StartNew()
 
-            let! answer =
+            let! answerResult =
                 answerWithModel snapshot decision memoryHits chunks observations cancellationToken
                 |> Async.StartAsTask
 
             answerSw.Stop()
+
+            let answer = answerResult.answer
+            let allObservations = observations @ answerResult.observations
 
             let writebackSw = Stopwatch.StartNew()
             applyWriteback snapshot answer
@@ -780,18 +1550,25 @@ type QaSession(options: QaSessionOptions) =
 
             if options.logTimings then
                 report
-                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; planner={plannerSw.Elapsed.TotalMilliseconds:F0}ms; tools={toolSw.Elapsed.TotalMilliseconds:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={observations.Length}."
+                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; planner={plannerSw.Elapsed.TotalMilliseconds:F0}ms; tools={toolSw.Elapsed.TotalMilliseconds:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}."
 
-            return
+            let qaAnswer =
                 { turnId = request.turnId
                   answer = answer
                   model = options.answerModelId
                   context = chunks
                   sourceRetrievalElapsedMs = sourceRetrievalElapsedMs
                   inventory = contextSources ()
-                  toolObservations = observations
+                  toolObservations = allObservations
                   timedOut = false
                   createdAt = DateTimeOffset.UtcNow }
+
+            blackboard <-
+                blackboard
+                |> Blackboard.add (BlackboardRecords.answerCandidate snapshot.turnId answer)
+                |> Blackboard.add (BlackboardRecords.finalAnswer qaAnswer)
+
+            return qaAnswer
         }
 
     interface IAsyncDisposable with
@@ -805,6 +1582,8 @@ type QaSession(options: QaSessionOptions) =
                   options.clients.answerGenerator ]
                 |> List.choose id do
                 client.Dispose()
+
+            answerConnection |> Option.iter FsResponses.ResponsesWebSocket.dispose
 
             ValueTask()
 

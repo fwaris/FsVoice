@@ -1,0 +1,243 @@
+module Tests
+
+open FsResponses
+open System
+open System.IO
+open System.Text.Json
+open System.Threading.Tasks
+open Xunit
+
+let dmp (s: string) = System.Diagnostics.Debug.WriteLine s
+
+let runT (t: Task<'t>) = t.Result
+
+let image =
+    lazy (JsonSerializer.Deserialize<string>(File.ReadAllText "TestImage.txt"))
+
+let private hasProperty (name: string) (element: JsonElement) : bool =
+    let mutable property = Unchecked.defaultof<JsonElement>
+    element.TryGetProperty(name, &property)
+
+let private firstArrayItem (element: JsonElement) : JsonElement = element.EnumerateArray() |> Seq.head
+
+let private parseObject (json: string) : JsonElement =
+    use document = JsonDocument.Parse json
+    document.RootElement.Clone()
+
+let createRequest () =
+    { Request.Default with
+        input =
+            [ IOitem.Message
+                  { Message.Default with
+                      content =
+                          [ Content.Input_text {| text = "Describe the image" |}
+                            Content.Input_image {| image_url = image.Value |} ] } ]
+        store = false
+        model = Models.gpt_41_nano
+        metadata = [ "CORR_ID", "1" ] |> Map.ofList |> Some }
+
+[<Fact>]
+let ``response create websocket request omits http-only fields`` () =
+    let req =
+        WebSocketCreateRequest.ofText Models.gpt_5 "Say hello from WebSocket mode."
+
+    let root: JsonElement = req |> ResponsesWebSocket.serializeCreate |> parseObject
+
+    Assert.Equal("response.create", root.GetProperty("type").GetString())
+    Assert.Equal(Models.gpt_5, root.GetProperty("model").GetString())
+    Assert.False(hasProperty "stream" root)
+    Assert.False(hasProperty "background" root)
+    Assert.False(hasProperty "previous_response_id" root)
+    Assert.False(hasProperty "instructions" root)
+
+    let firstInput = root.GetProperty("input") |> firstArrayItem
+    Assert.Equal("message", firstInput.GetProperty("type").GetString())
+
+    let firstContent = firstInput.GetProperty("content") |> firstArrayItem
+    Assert.Equal("input_text", firstContent.GetProperty("type").GetString())
+    Assert.Equal("Say hello from WebSocket mode.", firstContent.GetProperty("text").GetString())
+
+[<Fact>]
+let ``websocket continuation request includes previous response and function output`` () =
+    let request =
+        WebSocketCreateRequest.Default
+        |> WebSocketCreateRequest.continueWith
+            "resp_123"
+            [ IOitem.Function_call_output
+                  { call_id = "call_123"
+                    output = """{"ok":true}""" } ]
+
+    let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
+    let firstInput = root.GetProperty("input") |> firstArrayItem
+
+    Assert.Equal("response.create", root.GetProperty("type").GetString())
+    Assert.Equal("resp_123", root.GetProperty("previous_response_id").GetString())
+    Assert.Equal("function_call_output", firstInput.GetProperty("type").GetString())
+    Assert.Equal("call_123", firstInput.GetProperty("call_id").GetString())
+
+[<Fact>]
+let ``warmup request sets generate false`` () =
+    let request =
+        WebSocketCreateRequest.warmup
+            Models.gpt_5
+            (Some "You are a careful assistant.")
+            (Some
+                [ Tool.Function
+                      { Function.Default with
+                          name = "lookup" } ])
+
+    let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
+
+    Assert.False(root.GetProperty("generate").GetBoolean())
+    Assert.Equal("You are a careful assistant.", root.GetProperty("instructions").GetString())
+
+    let firstTool = root.GetProperty("tools") |> firstArrayItem
+    Assert.Equal("function", firstTool.GetProperty("type").GetString())
+    Assert.Equal("lookup", firstTool.GetProperty("name").GetString())
+
+[<Fact>]
+let ``text delta event deserializes to typed event`` () =
+    let json =
+        @"{""type"":""response.output_text.delta"",""sequence_number"":7,""response_id"":""resp_123"",""item_id"":""msg_123"",""output_index"":0,""content_index"":0,""delta"":""hel""}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.OutputTextDelta event ->
+        Assert.Equal(7, event.sequence_number.Value)
+        Assert.Equal("resp_123", event.response_id.Value)
+        Assert.Equal("hel", event.delta)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``function call output item event deserializes to typed function call`` () =
+    let json =
+        @"{""type"":""response.output_item.added"",""sequence_number"":2,""response_id"":""resp_123"",""output_index"":0,""item"":{""type"":""function_call"",""id"":""fc_123"",""call_id"":""call_123"",""name"":""lookup"",""arguments"":""""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.OutputItemAdded event ->
+        match event.item with
+        | IOitem.Function_call call ->
+            Assert.Equal("fc_123", call.id)
+            Assert.Equal("call_123", call.call_id)
+            Assert.Equal("lookup", call.name)
+        | other -> failwith $"Unexpected item: {other}"
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``completed response event keeps typed response output`` () =
+    let json =
+        @"{""type"":""response.completed"",""sequence_number"":12,""response"":{""id"":""resp_123"",""object"":""response"",""created_at"":1710000000,""status"":""completed"",""error"":null,""incomplete_details"":null,""instructions"":null,""max_output_tokens"":null,""model"":""gpt-5"",""metadata"":{""CORR_ID"":""42""},""output"":[{""type"":""message"",""id"":""msg_123"",""status"":""completed"",""role"":""assistant"",""content"":[{""type"":""output_text"",""text"":""Hello world"",""annotations"":null}]}],""parallel_tool_calls"":true,""previous_response_id"":null,""reasoning"":null,""store"":false,""temperature"":1,""text"":null,""tool_choice"":""auto"",""tools"":[],""top_p"":1,""truncation"":""auto"",""usage"":{""input_tokens"":10,""output_tokens"":2,""total_tokens"":12,""input_tokens_details"":null,""output_tokens_details"":null},""user"":null}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.ResponseCompleted event ->
+        Assert.Equal("resp_123", event.response.id)
+        Assert.Equal(Some "42", event.response.metadata |> Option.bind (Map.tryFind "CORR_ID"))
+        Assert.Equal("Hello world", ResponseStream.outputText [ ResponseStreamEvent.ResponseCompleted event ])
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``error event deserializes to typed error`` () =
+    let json =
+        @"{""type"":""error"",""sequence_number"":4,""status"":404,""error"":{""code"":""previous_response_not_found"",""message"":""Previous response not found."",""type"":""invalid_request_error"",""param"":""previous_response_id""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.Error event ->
+        Assert.Equal(404, event.status.Value)
+        Assert.Equal("previous_response_not_found", event.error.code)
+        Assert.Equal(Some "previous_response_id", event.error.param)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``unknown stream event is preserved with raw payload`` () =
+    let json = @"{""type"":""response.new_future_event"",""value"":123}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.Unknown event ->
+        Assert.Equal("response.new_future_event", event.eventType)
+        Assert.Equal(123, event.raw.GetProperty("value").GetInt32())
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``legacy request message serialization still uses Responses item tags`` () =
+    let root: JsonElement =
+        createRequest ()
+        |> fun req -> JsonSerializer.Serialize(req, Api.serOpts) |> parseObject
+
+    let firstInput = root.GetProperty("input") |> firstArrayItem
+
+    let content: JsonElement list =
+        firstInput.GetProperty("content").EnumerateArray() |> Seq.toList
+
+    Assert.Equal("message", firstInput.GetProperty("type").GetString())
+    Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_text")
+    Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_image")
+
+[<Fact(Skip = "Live OpenAI HTTP smoke test; enable manually when OPENAI_API_KEY is available.")>]
+let ``Create a response`` () =
+    task {
+        let req = createRequest ()
+        let! resp = Api.create req (Api.defaultClient ())
+        let text = FsResponses.RUtils.outputText resp
+        dmp text
+        let corrId = resp.metadata |> Option.bind (Map.tryFind "CORR_ID")
+        Assert.Equal(Some "1", corrId)
+    }
+
+[<Fact(Skip = "Live OpenAI HTTP smoke test; enable manually when OPENAI_API_KEY is available.")>]
+let ``List stored items`` () =
+    let req = { createRequest () with store = true }
+    let resp = Api.create req (Api.defaultClient ()) |> runT
+
+    let msgIds1 =
+        resp.output
+        |> List.choose (function
+            | IOitem.Message m -> m.id
+            | _ -> None)
+
+    let req2 =
+        { Request.Default with
+            previous_response_id = Some resp.id
+            input =
+                [ IOitem.Message
+                      { Message.Default with
+                          content = [ Content.Input_text {| text = "Is there a search box visible in the image" |} ] } ]
+            store = true
+            metadata = [ "CORR_ID", "2" ] |> Map.ofList |> Some }
+
+    let resp2 = Api.create req2 (Api.defaultClient ()) |> runT
+    let text = FsResponses.RUtils.outputText resp2
+    dmp text
+    let expectedMsgIds = set msgIds1
+    let corrId = resp2.metadata |> Option.bind (Map.tryFind "CORR_ID")
+
+    let listResp =
+        Api.list
+            { ListRequest.Create resp2.id with
+                order = Some Asc }
+            (Api.defaultClient ())
+        |> runT
+
+    dmp (sprintf "List response: %A" listResp)
+
+    let listIds =
+        listResp.data
+        |> List.choose (function
+            | IOitem.Message m -> m.id
+            | _ -> None)
+        |> set
+
+    let accountedFor = Set.intersect expectedMsgIds listIds
+    Assert.Equal(Some "2", corrId)
+    Assert.Equal<Set<string>>(expectedMsgIds, accountedFor)
+
+[<Fact(Skip = "Live OpenAI HTTP smoke test; enable manually when OPENAI_API_KEY is available.")>]
+let ``Create and delete a response`` () =
+    task {
+        let req = { createRequest () with store = true }
+        let! resp = Api.create req (Api.defaultClient ())
+        let text = FsResponses.RUtils.outputText resp
+        dmp text
+        let corrId = resp.metadata |> Option.bind (Map.tryFind "CORR_ID")
+        let! deleteResult = Api.delete resp.id (Api.defaultClient ())
+        Assert.Equal(Some "1", corrId)
+        Assert.True(deleteResult.deleted, "The stored response should be deleted.")
+    }

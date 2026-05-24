@@ -3,7 +3,7 @@ namespace Speak2Docs
 open System.Threading
 open System.Threading.Channels
 open System.Text.Json
-open FsVoice.Types
+open FsVoice.Platform
 open Microsoft.Maui.ApplicationModel
 open Speak2Docs.WorkFlow
 open RTOpenAI.Api

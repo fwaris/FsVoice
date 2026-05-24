@@ -6,7 +6,7 @@ open System.Threading
 open System.Threading.Channels
 open FSharp.Control
 open Fabulous
-open FsVoice.Types
+open FsVoice.Platform
 open Speak2Docs.WorkFlow
 open Microsoft.Extensions.AI
 open Microsoft.Maui.ApplicationModel

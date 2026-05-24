@@ -21,8 +21,8 @@
     <Compile Include="ContextProviders.fs" />
     <Compile Include="DurableMemory.fs" />
     <Compile Include="MemoryService.fs" />
+    <Compile Include="Blackboard.fs" />
     <Compile Include="Tools.fs" />
-    <Compile Include="VoicePluginAdapter.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
 
@@ -33,8 +33,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.QA.Abstractions\FsVoice.QA.Abstractions.fsproj" />
-    <ProjectReference Include="..\FsVoice.Abstractions\FsVoice.Abstractions.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

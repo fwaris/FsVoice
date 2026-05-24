@@ -7,7 +7,7 @@ open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.AspNetCore.Routing
 
-type BridgeSessionFactory = BridgeSessionId -> BridgeSessionOptions
+type BridgeSessionFactory<'ToHost, 'FromHost> = BridgeSessionId -> BridgeSessionOptions<'ToHost, 'FromHost>
 
 type BridgeStartResponse = { sessionId: string }
 
@@ -21,10 +21,12 @@ module BridgeClientEventDto =
     let toDomain (dto: BridgeClientEventDto) =
         let kind =
             match dto.kind.Trim().ToLowerInvariant() with
-            | "browser" -> BrowserEvent
-            | "webrtc" -> WebRtcSignal
-            | "realtime" -> RealtimeServerEvent
-            | "close" -> Close
+            | "browser" -> BridgeClientEventKind.BrowserEvent
+            | "webrtc" -> BridgeClientEventKind.WebRtcSignal
+            | "realtime"
+            | "voice" -> BridgeClientEventKind.RealtimeServerEvent
+            | "host" -> BridgeClientEventKind.HostMessage
+            | "close" -> BridgeClientEventKind.Close
             | value -> invalidArg (nameof dto.kind) $"Unsupported bridge client event kind: {value}"
 
         { eventId =
@@ -38,10 +40,10 @@ module BridgeClientEventDto =
           receivedAt = DateTimeOffset.UtcNow }
 
 module BridgeEndpoints =
-    let map
+    let map<'ToHost, 'FromHost>
         (prefix: string)
-        (store: BridgeSessionStore)
-        (createOptions: BridgeSessionFactory)
+        (store: BridgeSessionStore<'ToHost, 'FromHost>)
+        (createOptions: BridgeSessionFactory<'ToHost, 'FromHost>)
         (app: IEndpointRouteBuilder)
         =
         app.MapPost(

@@ -4,7 +4,7 @@ open System
 open System.Threading
 open System.Threading.Channels
 open System.Threading.Tasks
-open FsVoice.Types
+open FsVoice.Platform
 open global.RTFlow
 
 /// Adapts an RTFlow flow to the public typed voice session contract.

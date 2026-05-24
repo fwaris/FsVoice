@@ -2,7 +2,7 @@ namespace FsVoice.Hosting.AspNetCore
 
 open System
 open System.Text.Json
-open FsVoice
+open FsVoice.Platform
 
 type BridgeSessionId = private BridgeSessionId of string
 
@@ -22,6 +22,7 @@ type BridgeClientEventKind =
     | BrowserEvent
     | WebRtcSignal
     | RealtimeServerEvent
+    | HostMessage
     | Close
 
 type BridgeClientEvent =
@@ -32,8 +33,8 @@ type BridgeClientEvent =
       receivedAt: DateTimeOffset }
 
 type BridgeServerEventKind =
-    | RuntimeEvent
-    | RealtimeClientEvent
+    | VoiceEvent
+    | HostMessage
     | SessionClosed
 
 type BridgeServerEvent =
@@ -43,30 +44,57 @@ type BridgeServerEvent =
       payload: JsonElement option
       createdAt: DateTimeOffset }
 
-type BridgeSessionOptions =
+type BridgeSessionOptions<'ToHost, 'FromHost> =
     { sessionId: BridgeSessionId
-      plugin: IVoicePlugin
-      hostContext: VoicePluginHostContext
-      runtimeOptions: FsVoice.Core.VoiceRuntimeOptions option }
+      orchestration: IVoiceOrchestration<'ToHost, 'FromHost>
+      context: VoiceOrchestrationContext
+      hostMessageCodec: HostMessageCodec<'ToHost, 'FromHost> option }
 
 module BridgeEvents =
-    let fromRuntimeEvent (event: VoiceEvent) =
-        { eventId = event.correlationId |> Option.defaultValue (Guid.NewGuid().ToString("N"))
-          kind = RuntimeEvent
-          eventType = event.name
-          payload = event.payload
-          createdAt = event.createdAt }
+    let private stringProperty (name: string) (json: JsonElement) =
+        let mutable property = Unchecked.defaultof<JsonElement>
 
-    let fromRealtimeClientEvent (event: VoiceClientEvent) =
-        { eventId = event.eventId
-          kind = RealtimeClientEvent
-          eventType = event.eventType
-          payload = event.payload
+        if
+            json.ValueKind = JsonValueKind.Object
+            && json.TryGetProperty(name, &property)
+            && property.ValueKind = JsonValueKind.String
+        then
+            property.GetString() |> Option.ofObj
+        else
+            None
+
+    let private clonedPayload (payload: JsonElement option) =
+        payload |> Option.map (fun json -> json.Clone())
+
+    let rawClientPayload (event: BridgeClientEvent) =
+        match event.payload with
+        | Some payload -> payload.Clone()
+        | None ->
+            JsonSerializer.SerializeToElement(
+                {| event_id = event.eventId
+                   ``type`` = event.eventType |}
+            )
+
+    let fromVoiceEvent (json: JsonElement) =
+        { eventId =
+            json
+            |> stringProperty "event_id"
+            |> Option.defaultValue (Guid.NewGuid().ToString("N"))
+          kind = BridgeServerEventKind.VoiceEvent
+          eventType = json |> stringProperty "type" |> Option.defaultValue "voice.event"
+          payload = Some(json.Clone())
+          createdAt = DateTimeOffset.UtcNow }
+
+    let fromHostMessage encoded =
+        { eventId = Guid.NewGuid().ToString("N")
+          kind = BridgeServerEventKind.HostMessage
+          eventType = "host.message"
+          payload = Some(encoded)
           createdAt = DateTimeOffset.UtcNow }
 
     let closed sessionId =
         { eventId = Guid.NewGuid().ToString("N")
-          kind = SessionClosed
+          kind = BridgeServerEventKind.SessionClosed
           eventType = "bridge.session.closed"
           payload =
             JsonSerializer.SerializeToElement {| sessionId = BridgeSessionId.value sessionId |}

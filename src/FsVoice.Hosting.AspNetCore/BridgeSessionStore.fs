@@ -1,17 +1,15 @@
 namespace FsVoice.Hosting.AspNetCore
 
-open System
 open System.Collections.Concurrent
 open System.Threading
-open System.Threading.Tasks
 
-type BridgeSessionStore() =
-    let sessions = ConcurrentDictionary<string, BridgeSession>()
+type BridgeSessionStore<'ToHost, 'FromHost>() =
+    let sessions = ConcurrentDictionary<string, BridgeSession<'ToHost, 'FromHost>>()
 
-    member _.CreateAsync(options: BridgeSessionOptions, cancellationToken: CancellationToken) =
+    member _.CreateAsync(options: BridgeSessionOptions<'ToHost, 'FromHost>, cancellationToken: CancellationToken) =
         task {
             let key = BridgeSessionId.value options.sessionId
-            let session = new BridgeSession(options)
+            let session = new BridgeSession<'ToHost, 'FromHost>(options)
 
             if sessions.TryAdd(key, session) then
                 do! session.StartAsync cancellationToken
@@ -28,7 +26,7 @@ type BridgeSessionStore() =
     member _.RemoveAsync(sessionId: BridgeSessionId) =
         task {
             match sessions.TryRemove(BridgeSessionId.value sessionId) with
-            | true, session -> do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
+            | true, session -> do! (session :> System.IAsyncDisposable).DisposeAsync().AsTask()
             | false, _ -> ()
         }
 
