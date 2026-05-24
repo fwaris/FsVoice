@@ -299,7 +299,11 @@ type QaSession(options: QaSessionOptions) =
             | _ -> None)
 
     let responsesDiagnostics events =
-        let eventNames = events |> List.map responseEventName |> String.concat ","
+        let eventNames =
+            events
+            |> List.countBy responseEventName
+            |> List.map (fun (name, count) -> if count = 1 then name else $"{name}x{count}")
+            |> String.concat ","
 
         let response = responseTerminalResponse events
 
@@ -464,6 +468,7 @@ type QaSession(options: QaSessionOptions) =
                     None
             max_output_tokens = Some maxOutputTokens
             previous_response_id = previousResponseId
+            generate = Some true
             reasoning = answerReasoning answerConfig
             store = Some false
             temperature = answerTemperature answerConfig
@@ -936,9 +941,7 @@ type QaSession(options: QaSessionOptions) =
                 return! createAndCollect request cancellationToken
             | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
                 let! connection = liveAnswerConnection config cancellationToken
-                do! FsResponses.ResponsesWebSocket.sendCreate connection request cancellationToken
-                let! event = FsResponses.ResponsesWebSocket.readEvent connection cancellationToken
-                return event |> Option.toList
+                return! FsResponses.ResponsesWebSocket.createAndCollect connection request cancellationToken
             | None -> return []
         }
 
@@ -1245,9 +1248,6 @@ type QaSession(options: QaSessionOptions) =
                     { answer = answer
                       observations = toolObservations }
             else
-                report
-                    $"Answer Responses WebSocket returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics events}."
-
                 let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
                 let! retryEvents, retryAnswer, retryToolObservations = answerAttempt retryMaxOutputTokens false
 
@@ -1268,15 +1268,12 @@ type QaSession(options: QaSessionOptions) =
                 elif not (String.IsNullOrWhiteSpace retryAnswer) then
                     updateAnswerConversation userItem retryAnswer retryEvents
 
-                    report
-                        $"Answer Responses WebSocket retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responsesDiagnostics retryEvents}."
-
                     return
                         { answer = retryAnswer
                           observations = retryToolObservations }
                 else
                     report
-                        $"Answer Responses WebSocket retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responsesDiagnostics retryEvents}."
+                        $"Answer Responses WebSocket returned empty text after retry: model={answerConfig.modelId}; initialMaxOutputTokens={maxOutputTokens}; retryMaxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; initial=({responsesDiagnostics events}); retry=({responsesDiagnostics retryEvents})."
 
                     return
                         { answer = emptyAnswerFallbackWithLimit retryMaxOutputTokens

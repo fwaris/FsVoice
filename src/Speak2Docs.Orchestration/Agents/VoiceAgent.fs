@@ -74,6 +74,7 @@ module VoiceAgent =
           config: VoicePlugInConfig
           realtimeSession: Session
           transcriptByItem: Map<string, string>
+          lastFinalUserTranscript: TranscriptSnapshot option
           revision: int
           pendingToolCalls: Map<string, VoiceToolCall>
           completedToolTurns: Set<string>
@@ -223,7 +224,9 @@ module VoiceAgent =
         let response =
             { Response.Default with
                 instructions = Include(Some responseInstructions)
-                output_modalities = Include(Some [ "audio" ]) }
+                output_modalities = Include(Some [ "audio" ])
+                tool_choice = Include(Some "none")
+                tools = Include(Some []) }
 
         { ResponseCreate.Default with
             event_id = Utils.newId ()
@@ -292,6 +295,25 @@ module VoiceAgent =
           isFinal = isFinal
           receivedAt = DateTimeOffset.UtcNow }
 
+    let private userSnapshotForToolCall (toolQuestion: string) (snapshot: TranscriptSnapshot) =
+        let text =
+            if String.IsNullOrWhiteSpace toolQuestion then
+                snapshot.text
+            else
+                toolQuestion
+
+        { snapshot with
+            text = text
+            isFinal = true }
+
+    let private acknowledgeToolCallWithoutSpeech (st: VoiceState) callId output =
+        ContentFunctionCallOutput.Create callId output
+        |> createFunctionOutputEvent
+        |> SendClientEvent
+        |> enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY
+
+        st
+
     let private createMemoryRequest config snapshot realtimeJudgement cancellationToken =
         { requestId = Utils.newId ()
           snapshot = snapshot
@@ -351,6 +373,12 @@ module VoiceAgent =
     let private stringIsAny values value =
         values
         |> List.exists (fun candidate -> String.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))
+
+    let private containsIgnoreCase (needle: string) (value: string) =
+        value.Contains(needle, StringComparison.OrdinalIgnoreCase)
+
+    let private isActiveResponseInProgressError message =
+        containsIgnoreCase "active response in progress" message
 
     let private memoryActionFromLegacy (dto: RealtimeJudgementDto) =
         match dto.memory_need with
@@ -441,37 +469,45 @@ module VoiceAgent =
 
         match fc.name with
         | ToolNames.QUERY_ORACLE ->
-            let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
-            let cancellation = new CancellationTokenSource()
-            cancellation.CancelAfter st.config.functionCallTimeout
+            match st.lastFinalUserTranscript with
+            | None -> acknowledgeToolCallWithoutSpeech st fc.call_id "No completed user question has been heard yet."
+            | Some userSnapshot when
+                (st.pendingToolCalls |> Map.containsKey userSnapshot.turnId)
+                || st.completedToolTurns.Contains userSnapshot.turnId
+                ->
+                acknowledgeToolCallWithoutSpeech st fc.call_id "That user question is already being handled."
+            | Some userSnapshot ->
+                let snapshot = userSnapshotForToolCall question userSnapshot
+                let cancellation = new CancellationTokenSource()
+                cancellation.CancelAfter st.config.functionCallTimeout
 
-            let call =
-                { name = fc.name
-                  callId = fc.call_id
-                  content = fc.arguments
-                  snapshot = snapshot
-                  answerMaxOutputTokens = st.config.answerMaxOutputTokens
-                  cancellation = cancellation
-                  timeout = st.config.functionCallTimeout
-                  task =
-                    TaskCompletionSource<ContentFunctionCallOutput>(TaskCreationOptions.RunContinuationsAsynchronously) }
+                let call =
+                    { name = fc.name
+                      callId = fc.call_id
+                      content = fc.arguments
+                      snapshot = snapshot
+                      answerMaxOutputTokens = st.config.answerMaxOutputTokens
+                      cancellation = cancellation
+                      timeout = st.config.functionCallTimeout
+                      task =
+                        TaskCompletionSource<ContentFunctionCallOutput>(
+                            TaskCreationOptions.RunContinuationsAsynchronously
+                        ) }
 
-            let memoryRequest =
-                createMemoryRequest st.config snapshot realtimeJudgement cancellation.Token
+                let memoryRequest =
+                    createMemoryRequest st.config snapshot realtimeJudgement cancellation.Token
 
-            enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
+                enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
 
-            st.bus.PostToAgent(
-                Ag_Log
-                    $"Oracle tool call started: question_chars={question.Length} args_chars={fc.arguments.Length} question='{Speak2Docs.Text.truncate 120 question}'"
-            )
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"Oracle tool call started: question_chars={snapshot.text.Length} args_chars={fc.arguments.Length} question='{Speak2Docs.Text.truncate 120 snapshot.text}'"
+                )
 
-            st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
-            st.bus.PostToAgent(Ag_MemoryRequested memoryRequest)
+                st.bus.PostToAgent(Ag_MemoryRequested memoryRequest)
 
-            { st with
-                revision = revision
-                pendingToolCalls = st.pendingToolCalls |> Map.add snapshot.turnId call }
+                { st with
+                    pendingToolCalls = st.pendingToolCalls |> Map.add snapshot.turnId call }
         | _ ->
             let reply = $"The tool '{fc.name}' is not available in this FsVoice session."
             let result = ContentFunctionCallOutput.Create fc.call_id reply
@@ -544,12 +580,12 @@ module VoiceAgent =
             |> enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY
 
             st.bus.PostToAgent(
-                Ag_Log $"Oracle tool output ready for call {callId}; output_chars={output.Length}; scheduling speech."
+                Ag_Log
+                    $"Oracle tool output ready for call {callId}; output_chars={output.Length}; waiting for realtime acknowledgement before speech."
             )
 
             { st with
-                pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }
-            |> tryScheduleSpeak
+                pendingSpeakByCallId = st.pendingSpeakByCallId |> Map.add callId output }
 
     let private acknowledgeFunctionOutput (st: VoiceState) (eventName: string) (item: ConversationItem) =
         match item with
@@ -626,6 +662,7 @@ module VoiceAgent =
                 return
                     { st with
                         userSpeechState = Speaking
+                        lastFinalUserTranscript = None
                         pendingGreeting = None }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
                 return { st with userSpeechState = Silent } |> tryScheduleAudio
@@ -643,14 +680,18 @@ module VoiceAgent =
             | ServerEvent.ConversationItemInputAudioTranscriptionCompleted ev ->
                 let text = Speak2Docs.Text.normalizeWhitespace ev.transcript
                 st.bus.PostToAgent(Ag_Log $"User: {text}")
-                let revision, _ = makeTranscriptSnapshot st ev.item_id text true
+                let revision, snapshot = makeTranscriptSnapshot st ev.item_id text true
+                st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
 
                 return
                     { st with
                         revision = revision
+                        lastFinalUserTranscript = Some snapshot
                         transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
             | ServerEvent.Error e ->
-                st.bus.PostToAgent(Ag_Log $"Realtime API error: {e.error.message}")
+                if not (isActiveResponseInProgressError e.error.message) then
+                    st.bus.PostToAgent(Ag_Log $"Realtime API error: {e.error.message}")
+
                 return st
             | ServerEvent.EventHandlingError(t, msg, _) ->
                 st.bus.PostToAgent(Ag_Log $"Realtime event handling error for {t}: {msg}")
@@ -701,6 +742,7 @@ module VoiceAgent =
               config = config
               realtimeSession = Session.Default
               transcriptByItem = Map.empty
+              lastFinalUserTranscript = None
               revision = 0
               pendingToolCalls = Map.empty
               completedToolTurns = Set.empty

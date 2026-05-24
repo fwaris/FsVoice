@@ -273,6 +273,8 @@ let private responsesCompletedEvent id text =
                   role = "assistant"
                   content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] } ]
 
+let private responsesCompletedEmptyEvent id = responsesCompletedEventWithOutput id []
+
 let private responsesFunctionCallEvent id callId name arguments =
     responsesCompletedEventWithOutput
         id
@@ -729,6 +731,7 @@ let ``qa session answers through responses websocket transport`` () =
 
         Assert.Equal("gpt-4.1-mini", captured[1].model)
         Assert.Equal(Some 123, captured[1].max_output_tokens)
+        Assert.Equal(Some true, captured[1].generate)
         Assert.Equal(Some 0.1f, captured[1].temperature)
         Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
         Assert.Equal(None, captured[1].instructions)
@@ -783,10 +786,12 @@ let ``qa session websocket answer uses previous response id after first turn`` (
         Assert.Contains("source_inventory", responseToolNames captured[0])
         Assert.Empty(captured[0].input)
         Assert.Equal(Some "resp_bootstrap", captured[1].previous_response_id)
+        Assert.Equal(Some true, captured[1].generate)
         Assert.Single(captured[1].input) |> ignore
         Assert.Equal(None, captured[1].tools)
         Assert.Contains("first question", inputTextFromResponseRequest captured[1])
         Assert.Equal(Some "resp_1", captured[2].previous_response_id)
+        Assert.Equal(Some true, captured[2].generate)
         Assert.Single(captured[2].input) |> ignore
         Assert.Equal(None, captured[2].tools)
         Assert.Contains("second question", inputTextFromResponseRequest captured[2])
@@ -840,9 +845,12 @@ let ``qa session websocket answer replays append only history when previous resp
         Assert.Equal(5, captured.Count)
         Assert.Equal(Some false, captured[0].generate)
         Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
+        Assert.Equal(Some true, captured[1].generate)
         Assert.Equal(Some "resp_1", captured[2].previous_response_id)
+        Assert.Equal(Some true, captured[2].generate)
         Assert.Equal(Some false, captured[3].generate)
         Assert.Equal(Some "resp_bootstrap_2", captured[4].previous_response_id)
+        Assert.Equal(Some true, captured[4].generate)
 
         Assert.True(
             captured[4].input.Length >= 3,
@@ -904,10 +912,12 @@ let ``qa session websocket dispatches model requested tools`` () =
             Assert.True((expectedRequired = (tool.parameters.required |> List.sort)))
 
         Assert.Equal(Some "resp_bootstrap_tools", captured[1].previous_response_id)
+        Assert.Equal(Some true, captured[1].generate)
         Assert.Equal(None, captured[1].tools)
         Assert.Single(captured[1].input) |> ignore
 
         Assert.Equal(Some "resp_tool_call", captured[2].previous_response_id)
+        Assert.Equal(Some true, captured[2].generate)
         Assert.Equal(None, captured[2].tools)
 
         let output = Assert.Single(functionOutputsFromResponseRequest captured[2])
@@ -917,6 +927,58 @@ let ``qa session websocket dispatches model requested tools`` () =
         let observation = Assert.Single(answer.toolObservations)
         Assert.Equal("source_inventory", observation.toolName)
         Assert.Contains("Fake Context inventory.", observation.content)
+    }
+
+[<Fact>]
+let ``qa session websocket hides transient empty response diagnostics when retry succeeds`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-empty"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable callNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                callNumber <- callNumber + 1
+
+                match callNumber with
+                | 1 -> [ responsesCreatedEvent "resp_bootstrap_empty" ]
+                | 2 -> [ responsesCompletedEmptyEvent "resp_empty" ]
+                | _ -> [ responsesCompletedEvent "resp_retry" "retry socket answer" ])
+
+        let logs = ResizeArray<string>()
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("retry socket answer", answer.answer)
+        Assert.Equal(3, captured.Count)
+        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(Some true, captured[1].generate)
+        Assert.Equal(Some true, captured[2].generate)
+        Assert.Equal(Some 2500, captured[1].max_output_tokens)
+        Assert.Equal(Some 5000, captured[2].max_output_tokens)
+
+        Assert.False(logs |> Seq.exists (fun log -> log.Contains("returned empty text")))
+        Assert.False(logs |> Seq.exists (fun log -> log.Contains("retry succeeded")))
     }
 
 [<Fact>]

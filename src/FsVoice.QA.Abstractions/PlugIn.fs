@@ -476,7 +476,7 @@ module PlugInDefinition =
           Transcriber, ModelRoleConfig.create "gpt-4o-mini-transcribe"
           Answer,
           { ModelRoleConfig.create "gpt-5.5" with
-              maxOutputTokens = Some 900 }
+              maxOutputTokens = Some 2500 }
           Planner,
           { ModelRoleConfig.create "gpt-5-nano" with
               maxOutputTokens = Some 500 }
