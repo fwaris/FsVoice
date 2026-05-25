@@ -13,6 +13,7 @@ type BlackboardEntryKind =
     | Conflict
     | AnswerCandidate
     | FinalAnswer
+    | CompactedSummary
 
 type PlannedToolSummary =
     { pluginName: string
@@ -26,6 +27,15 @@ type BlackboardConflict =
       severity: string
       relatedRecordIds: string list }
 
+type BlackboardCompactedSummary =
+    { summary: string
+      coveredTurnIds: string list
+      coveredRecordIds: string list
+      coveredKinds: BlackboardEntryKind list
+      fromCreatedAt: DateTimeOffset option
+      toCreatedAt: DateTimeOffset option
+      originalRecordCount: int }
+
 type BlackboardEntry =
     | TranscriptEntry of TranscriptSnapshot
     | RealtimeJudgementEntry of RealtimeJudgement
@@ -37,6 +47,7 @@ type BlackboardEntry =
     | ConflictEntry of BlackboardConflict
     | AnswerCandidateEntry of string
     | FinalAnswerEntry of QaAnswer
+    | CompactedSummaryEntry of BlackboardCompactedSummary
 
 type BlackboardRecord =
     { id: string
@@ -70,6 +81,18 @@ type Blackboard =
     { records: BlackboardRecord list
       maxRecords: int }
 
+type BlackboardPrunePolicy =
+    { triggerChars: int
+      targetChars: int
+      preserveRecentTurns: int }
+
+type BlackboardPruneSelection =
+    { totalChars: int
+      targetChars: int
+      preservedTurnIds: string list
+      recordsToSummarize: BlackboardRecord list
+      recordsToDrop: BlackboardRecord list }
+
 module BlackboardEntryKind =
     let displayName =
         function
@@ -83,6 +106,7 @@ module BlackboardEntryKind =
         | Conflict -> "conflict"
         | AnswerCandidate -> "answer_candidate"
         | FinalAnswer -> "final_answer"
+        | CompactedSummary -> "compacted_summary"
 
 module Blackboard =
     let empty maxRecords =
@@ -101,6 +125,9 @@ module Blackboard =
 
     let recent maxCount board =
         board.records |> List.truncate (max 1 maxCount)
+
+    let totalTextChars board =
+        board.records |> List.sumBy (fun record -> record.text.Length)
 
     let private kindIncluded options record =
         List.isEmpty options.includeKinds
@@ -186,6 +213,116 @@ module Blackboard =
                 let text = hit.record.text |> Text.truncate 1200
                 $"[{index + 1}] {kind} score={hit.score:F2} ({reasons})\n{text}")
             |> String.concat "\n\n"
+
+    let private isBlackboardSearchObservation record =
+        match record.entry with
+        | ToolObservationEntry observation ->
+            String.Equals(observation.pluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
+            && String.Equals(observation.toolName, "blackboard_search", StringComparison.OrdinalIgnoreCase)
+        | _ -> false
+
+    let private isSummarizableForPruning record =
+        match record.kind with
+        | Transcript
+        | ToolObservation
+        | MemoryEvidence
+        | SourceEvidence
+        | Conflict
+        | FinalAnswer
+        | CompactedSummary -> not (isBlackboardSearchObservation record)
+        | _ -> false
+
+    let private isDropOnlyForPruning record =
+        match record.kind with
+        | RealtimeJudgement
+        | RecallDecision
+        | PlannedTool
+        | AnswerCandidate -> true
+        | ToolObservation -> isBlackboardSearchObservation record
+        | _ -> false
+
+    let recentTurnIds preserveRecentTurns board =
+        board.records
+        |> List.filter (fun record -> record.kind <> CompactedSummary)
+        |> List.map _.turnId
+        |> List.distinct
+        |> List.truncate (max 0 preserveRecentTurns)
+
+    let tryCreatePruneSelection policy board =
+        let totalChars = totalTextChars board
+
+        if totalChars <= policy.triggerChars then
+            None
+        else
+            let preservedTurnIds = recentTurnIds policy.preserveRecentTurns board
+            let preservedTurnIdSet = preservedTurnIds |> Set.ofList
+
+            let isProtected record =
+                record.kind <> CompactedSummary && preservedTurnIdSet.Contains record.turnId
+
+            let oldRecords = board.records |> List.filter (isProtected >> not)
+
+            let summarizable = oldRecords |> List.filter isSummarizableForPruning |> List.rev
+
+            if List.isEmpty summarizable then
+                None
+            else
+                let targetChars = max 1 policy.targetChars
+                let charsToRemove = max 1 (totalChars - targetChars)
+
+                let selected, _ =
+                    (([], 0), summarizable)
+                    ||> List.fold (fun (selected, removedChars) record ->
+                        if removedChars >= charsToRemove then
+                            selected, removedChars
+                        else
+                            record :: selected, removedChars + record.text.Length)
+
+                let selected = selected |> List.rev
+
+                if List.isEmpty selected then
+                    None
+                else
+                    let dropOnly = oldRecords |> List.filter isDropOnlyForPruning
+
+                    Some
+                        { totalChars = totalChars
+                          targetChars = targetChars
+                          preservedTurnIds = preservedTurnIds
+                          recordsToSummarize = selected
+                          recordsToDrop = dropOnly }
+
+    let summaryFromSelection selection summaryText =
+        let summarized = selection.recordsToSummarize
+        let createdAt = summarized |> List.map _.createdAt
+
+        { summary = Text.normalizeWhitespace summaryText
+          coveredTurnIds = summarized |> List.map _.turnId |> List.distinct
+          coveredRecordIds = summarized |> List.map _.id
+          coveredKinds = summarized |> List.map _.kind |> List.distinct
+          fromCreatedAt =
+            if List.isEmpty createdAt then
+                None
+            else
+                Some(List.min createdAt)
+          toCreatedAt =
+            if List.isEmpty createdAt then
+                None
+            else
+                Some(List.max createdAt)
+          originalRecordCount = summarized.Length }
+
+    let applyPruneSelection selection summaryRecord board =
+        let removedIds =
+            selection.recordsToSummarize @ selection.recordsToDrop
+            |> List.map _.id
+            |> Set.ofList
+
+        { board with
+            records =
+                summaryRecord
+                :: (board.records |> List.filter (fun record -> not (removedIds.Contains record.id)))
+                |> trimToMax board }
 
 module BlackboardSemantic =
     let private passageFor index (record: BlackboardRecord) : FsColbert.PassageRef =
@@ -357,3 +494,19 @@ module BlackboardRecords =
 
     let finalAnswer (answer: QaAnswer) =
         create answer.turnId FinalAnswer (FinalAnswerEntry answer) true None $"Final answer:\n{answer.answer}"
+
+    let compactedSummary (summary: BlackboardCompactedSummary) =
+        let kinds =
+            summary.coveredKinds
+            |> List.map BlackboardEntryKind.displayName
+            |> String.concat ", "
+
+        let turns = summary.coveredTurnIds |> String.concat ", "
+
+        create
+            "blackboard_summary"
+            CompactedSummary
+            (CompactedSummaryEntry summary)
+            true
+            None
+            $"Compacted blackboard summary: records={summary.originalRecordCount}; turns={turns}; kinds={kinds}\n{summary.summary}"

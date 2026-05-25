@@ -1,0 +1,29 @@
+flowchart TD
+    User["User speaks a question"] --> Mic["Microphone audio enters realtime session"]
+    Mic --> VAD["Realtime VAD detects speech start / stop"]
+    VAD --> Transcript["Realtime transcription completes"]
+    Transcript --> FinalTranscript["Speak2Docs records final transcript"]
+
+    FinalTranscript --> NeedAnswer{"Realtime model calls QUERY_ORACLE?"}
+    NeedAnswer -- "No" --> DirectReply["Realtime replies directly"]
+    DirectReply --> UserHearsDirect["User hears realtime response"]
+
+    NeedAnswer -- "Yes" --> OracleCall["VoiceAgent starts oracle tool call"]
+    OracleCall --> Pending["Show/log pending transcript<br/>and wait for QA answer"]
+
+    Pending --> QA["QaAgent asks QaSession"]
+    QA --> Sources["Search selected documents<br/>and plug-in context"]
+    Sources --> Tools["Run QA tools if needed<br/>source search, inventory, blackboard"]
+    Tools --> AnswerModel["Answer model writes grounded answer"]
+
+    AnswerModel --> Ready["QaAgent returns OracleCandidate"]
+    Ready --> ToolOutput["VoiceAgent sends function_call_output<br/>back to realtime session"]
+    ToolOutput --> Ack["Realtime acknowledges tool output"]
+    Ack --> SpeakRequest["VoiceAgent requests speech<br/>using the oracle answer exactly"]
+    SpeakRequest --> SpokenAnswer["Realtime speaks the answer"]
+    SpokenAnswer --> UserHearsOracle["User hears the document-grounded answer"]
+
+    subgraph SessionMaintenance["Happens in parallel during long sessions"]
+        AnswerModel --> Compact["Compact answer context<br/>when it gets too large"]
+        AnswerModel --> Prune["Prune blackboard into summaries<br/>when it gets too large"]
+    end

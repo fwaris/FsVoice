@@ -122,6 +122,7 @@ module QaAgent =
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
                 autoWriteback = st.plugIn.runtime.autoWriteback
+                enableDurableMemory = false
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -242,6 +243,8 @@ module QaAgent =
                 let inventory: KnowledgeSource list = answer.inventory |> List.map toWorkflowSource
                 let context = createMemoryContext request chunks inventory
 
+                st.bus.PostToAgent(Ag_Log $"Context ready: {chunks.Length} chunk(s), {inventory.Length} source(s).")
+
                 let firstChunk =
                     chunks
                     |> List.tryHead
@@ -254,7 +257,6 @@ module QaAgent =
                 )
 
                 request.completion.TrySetResult context |> ignore
-                st.bus.PostToAgent(Ag_ContextReady(request.snapshot, chunks, inventory))
 
                 let candidate =
                     { turnId = request.snapshot.turnId

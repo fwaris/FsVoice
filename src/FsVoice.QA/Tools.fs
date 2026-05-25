@@ -34,14 +34,19 @@ type private SourceSearchTool(host: IQaToolHost) =
         member _.Name = "selected_source_search"
 
         member _.Description =
-            "Searches the currently selected PDF and Markdown sources for passages relevant to the request."
+            "Searches the currently selected PDF, Markdown, and JSON sources for ranked passages relevant to the request. "
+            + "Use it when the answer needs evidence from selected documents, named sections, summaries, comparisons, or citations. "
+            + "Returns source excerpts and metadata, not a final answer."
 
         member _.Parameters =
             [ { name = "question"
-                description = "The source-related question or standalone retrieval request."
+                description =
+                  "Standalone source-related question or retrieval request. "
+                  + "Include named files, sections, entities, dates, or technical terms from the user turn when they help retrieval."
                 required = true }
               { name = "max_results"
-                description = "Maximum number of source passages to return."
+                description =
+                  "Maximum number of ranked source passages to return. Use more results for broad summaries or comparisons, fewer for focused factual lookups."
                 required = false } ]
 
         member _.InvokeAsync(args, cancellationToken) =
@@ -58,7 +63,8 @@ type private SourceInventoryTool(host: IQaToolHost) =
         member _.Name = "source_inventory"
 
         member _.Description =
-            "Lists the selected PDF and Markdown sources available to this QA session."
+            "Lists the selected document sources available to this QA session. "
+            + "Use it when the user asks what files, documents, sources, or indexes are loaded, or when the answer needs to confirm source availability before searching."
 
         member _.Parameters = []
 
@@ -72,14 +78,19 @@ type private DurableMemorySearchTool(host: IQaToolHost) =
     interface IQaTool with
         member _.PluginName = "FsVoiceTools"
         member _.Name = "durable_memory_search"
-        member _.Description = "Searches typed durable memory records."
+
+        member _.Description =
+            "Searches typed durable memory records from prior turns or sessions, such as user preferences, decisions, commitments, corrections, and remembered facts. "
+            + "Use it for questions about what was previously remembered or decided, not for retrieving document passages."
 
         member _.Parameters =
             [ { name = "query"
-                description = "The user's question or standalone memory search query."
+                description =
+                  "Standalone memory search query. Include the person, project, preference, decision, or correction the user is referring to."
                 required = true }
               { name = "max_results"
-                description = "Maximum number of durable memory records to return."
+                description =
+                  "Maximum number of durable memory records to return. Use more results when checking for older decisions, conflicts, or corrections."
                 required = false } ]
 
         member _.InvokeAsync(args, cancellationToken) =
@@ -94,11 +105,15 @@ type private BlackboardSearchTool(host: IQaToolHost) =
     interface IQaTool with
         member _.PluginName = "FsVoiceTools"
         member _.Name = "blackboard_search"
-        member _.Description = "Searches recent QA tool observations for follow-up context."
+
+        member _.Description =
+            "Searches the recent QA blackboard for short-lived turn context, including previous tool observations, source evidence, memory evidence, and final answers. "
+            + "Use it for follow-ups like 'that result', 'the previous lookup', or 'what did you find earlier' within the current session."
 
         member _.Parameters =
             [ { name = "query"
-                description = "A word or phrase to search for in recent observations."
+                description =
+                  "Word, phrase, or standalone follow-up query to search for in recent session observations."
                 required = true } ]
 
         member _.InvokeAsync(args, cancellationToken) =

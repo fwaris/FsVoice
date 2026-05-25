@@ -276,7 +276,6 @@ type ToHost =
     | Log of string
     | RequestRealtimeConnection of Session
     | TranscriptFinalized of TranscriptSnapshot
-    | ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | OracleResponseReady of TranscriptSnapshot * OracleCandidate option
     | FlowEnded of abnormal: bool
 
@@ -295,7 +294,6 @@ type AgentMsg =
     | Ag_MemoryRequestFailed of string * string
     | Ag_MemoryJobStarted of string
     | Ag_MemoryJobFinished of string * Result<unit, string>
-    | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_OracleRequested of MemoryRequest * MemoryContext
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option
     | Ag_RequestRealtimeConnection of Session
@@ -315,7 +313,6 @@ type AgentMsg =
         | Ag_MemoryRequestFailed _ -> "Ag_MemoryRequestFailed"
         | Ag_MemoryJobStarted _ -> "Ag_MemoryJobStarted"
         | Ag_MemoryJobFinished _ -> "Ag_MemoryJobFinished"
-        | Ag_ContextReady _ -> "Ag_ContextReady"
         | Ag_OracleRequested _ -> "Ag_OracleRequested"
         | Ag_ResponseReady _ -> "Ag_ResponseReady"
         | Ag_RequestRealtimeConnection _ -> "Ag_RequestRealtimeConnection"

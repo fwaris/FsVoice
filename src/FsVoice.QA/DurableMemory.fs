@@ -17,7 +17,7 @@ module DurableMemory =
           epochs: Map<MemoryKind, int> }
 
     [<CLIMutable>]
-    type private MemoryRecordDto =
+    type MemoryRecordDto =
         { memoryId: string
           kind: string
           title: string
@@ -51,7 +51,7 @@ module DurableMemory =
           version: int }
 
     [<CLIMutable>]
-    type private StoreDto =
+    type StoreDto =
         { schemaVersion: int
           records: MemoryRecordDto list }
 
@@ -381,6 +381,24 @@ module DurableMemory =
                 []
             with ex ->
                 [ $"Durable memory store could not be saved: {ex.Message}" ]
+
+    let clear (store: Store) =
+        let cleared = empty store.path
+
+        let logs =
+            match store.path with
+            | None -> []
+            | Some path ->
+                try
+                    if File.Exists path then
+                        File.Delete path
+                        [ "Cleared durable memory store." ]
+                    else
+                        [ "Durable memory store is already empty." ]
+                with ex ->
+                    [ $"Durable memory store could not be cleared: {ex.Message}" ]
+
+        cleared, logs
 
     let private currentRecordIds (records: MemoryRecord list) =
         records

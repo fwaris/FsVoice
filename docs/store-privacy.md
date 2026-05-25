@@ -8,7 +8,6 @@ Use this as the source checklist for Speak2Docs Apple App Privacy and Google Pla
 - Microphone audio: captured only after the user starts a realtime voice session and grants microphone permission.
 - User documents: PDFs, Markdown, and JSON files selected by the user for local retrieval and indexing.
 - Extracted document text and keywords: generated from selected documents for retrieval and optional keyword enrichment.
-- Durable memory records: locally stored memories created by the app workflow.
 - Runtime logs: local troubleshooting text that may include document names, source names, or snippets depending on settings.
 
 ## Network Sharing
@@ -21,7 +20,7 @@ Use this as the source checklist for Speak2Docs Apple App Privacy and Google Pla
 
 - API keys should be stored in MAUI `SecureStorage`.
 - Non-secret preferences use platform preferences/user defaults.
-- Documents, indexes, keyword cache, and durable memory are stored in the app container.
+- Documents, indexes, and keyword cache are stored in the app container. Speak2Docs does not use durable memory storage.
 - Android backup is disabled in the manifest to avoid backing up sensitive local app data.
 
 ## Apple Privacy Manifest

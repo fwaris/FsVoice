@@ -147,6 +147,40 @@ type RecordingChatClient(responseText: string) =
         member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type RoutingChatClient(answerText: string, summaryText: string) =
+    let gate = obj ()
+    let mutable answerCalls = 0
+    let mutable summaryCalls = 0
+    let mutable messages: ChatMessage list = []
+
+    member _.AnswerCalls = lock gate (fun () -> answerCalls)
+    member _.SummaryCalls = lock gate (fun () -> summaryCalls)
+    member _.Messages = lock gate (fun () -> messages)
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            let captured = chatMessages |> Seq.toList
+            let promptText = captured |> List.map _.Text |> String.concat "\n"
+
+            let responseText =
+                lock gate (fun () ->
+                    messages <- captured
+
+                    if promptText.Contains("Summarize pruned QA blackboard", StringComparison.OrdinalIgnoreCase) then
+                        summaryCalls <- summaryCalls + 1
+                        summaryText
+                    else
+                        answerCalls <- answerCalls + 1
+                        answerText)
+
+            ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type SequencedChatClient(responseTexts: string list) =
     let mutable calls: Nullable<int> list = []
 
@@ -333,6 +367,16 @@ let private functionOutputsFromResponseRequest (request: FsResponses.WebSocketCr
         | FsResponses.IOitem.Function_call_output output -> Some output
         | _ -> None)
 
+let private waitForAsync description predicate =
+    task {
+        let deadline = DateTimeOffset.UtcNow.AddSeconds 5.
+
+        while not (predicate ()) && DateTimeOffset.UtcNow < deadline do
+            do! Task.Delay 20
+
+        Assert.True(predicate (), description)
+    }
+
 type FakeDoclingRasterizer(result: Result<FsColbert.DoclingRasterPage list, string>) =
     interface FsColbert.IDoclingPageRasterizer with
         member _.RasterizeAsync _ = async { return result }
@@ -387,6 +431,38 @@ let private keywordOptions schemaVersion client =
 
 let private tempStorageRoot () =
     Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+
+let private testTranscript turnId text : TranscriptSnapshot =
+    { turnId = turnId
+      itemId = turnId
+      revision = 1
+      text = text
+      isFinal = true
+      receivedAt = DateTimeOffset.UtcNow }
+
+let private testQaAnswer turnId text : QaAnswer =
+    { turnId = turnId
+      answer = text
+      model = "test"
+      context = []
+      sourceRetrievalElapsedMs = 0.0
+      inventory = []
+      toolObservations = []
+      timedOut = false
+      createdAt = DateTimeOffset.UtcNow }
+
+let private boardFromRecords records =
+    records
+    |> List.fold (fun board record -> Blackboard.add record board) (Blackboard.empty 200)
+
+let private seedDurableMemory path (snapshot: TranscriptSnapshot) answer =
+    let store, updates, logs =
+        DurableMemory.commitProposals
+            (DurableMemory.empty (Some path))
+            (DurableMemory.proposalsFromExchange snapshot answer)
+
+    Assert.NotEmpty updates
+    store, updates, logs
 
 let private hashText (value: string) =
     use sha = SHA256.Create()
@@ -795,6 +871,90 @@ let ``qa session websocket answer uses previous response id after first turn`` (
         Assert.Single(captured[2].input) |> ignore
         Assert.Equal(None, captured[2].tools)
         Assert.Contains("second question", inputTextFromResponseRequest captured[2])
+    }
+
+[<Fact>]
+let ``qa session websocket compacts answer history and enables blackboard search`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-compact"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let capturedGate = obj ()
+
+        let capturedSnapshot () =
+            lock capturedGate (fun () -> captured |> Seq.toList)
+
+        let mutable answerNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                lock capturedGate (fun () -> captured.Add request)
+
+                match request.generate, List.isEmpty request.input, request.instructions with
+                | Some false, true, _ -> [ responsesCreatedEvent "resp_bootstrap" ]
+                | Some true, _, Some instructions when
+                    instructions.Contains("Compact Speak2Docs", StringComparison.OrdinalIgnoreCase)
+                    ->
+                    [ responsesCompletedEvent "resp_compaction" "Compacted facts from the first answer." ]
+                | Some false, false, _ -> [ responsesCreatedEvent "resp_compacted_root" ]
+                | _ ->
+                    answerNumber <- answerNumber + 1
+                    [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ])
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport
+                answerCompactionThresholdChars = Some 1 }
+
+        use session = new QaSession(options)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! first = session.AnswerAsync(request "first question", CancellationToken.None)
+
+        Assert.Equal("socket answer 1", first.answer)
+        Assert.DoesNotContain("blackboard_search", responseToolNames (capturedSnapshot ()).Head)
+
+        do!
+            waitForAsync "Compaction should create a refreshed response root." (fun () ->
+                capturedSnapshot ()
+                |> Seq.exists (fun request ->
+                    request.generate = Some false
+                    && not (List.isEmpty request.input)
+                    && responseToolNames request |> List.contains "blackboard_search"))
+
+        let refreshRequest =
+            capturedSnapshot ()
+            |> Seq.find (fun request ->
+                request.generate = Some false
+                && not (List.isEmpty request.input)
+                && responseToolNames request |> List.contains "blackboard_search")
+
+        Assert.Contains("Compacted conversation checkpoint", inputTextFromResponseRequest refreshRequest)
+        Assert.Contains("Compacted facts from the first answer", inputTextFromResponseRequest refreshRequest)
+
+        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
+
+        Assert.Equal("socket answer 2", second.answer)
+
+        let secondRequest =
+            capturedSnapshot ()
+            |> Seq.find (fun request ->
+                request.generate = Some true
+                && inputTextFromResponseRequest request
+                   |> fun text -> text.Contains("second question", StringComparison.OrdinalIgnoreCase))
+
+        Assert.Equal(Some "resp_compacted_root", secondRequest.previous_response_id)
+        Assert.Equal(None, secondRequest.tools)
     }
 
 [<Fact>]
@@ -2555,6 +2715,193 @@ let ``durable memory forget request retracts related current record`` () =
     )
 
 [<Fact>]
+let ``durable memory service retract persists and prevents recall`` () =
+    task {
+        let path = Path.Combine(tempStorageRoot (), "memory.json")
+
+        let remember =
+            { turnId = "turn_service_remember"
+              itemId = "item_service_remember"
+              revision = 1
+              text = "Remember that I prefer verbose implementation notes."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow.AddMinutes(-1.) }
+
+        let forget =
+            { turnId = "turn_service_forget"
+              itemId = "item_service_forget"
+              revision = 2
+              text = "Forget my preference for verbose implementation notes."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow }
+
+        seedDurableMemory path remember "Noted." |> ignore
+
+        let service = DurableMemoryService(path) :> IMemoryService
+
+        let! before = service.SearchAsync("verbose implementation notes", 10, CancellationToken.None)
+        Assert.Contains("verbose implementation notes", before, StringComparison.OrdinalIgnoreCase)
+
+        let retractLogs = service.RetractFromTurn forget
+        Assert.Contains(retractLogs, fun log -> log.Contains("Retracted", StringComparison.OrdinalIgnoreCase))
+
+        let! after = service.SearchAsync("verbose implementation notes", 10, CancellationToken.None)
+        Assert.DoesNotContain("verbose implementation notes", after, StringComparison.OrdinalIgnoreCase)
+
+        let reloaded = DurableMemoryService(path) :> IMemoryService
+        let! afterReload = reloaded.SearchAsync("verbose implementation notes", 10, CancellationToken.None)
+        Assert.DoesNotContain("verbose implementation notes", afterReload, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``durable memory service clear all hard clears persisted store`` () =
+    task {
+        let path = Path.Combine(tempStorageRoot (), "memory.json")
+
+        let remember =
+            { turnId = "turn_service_clear"
+              itemId = "item_service_clear"
+              revision = 1
+              text = "Remember that the project codename is cobalt."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow }
+
+        seedDurableMemory path remember "Noted." |> ignore
+        Assert.True(File.Exists path)
+
+        let service = DurableMemoryService(path) :> IMemoryService
+
+        let clearLogs = service.ClearAll()
+        Assert.Contains(clearLogs, fun log -> log.Contains("Cleared", StringComparison.OrdinalIgnoreCase))
+        Assert.False(File.Exists path)
+
+        let! after = service.SearchAsync("cobalt", 10, CancellationToken.None)
+        Assert.DoesNotContain("cobalt", after, StringComparison.OrdinalIgnoreCase)
+
+        let reloaded = DurableMemoryService(path) :> IMemoryService
+        let! afterReload = reloaded.SearchAsync("cobalt", 10, CancellationToken.None)
+        Assert.DoesNotContain("cobalt", afterReload, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``qa session forget turn retracts durable memory and skips writeback`` () =
+    task {
+        let storageRoot = tempStorageRoot ()
+        let memoryPath = Path.Combine(storageRoot, "memory.json")
+
+        let remember =
+            { turnId = "turn_session_remember"
+              itemId = "item_session_remember"
+              revision = 1
+              text = "Remember that I prefer verbose implementation notes."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow.AddMinutes(-1.) }
+
+        seedDurableMemory memoryPath remember "Noted." |> ignore
+
+        let longAnswer =
+            String.replicate
+                4
+                "This acknowledgement is intentionally long enough to become an episode if forget turns were allowed to write back. "
+
+        let answerClient = new RecordingChatClient(longAnswer)
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                memoryStorePath = Some memoryPath
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some answerClient } }
+
+        use session = new QaSession(options)
+
+        let request text =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = text
+              realtimeJudgement = None
+              deadline = None }
+
+        let loaded, _ = DurableMemory.load memoryPath
+        Assert.Single loaded.records |> ignore
+        Assert.Contains("verbose implementation notes", loaded.records.Head.text, StringComparison.OrdinalIgnoreCase)
+
+        let! forgetAnswer =
+            session.AnswerAsync(
+                request
+                    "Forget my preference for verbose implementation notes and remove that durable note before answering this verification turn.",
+                CancellationToken.None
+            )
+
+        Assert.Contains(
+            forgetAnswer.toolObservations,
+            fun observation ->
+                observation.toolName = "durable_memory_forget"
+                && observation.content.Contains("Retracted", StringComparison.OrdinalIgnoreCase)
+        )
+
+        let afterForget, _ = DurableMemory.load memoryPath
+        Assert.Single afterForget.records |> ignore
+        Assert.All(afterForget.records, fun record -> Assert.Equal(Retracted, record.status))
+    }
+
+[<Fact>]
+let ``qa session durable memory disabled skips recall writeback and memory tool`` () =
+    task {
+        let storageRoot = tempStorageRoot ()
+        let memoryPath = Path.Combine(storageRoot, "memory.json")
+
+        let remember =
+            { turnId = "turn_disabled_existing"
+              itemId = "item_disabled_existing"
+              revision = 1
+              text = "Remember that the hidden project codename is cobalt."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow }
+
+        seedDurableMemory memoryPath remember "Noted." |> ignore
+
+        let answerClient = new RecordingChatClient("No memory used.")
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                memoryStorePath = Some memoryPath
+                enableDurableMemory = false
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some answerClient } }
+
+        use session = new QaSession(options)
+
+        Assert.DoesNotContain(session.ToolCatalog.tools, fun tool -> tool.Name = "durable_memory_search")
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What do you remember?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! _ = session.AnswerAsync(request, CancellationToken.None)
+
+        let promptText = answerClient.Messages |> List.map _.Text |> String.concat "\n"
+        Assert.DoesNotContain("cobalt", promptText, StringComparison.OrdinalIgnoreCase)
+
+        let rememberWhileDisabled =
+            { request with
+                turnId = Guid.NewGuid().ToString("N")
+                question = "Remember that my disabled memory test phrase is violet." }
+
+        let! _ = session.AnswerAsync(rememberWhileDisabled, CancellationToken.None)
+
+        let loaded, _ = DurableMemory.load memoryPath
+        Assert.Single loaded.records |> ignore
+
+        Assert.DoesNotContain(
+            loaded.records,
+            fun record -> record.text.Contains("violet", StringComparison.OrdinalIgnoreCase)
+        )
+    }
+
+[<Fact>]
 let ``blackboard lexical search finds typed tool observations`` () =
     let observation =
         { pluginName = "FsVoiceTools"
@@ -2577,6 +2924,129 @@ let ``blackboard lexical search finds typed tool observations`` () =
     Assert.NotEmpty hits
     Assert.Equal(ToolObservation, hits.Head.record.kind)
     Assert.Contains("tenant policy claim", hits.Head.record.text, StringComparison.OrdinalIgnoreCase)
+
+[<Fact>]
+let ``blackboard pruning selection preserves recent turns`` () =
+    let records =
+        [ for index in 1..8 do
+              let turnId = $"turn_{index}"
+
+              yield
+                  BlackboardRecords.transcript (
+                      testTranscript turnId (String.replicate 12 $"turn {index} important context ")
+                  ) ]
+
+    let board = boardFromRecords records
+
+    let selection =
+        board
+        |> Blackboard.tryCreatePruneSelection
+            { triggerChars = 1
+              targetChars = 1
+              preserveRecentTurns = 6 }
+        |> Option.defaultWith (fun () -> failwith "Expected blackboard pruning selection.")
+
+    let selectedTurnIds =
+        selection.recordsToSummarize |> List.map _.turnId |> Set.ofList
+
+    Assert.Equal<string list>(
+        [ "turn_8"; "turn_7"; "turn_6"; "turn_5"; "turn_4"; "turn_3" ],
+        selection.preservedTurnIds
+    )
+
+    Assert.Contains("turn_1", selectedTurnIds)
+    Assert.Contains("turn_2", selectedTurnIds)
+    Assert.DoesNotContain("turn_3", selectedTurnIds)
+    Assert.DoesNotContain("turn_8", selectedTurnIds)
+
+[<Fact>]
+let ``blackboard pruning selection summarizes eligible old records and drops trace records`` () =
+    let source =
+        { kind = Json
+          location = "fake://blackboard-pruning"
+          enabled = true }
+
+    let oldTurn = "turn_old"
+
+    let oldTranscript =
+        BlackboardRecords.transcript (testTranscript oldTurn "Old user goal about tenant claim deadlines.")
+
+    let oldSource =
+        BlackboardRecords.sourceEvidence
+            oldTurn
+            { source = source
+              index = 7
+              text = "Old source evidence says tenant claims must be filed within thirty days."
+              score = 1.0f }
+
+    let oldJudgement =
+        BlackboardRecords.realtimeJudgement
+            oldTurn
+            { turnKind = Some "question"
+              topicContinuity = None
+              memoryAction = None
+              needsExternalContext = Some true
+              confidence = 0.9
+              riskFlags = RiskFlags.none }
+
+    let oldPlanned =
+        BlackboardRecords.plannedTool
+            oldTurn
+            { pluginName = "FsVoiceTools"
+              toolName = "source_inventory"
+              query = "old query"
+              maxResults = 4
+              arguments = Map.empty }
+
+    let oldCandidate =
+        BlackboardRecords.answerCandidate oldTurn "Draft answer that should be dropped."
+
+    let oldBlackboardSearch =
+        BlackboardRecords.toolObservation
+            oldTurn
+            { pluginName = "FsVoiceTools"
+              toolName = "blackboard_search"
+              query = "old recursive lookup"
+              content = "Recursive blackboard search content should not be summarized."
+              createdAt = DateTimeOffset.UtcNow }
+
+    let recentRecords =
+        [ for index in 1..6 do
+              let turnId = $"turn_recent_{index}"
+              yield BlackboardRecords.transcript (testTranscript turnId $"Recent turn {index}.") ]
+
+    let board =
+        boardFromRecords (
+            [ oldTranscript
+              oldSource
+              oldJudgement
+              oldPlanned
+              oldCandidate
+              oldBlackboardSearch ]
+            @ recentRecords
+        )
+
+    let selection =
+        board
+        |> Blackboard.tryCreatePruneSelection
+            { triggerChars = 1
+              targetChars = 1
+              preserveRecentTurns = 6 }
+        |> Option.defaultWith (fun () -> failwith "Expected blackboard pruning selection.")
+
+    let summarizedIds = selection.recordsToSummarize |> List.map _.id |> Set.ofList
+    let droppedIds = selection.recordsToDrop |> List.map _.id |> Set.ofList
+
+    Assert.Contains(oldTranscript.id, summarizedIds)
+    Assert.Contains(oldSource.id, summarizedIds)
+    Assert.DoesNotContain(oldJudgement.id, summarizedIds)
+    Assert.DoesNotContain(oldPlanned.id, summarizedIds)
+    Assert.DoesNotContain(oldCandidate.id, summarizedIds)
+    Assert.DoesNotContain(oldBlackboardSearch.id, summarizedIds)
+    Assert.Contains(oldJudgement.id, droppedIds)
+    Assert.Contains(oldPlanned.id, droppedIds)
+    Assert.Contains(oldCandidate.id, droppedIds)
+    Assert.Contains(oldBlackboardSearch.id, droppedIds)
 
 [<Fact>]
 let ``qa session uses blackboard search for previous result followups`` () =
@@ -2631,6 +3101,241 @@ let ``qa session uses blackboard search for previous result followups`` () =
         Assert.Contains("Fake Context inventory", blackboardObservation.content, StringComparison.OrdinalIgnoreCase)
 
         do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``qa session prunes old blackboard records into model summary and keeps recent turns`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "fake://blackboard-prune-session"
+              enabled = true }
+
+        let provider = FakeContextProvider source :> IQaContextProvider
+
+        let answerClient =
+            new RoutingChatClient(
+                "ok",
+                "Compacted alpha older source summary with alpha older source topic and retained source finding."
+            )
+
+        let storageRoot = tempStorageRoot ()
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                autoWriteback = false
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some answerClient }
+                blackboardPruning =
+                    { BlackboardPruningOptions.defaults with
+                        triggerChars = 1
+                        targetChars = 1
+                        preserveRecentTurns = 2
+                        summaryMaxOutputTokens = 200 } }
+
+        use session = new QaSession(options)
+        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
+        Assert.Empty errors
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! _ = session.AnswerAsync(request "alpha older source topic", CancellationToken.None)
+        let! _ = session.AnswerAsync(request "bravo middle source topic", CancellationToken.None)
+        let! _ = session.AnswerAsync(request "gamma recent source topic", CancellationToken.None)
+
+        do! waitForAsync "Expected blackboard pruning summary call." (fun () -> answerClient.SummaryCalls > 0)
+
+        let! oldFollowup =
+            session.AnswerAsync(
+                request "what did the blackboard say about alpha older source topic?",
+                CancellationToken.None
+            )
+
+        let oldObservation =
+            oldFollowup.toolObservations
+            |> List.find (fun observation -> observation.toolName = "blackboard_search")
+
+        Assert.Contains(
+            "Compacted alpha older source summary",
+            oldObservation.content,
+            StringComparison.OrdinalIgnoreCase
+        )
+
+        let! recentFollowup =
+            session.AnswerAsync(
+                request "what did the blackboard say about gamma recent source topic?",
+                CancellationToken.None
+            )
+
+        let recentObservation =
+            recentFollowup.toolObservations
+            |> List.find (fun observation -> observation.toolName = "blackboard_search")
+
+        Assert.Contains(
+            "Fake context for gamma recent source topic",
+            recentObservation.content,
+            StringComparison.OrdinalIgnoreCase
+        )
+    }
+
+[<Fact>]
+let ``qa session blackboard pruning without model summarizer falls back to hard cap`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "fake://blackboard-no-summarizer"
+              enabled = true }
+
+        let provider = FakeContextProvider source :> IQaContextProvider
+        let logs = ResizeArray<string>()
+        let storageRoot = tempStorageRoot ()
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                autoWriteback = false
+                report = logs.Add
+                blackboardPruning =
+                    { BlackboardPruningOptions.defaults with
+                        triggerChars = 1
+                        targetChars = 1
+                        preserveRecentTurns = 1 } }
+
+        use session = new QaSession(options)
+        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
+        Assert.Empty errors
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! _ = session.AnswerAsync(request "alpha no summarizer old topic", CancellationToken.None)
+        let! _ = session.AnswerAsync(request "bravo no summarizer newer topic", CancellationToken.None)
+
+        Assert.Contains(
+            logs,
+            fun log -> log.Contains("no model summarizer is configured", StringComparison.OrdinalIgnoreCase)
+        )
+
+        let! followup = session.AnswerAsync(request "blackboard alpha no summarizer old topic", CancellationToken.None)
+
+        let observation =
+            followup.toolObservations
+            |> List.find (fun observation -> observation.toolName = "blackboard_search")
+
+        Assert.Contains("alpha no summarizer old topic", observation.content, StringComparison.OrdinalIgnoreCase)
+        Assert.DoesNotContain("Compacted blackboard summary", observation.content, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``qa session delayed blackboard pruning keeps newer turns`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "fake://blackboard-delayed-prune"
+              enabled = true }
+
+        let provider = FakeContextProvider source :> IQaContextProvider
+
+        let summaryStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let releaseSummary =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let outputGate = obj ()
+        let mutable blackboardOutput = ""
+        let mutable answerNumber = 0
+        let logs = ResizeArray<string>()
+
+        let transport =
+            QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
+                task {
+                    let inputText = inputTextFromResponseRequest request
+
+                    if
+                        request.instructions
+                        |> Option.exists (fun text ->
+                            text.Contains("Summarize pruned QA blackboard", StringComparison.OrdinalIgnoreCase))
+                    then
+                        summaryStarted.TrySetResult() |> ignore
+                        do! releaseSummary.Task.WaitAsync(cancellationToken)
+                        return [ responsesCompletedEvent "resp_blackboard_summary" "Delayed alpha summary." ]
+                    elif request.generate = Some false && List.isEmpty request.input then
+                        return [ responsesCreatedEvent "resp_bootstrap" ]
+                    elif
+                        request.input
+                        |> List.exists (function
+                            | FsResponses.IOitem.Function_call_output _ -> true
+                            | _ -> false)
+                    then
+                        let output =
+                            functionOutputsFromResponseRequest request
+                            |> List.map _.output
+                            |> String.concat "\n"
+
+                        lock outputGate (fun () -> blackboardOutput <- output)
+                        return [ responsesCompletedEvent "resp_tool_answer" "tool answer" ]
+                    elif inputText.Contains("lookup gamma newest topic", StringComparison.OrdinalIgnoreCase) then
+                        return
+                            [ responsesFunctionCallEvent
+                                  "resp_tool_call"
+                                  "call_blackboard"
+                                  "blackboard_search"
+                                  """{"query":"gamma newest topic","max_results":"8"}""" ]
+                    else
+                        answerNumber <- answerNumber + 1
+
+                        return
+                            [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ]
+                })
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ provider ]
+                answerTransport = Some transport
+                report = logs.Add
+                blackboardPruning =
+                    { BlackboardPruningOptions.defaults with
+                        triggerChars = 1
+                        targetChars = 1
+                        preserveRecentTurns = 1
+                        summaryMaxOutputTokens = 200 } }
+
+        use session = new QaSession(options)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! _ = session.AnswerAsync(request "alpha delayed old topic", CancellationToken.None)
+        let! _ = session.AnswerAsync(request "beta delayed middle topic", CancellationToken.None)
+
+        do! waitForAsync "Expected delayed blackboard pruning to start." (fun () -> summaryStarted.Task.IsCompleted)
+
+        let! _ = session.AnswerAsync(request "gamma newest topic", CancellationToken.None)
+        releaseSummary.TrySetResult() |> ignore
+
+        do!
+            waitForAsync "Expected delayed blackboard pruning to apply." (fun () ->
+                logs
+                |> Seq.exists (fun log ->
+                    log.Contains("Blackboard pruning applied", StringComparison.OrdinalIgnoreCase)))
+
+        let! _ = session.AnswerAsync(request "lookup gamma newest topic with blackboard", CancellationToken.None)
+
+        let output = lock outputGate (fun () -> blackboardOutput)
+        Assert.Contains("gamma newest topic", output, StringComparison.OrdinalIgnoreCase)
+        Assert.Contains("Fake context for gamma newest topic", output, StringComparison.OrdinalIgnoreCase)
     }
 
 type TestToHost =
@@ -2993,6 +3698,13 @@ let private demoVoiceContext () : VoiceOrchestrationContext =
       settings = Map.empty
       report = ignore }
 
+let private demoVoiceContextForStorage storageRoot : VoiceOrchestrationContext =
+    Directory.CreateDirectory storageRoot |> ignore
+
+    { storageRoot = storageRoot
+      settings = Map.empty
+      report = ignore }
+
 let private demoRuntimeSettings values =
     let settings = Speak2Docs.RuntimeSettings.empty ()
     Speak2Docs.RuntimeSettings.replace settings (Map.ofList values)
@@ -3057,6 +3769,57 @@ let ``demo orchestration start requests realtime connection`` () =
                 | _ -> None)
 
         Assert.True(requested.model |> Option.exists (String.IsNullOrWhiteSpace >> not))
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``Speak2Docs orchestration disables durable memory`` () =
+    task {
+        let storageRoot = tempStorageRoot ()
+
+        let remember =
+            { turnId = "turn_speak2docs_existing_memory"
+              itemId = "item_speak2docs_existing_memory"
+              revision = 1
+              text = "Remember that Speak2Docs should not load this durable memory."
+              isFinal = true
+              receivedAt = DateTimeOffset.UtcNow }
+
+        seedDurableMemory (DurableMemory.defaultPath storageRoot) remember "Noted."
+        |> ignore
+
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+
+        let! session =
+            orchestration.CreateSessionAsync(
+                demoVoiceContextForStorage storageRoot,
+                demoVoiceConnection (),
+                CancellationToken.None
+            )
+
+        do! session.StartAsync CancellationToken.None
+
+        let logs = ResizeArray<string>()
+        use cts = new CancellationTokenSource(TimeSpan.FromSeconds 10.)
+        let mutable configured = false
+
+        while not configured do
+            let! message = session.ToHost.ReadAsync(cts.Token).AsTask()
+
+            match message with
+            | Speak2Docs.WorkFlow.Log text ->
+                logs.Add text
+
+                if text.Contains("QA session configured", StringComparison.OrdinalIgnoreCase) then
+                    configured <- true
+            | _ -> ()
+
+        Assert.DoesNotContain(
+            logs,
+            fun log -> log.Contains("durable memory record", StringComparison.OrdinalIgnoreCase)
+        )
 
         do! session.StopAsync CancellationToken.None
     }

@@ -12,6 +12,8 @@ type IMemoryService =
     abstract SearchAsync: string * int * CancellationToken -> Task<string>
     abstract ProposalsFromExchange: TranscriptSnapshot * string -> MemoryWriteProposal list
     abstract CommitProposals: MemoryWriteProposal list -> CommittedMemoryUpdate list * string list
+    abstract RetractFromTurn: TranscriptSnapshot -> string list
+    abstract ClearAll: unit -> string list
 
 type DurableMemoryService(path: string, encoder: unit -> FsColbert.OnnxColbertEncoder option) =
     let mutable store, startupLogs = DurableMemory.load path
@@ -67,3 +69,13 @@ type DurableMemoryService(path: string, encoder: unit -> FsColbert.OnnxColbertEn
             let updated, updates, logs = DurableMemory.commitProposals store proposals
             store <- updated
             updates, logs
+
+        member _.RetractFromTurn snapshot =
+            let updated, logs = DurableMemory.retractFromTurn store snapshot
+            store <- updated
+            logs
+
+        member _.ClearAll() =
+            let cleared, logs = DurableMemory.clear store
+            store <- cleared
+            logs

@@ -32,6 +32,21 @@ module QaAnswerTransport =
     let customResponsesWebSocket createAndCollect =
         CustomResponsesWebSocket createAndCollect
 
+type BlackboardPruningOptions =
+    { enabled: bool
+      triggerChars: int
+      targetChars: int
+      preserveRecentTurns: int
+      summaryMaxOutputTokens: int }
+
+module BlackboardPruningOptions =
+    let defaults =
+        { enabled = true
+          triggerChars = 60000
+          targetChars = 40000
+          preserveRecentTurns = 6
+          summaryMaxOutputTokens = 900 }
+
 type QaSessionOptions =
     { storageRoot: string
       memoryStorePath: string option
@@ -58,6 +73,10 @@ type QaSessionOptions =
       logChunks: bool
       useLexicalFilter: bool
       autoWriteback: bool
+      enableDurableMemory: bool
+      answerCompactionThresholdChars: int option
+      answerCompactionMaxOutputTokens: int
+      blackboardPruning: BlackboardPruningOptions
       report: string -> unit }
 
 module QaSessionOptions =
@@ -87,6 +106,10 @@ module QaSessionOptions =
           logChunks = false
           useLexicalFilter = true
           autoWriteback = true
+          enableDurableMemory = true
+          answerCompactionThresholdChars = Some 80000
+          answerCompactionMaxOutputTokens = 1200
+          blackboardPruning = BlackboardPruningOptions.defaults
           report = ignore }
 
 type private PlannedToolCall =
@@ -112,7 +135,21 @@ type private AnswerPrompt =
 
 type private AnswerConversationState =
     { previousResponseId: string option
+      items: FsResponses.IOitem list
+      compacted: bool
+      version: int
+      generation: int
+      compactionInProgress: bool }
+
+type private AnswerCompactionCheckpoint =
+    { generation: int
+      version: int
+      itemCount: int
       items: FsResponses.IOitem list }
+
+type private BlackboardPruningCheckpoint =
+    { version: int
+      selection: BlackboardPruneSelection }
 
 type private AnswerModelResult =
     { answer: string
@@ -121,6 +158,28 @@ type private AnswerModelResult =
 type private ResponseToolCatalog =
     { tools: FsResponses.Tool list
       byName: Map<string, IQaTool> }
+
+type private DisabledMemoryService() =
+    interface IMemoryService with
+        member _.StartupLogs = []
+        member _.DefaultNamespace = DurableMemory.defaultNamespace
+
+        member _.CreateSupervisorDecision(snapshot, judgement) =
+            DurableMemory.createSupervisorDecision snapshot judgement
+
+        member _.RecallAsync(_, _) = Task.FromResult []
+
+        member _.SearchAsync(_, _, _) =
+            Task.FromResult "Durable memory is disabled for this QA session."
+
+        member _.ProposalsFromExchange(_, _) = []
+
+        member _.CommitProposals _ = [], []
+
+        member _.RetractFromTurn _ = []
+
+        member _.ClearAll() =
+            [ "Durable memory is disabled for this QA session." ]
 
 type QaSession(options: QaSessionOptions) =
     let mutable contextProviders = options.contextProviders
@@ -137,12 +196,40 @@ type QaSession(options: QaSessionOptions) =
             | _ -> None)
 
     let memoryService =
-        options.memoryService
-        |> Option.defaultValue (DurableMemoryService(memoryPath, currentMemoryEncoder) :> IMemoryService)
+        if options.enableDurableMemory then
+            options.memoryService
+            |> Option.defaultValue (DurableMemoryService(memoryPath, currentMemoryEncoder) :> IMemoryService)
+        else
+            DisabledMemoryService() :> IMemoryService
 
+    let blackboardGate = obj ()
     let mutable blackboard = Blackboard.empty 120
+    let mutable blackboardVersion = 0
+    let mutable blackboardPruningInProgress = false
+    let mutable blackboardSummarized = false
+    let mutable blackboardPruningUnavailableLogged = false
+    let sessionCancellation = new CancellationTokenSource()
 
     let report message = options.report message
+
+    let getBlackboard () =
+        lock blackboardGate (fun () -> blackboard)
+
+    let updateBlackboard update =
+        lock blackboardGate (fun () ->
+            blackboard <- update blackboard
+            blackboardVersion <- blackboardVersion + 1
+            blackboard)
+
+    let addBlackboardRecord record =
+        updateBlackboard (Blackboard.add record) |> ignore
+
+    let addBlackboardRecords records =
+        if not (List.isEmpty records) then
+            updateBlackboard (Blackboard.addMany records) |> ignore
+
+    let blackboardHasSummary () =
+        lock blackboardGate (fun () -> blackboardSummarized)
 
     let findTool pluginName toolName (catalog: QaToolCatalog) =
         catalog.tools
@@ -382,6 +469,75 @@ type QaSession(options: QaSessionOptions) =
                 role = "assistant"
                 content = [ FsResponses.Content.Output_text { text = answer; annotations = None } ] }
 
+    let contentText =
+        function
+        | FsResponses.Content.Input_text text -> text.text
+        | FsResponses.Content.Output_text output -> output.text
+        | FsResponses.Content.Refusal refusal -> refusal.refusal
+        | FsResponses.Content.Input_image image -> $"[image: {image.image_url}]"
+
+    let itemText =
+        function
+        | FsResponses.IOitem.Message message ->
+            let content = message.content |> List.map contentText |> String.concat "\n"
+            $"{message.role}: {content}"
+        | FsResponses.IOitem.Function_call call -> $"tool call {call.name}: {call.arguments}"
+        | FsResponses.IOitem.Function_call_output output -> $"tool output {output.call_id}: {output.output}"
+        | FsResponses.IOitem.Web_search search -> $"web search: {search.search_context_size}"
+        | FsResponses.IOitem.Web_search_call _ -> "web search call"
+        | FsResponses.IOitem.File_search_call call ->
+            call.queries
+            |> Option.defaultValue []
+            |> String.concat "; "
+            |> sprintf "file search: %s"
+        | FsResponses.IOitem.Code_interpreter_call call ->
+            call.code |> Option.defaultValue "" |> sprintf "code interpreter: %s"
+        | FsResponses.IOitem.Mcp_call call
+        | FsResponses.IOitem.Mcp_approval_request call
+        | FsResponses.IOitem.Mcp_approval_response call ->
+            let name = call.name |> Option.defaultValue "mcp"
+            let output = call.output |> Option.orElse call.error |> Option.defaultValue ""
+            $"{name}: {output}"
+        | FsResponses.IOitem.Reasoning reasoning ->
+            reasoning.summary
+            |> List.map _.text
+            |> String.concat "\n"
+            |> sprintf "reasoning: %s"
+        | FsResponses.IOitem.Image _ -> "[image]"
+        | FsResponses.IOitem.File _ -> "[file]"
+        | FsResponses.IOitem.Local_shell_call _ -> "local shell call"
+        | FsResponses.IOitem.Image_generation_call _ -> "image generation call"
+        | FsResponses.IOitem.Computer_use _ -> "computer use"
+        | FsResponses.IOitem.Computer_call call -> $"computer call {call.call_id}"
+        | FsResponses.IOitem.Computer_call_output output -> $"computer output {output.call_id}"
+
+    let itemSize item = (itemText item).Length
+
+    let conversationSize items = items |> List.sumBy itemSize
+
+    let renderConversationItems items =
+        items
+        |> List.mapi (fun index item -> $"[{index + 1}]\n{itemText item |> Text.truncate 6000}")
+        |> String.concat "\n\n"
+
+    let compactionInstructions =
+        "Compact Speak2Docs QA conversation state. Preserve facts, user goals, prior answers, source-grounded findings, cited document details, tool observations, memory decisions, corrections, and unresolved follow-ups. Prefer concise bullets grouped by topic. Do not invent facts."
+
+    let compactionUserItem items =
+        let text =
+            $"Create a compact checkpoint for this conversation. The next answer model will receive this checkpoint plus any turns that happened after it.\n\nConversation to compact:\n\n{renderConversationItems items}"
+
+        FsResponses.IOitem.Message(FsResponses.Message.OfText text)
+
+    let compactionSummaryItem summary =
+        FsResponses.IOitem.Message
+            { FsResponses.Message.Default with
+                role = "user"
+                content =
+                    [ FsResponses.Content.Input_text
+                          {| text =
+                              $"Compacted conversation checkpoint. Use this as prior conversation memory, and call blackboard_search if more detail from pre-compaction tool observations is needed.\n\n{summary}" |} ] }
+
     let sanitizeResponseToolName (value: string) =
         let chars =
             value.Trim()
@@ -479,6 +635,31 @@ type QaSession(options: QaSessionOptions) =
                 else
                     None }
 
+    let responseCompactionRequest (answerConfig: ModelRoleConfig) items =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            input = [ compactionUserItem items ]
+            instructions = Some compactionInstructions
+            max_output_tokens = Some options.answerCompactionMaxOutputTokens
+            generate = Some true
+            reasoning = answerReasoning answerConfig
+            store = Some false
+            temperature = answerTemperature answerConfig
+            tools = Some []
+            tool_choice = None }
+
+    let responseConversationRefreshRequest answerConfig (prompt: AnswerPrompt) responseTools items =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            input = items
+            instructions = Some prompt.instructions
+            generate = Some false
+            reasoning = answerReasoning answerConfig
+            store = Some false
+            temperature = answerTemperature answerConfig
+            tools = Some responseTools
+            tool_choice = Some FsResponses.ToolChoice.Auto }
+
     let renderTemplate replacements (template: string) =
         replacements
         |> List.fold (fun (text: string) (name, value) -> text.Replace("{{" + name + "}}", value)) template
@@ -490,6 +671,14 @@ type QaSession(options: QaSessionOptions) =
               "durable_memory_search"
               "blackboard_search" ]
             |> List.exists (fun name -> String.Equals(tool.Name, name, StringComparison.OrdinalIgnoreCase)))
+
+    let isBlackboardSearchTool (tool: IQaTool) =
+        String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
+        && String.Equals(tool.Name, "blackboard_search", StringComparison.OrdinalIgnoreCase)
+
+    let isDurableMemorySearchTool (tool: IQaTool) =
+        String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
+        && String.Equals(tool.Name, "durable_memory_search", StringComparison.OrdinalIgnoreCase)
 
     let hasPlannerCandidateTools (catalog: QaToolCatalog) =
         catalog.tools |> List.exists (isBuiltInContextTool >> not)
@@ -840,18 +1029,25 @@ type QaSession(options: QaSessionOptions) =
             member _.SearchBlackboardAsync(query, cancellationToken) =
                 task {
                     let query = Text.normalizeWhitespace query
+                    let board = getBlackboard ()
 
                     let options =
                         { BlackboardSearchOptions.defaults with
                             maxResults = 8
-                            includeKinds = [ ToolObservation; MemoryEvidence; SourceEvidence; Conflict; FinalAnswer ] }
+                            includeKinds =
+                                [ ToolObservation
+                                  MemoryEvidence
+                                  SourceEvidence
+                                  Conflict
+                                  FinalAnswer
+                                  CompactedSummary ] }
 
-                    let lexicalHits = Blackboard.search options query blackboard
+                    let lexicalHits = Blackboard.search options query board
 
                     let! semanticHits =
                         match currentMemoryEncoder () with
                         | Some encoder when not (String.IsNullOrWhiteSpace query) ->
-                            BlackboardSemantic.search encoder options query blackboard
+                            BlackboardSemantic.search encoder options query board
                             |> fun work -> Async.StartAsTask(work, cancellationToken = cancellationToken)
                         | _ -> Task.FromResult []
 
@@ -861,10 +1057,19 @@ type QaSession(options: QaSessionOptions) =
                         |> Blackboard.renderHits
                 } }
 
-    let mutable catalog =
-        QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
+    let loadToolCatalog () =
+        let loaded =
+            QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
 
-    let responseToolCatalog () =
+        if options.enableDurableMemory then
+            loaded
+        else
+            { loaded with
+                tools = loaded.tools |> List.filter (isDurableMemorySearchTool >> not) }
+
+    let mutable catalog = loadToolCatalog ()
+
+    let responseToolCatalog includeBlackboard =
         let folder (usedNames, byName, tools) (tool: IQaTool) =
             let name = responseToolName usedNames tool
 
@@ -889,6 +1094,7 @@ type QaSession(options: QaSessionOptions) =
 
         let _, byName, tools =
             catalog.tools
+            |> List.filter (fun tool -> includeBlackboard || not (isBlackboardSearchTool tool))
             |> List.sortBy (fun tool -> tool.PluginName, tool.Name)
             |> List.fold folder (Set.empty, Map.empty, [])
 
@@ -897,9 +1103,27 @@ type QaSession(options: QaSessionOptions) =
 
     let mutable answerConnection: FsResponses.ResponseWebSocket option = None
 
-    let mutable answerConversation =
+    let emptyAnswerConversation generation =
         { previousResponseId = None
-          items = [] }
+          items = []
+          compacted = false
+          version = 0
+          generation = generation
+          compactionInProgress = false }
+
+    let answerConversationGate = obj ()
+
+    let mutable answerConversation = emptyAnswerConversation 0
+
+    let getAnswerConversation () =
+        lock answerConversationGate (fun () -> answerConversation)
+
+    let updateAnswerConversationState update =
+        lock answerConversationGate (fun () ->
+            answerConversation <- update answerConversation
+            answerConversation)
+
+    let answerConversationHasCompacted () = (getAnswerConversation ()).compacted
 
     do
         for log in memoryService.StartupLogs @ catalog.logs do
@@ -942,6 +1166,21 @@ type QaSession(options: QaSessionOptions) =
             | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
                 let! connection = liveAnswerConnection config cancellationToken
                 return! FsResponses.ResponsesWebSocket.createAndCollect connection request cancellationToken
+            | None -> return []
+        }
+
+    let runResponsesOfflineRequest request cancellationToken =
+        task {
+            match options.answerTransport with
+            | Some(QaAnswerTransport.CustomResponsesWebSocket createAndCollect) ->
+                return! createAndCollect request cancellationToken
+            | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
+                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
+
+                try
+                    return! FsResponses.ResponsesWebSocket.createAndCollect connection request cancellationToken
+                finally
+                    FsResponses.ResponsesWebSocket.dispose connection
             | None -> return []
         }
 
@@ -1008,9 +1247,7 @@ type QaSession(options: QaSessionOptions) =
               content = content
               createdAt = DateTimeOffset.UtcNow }
 
-        blackboard <-
-            blackboard
-            |> Blackboard.add (BlackboardRecords.toolObservation turnId observation)
+        addBlackboardRecord (BlackboardRecords.toolObservation turnId observation)
 
         observation
 
@@ -1062,7 +1299,7 @@ type QaSession(options: QaSessionOptions) =
 
     let ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken =
         async {
-            match answerConversation.previousResponseId with
+            match (getAnswerConversation ()).previousResponseId with
             | Some previousResponseId -> return Some previousResponseId
             | None ->
                 let request = responseWarmupRequest answerConfig prompt responseTools.tools
@@ -1070,11 +1307,16 @@ type QaSession(options: QaSessionOptions) =
 
                 match responseIdFromEvents events with
                 | Some responseId ->
-                    answerConversation <-
-                        { answerConversation with
-                            previousResponseId = Some responseId }
+                    let state =
+                        updateAnswerConversationState (fun state ->
+                            match state.previousResponseId with
+                            | Some _ -> state
+                            | None ->
+                                { state with
+                                    previousResponseId = Some responseId
+                                    version = state.version + 1 })
 
-                    return Some responseId
+                    return state.previousResponseId
                 | None ->
                     report
                         $"Answer Responses WebSocket warmup did not return a response id; sending stable instructions and tools with the next turn. {responsesDiagnostics events}."
@@ -1085,15 +1327,356 @@ type QaSession(options: QaSessionOptions) =
     let updateAnswerConversation userItem answer events =
         responseIdFromEvents events
         |> Option.iter (fun responseId ->
-            answerConversation <-
-                { previousResponseId = Some responseId
-                  items = answerConversation.items @ [ userItem; answerAssistantItem answer ] })
+            updateAnswerConversationState (fun state ->
+                { state with
+                    previousResponseId = Some responseId
+                    items = state.items @ [ userItem; answerAssistantItem answer ]
+                    version = state.version + 1 })
+            |> ignore)
 
     let responsesInputItems userItem replayHistory =
         if replayHistory then
-            answerConversation.items @ [ userItem ]
+            (getAnswerConversation ()).items @ [ userItem ]
         else
             [ userItem ]
+
+    let markCompactionFinished generation =
+        updateAnswerConversationState (fun state ->
+            if state.generation = generation then
+                { state with
+                    compactionInProgress = false }
+            else
+                state)
+        |> ignore
+
+    let tryCreateCompactionCheckpoint threshold =
+        lock answerConversationGate (fun () ->
+            let size = conversationSize answerConversation.items
+
+            if
+                answerConversation.compactionInProgress
+                || List.isEmpty answerConversation.items
+                || size <= threshold
+            then
+                None
+            else
+                answerConversation <-
+                    { answerConversation with
+                        compactionInProgress = true }
+
+                Some
+                    { generation = answerConversation.generation
+                      version = answerConversation.version
+                      itemCount = answerConversation.items.Length
+                      items = answerConversation.items })
+
+    let tryCreateCompactionRefreshInput checkpoint summary =
+        let summaryItem = compactionSummaryItem summary
+
+        lock answerConversationGate (fun () ->
+            if
+                answerConversation.generation <> checkpoint.generation
+                || answerConversation.items.Length < checkpoint.itemCount
+            then
+                None
+            else
+                let tail = answerConversation.items |> List.skip checkpoint.itemCount
+                let items = summaryItem :: tail
+                Some(items, answerConversation.version))
+
+    let tryApplyCompaction checkpoint refreshVersion refreshedItems responseId =
+        lock answerConversationGate (fun () ->
+            if
+                answerConversation.generation = checkpoint.generation
+                && answerConversation.version = refreshVersion
+            then
+                answerConversation <-
+                    { answerConversation with
+                        previousResponseId = Some responseId
+                        items = refreshedItems
+                        compacted = true
+                        version = answerConversation.version + 1
+                        compactionInProgress = false }
+
+                true
+            else
+                answerConversation <-
+                    { answerConversation with
+                        compactionInProgress = false }
+
+                false)
+
+    let rec runAnswerCompaction answerConfig prompt checkpoint =
+        async {
+            try
+                let token = sessionCancellation.Token
+
+                report
+                    $"Answer conversation compaction started: items={checkpoint.itemCount}; chars={conversationSize checkpoint.items}; version={checkpoint.version}."
+
+                let compactionRequest = responseCompactionRequest answerConfig checkpoint.items
+                let! compactionEvents = runResponsesOfflineRequest compactionRequest token |> Async.AwaitTask
+
+                let summary =
+                    FsResponses.ResponseStream.outputText compactionEvents
+                    |> Text.normalizeWhitespace
+
+                if String.IsNullOrWhiteSpace summary then
+                    report
+                        $"Answer conversation compaction returned empty text; keeping existing response history. {responsesDiagnostics compactionEvents}."
+
+                    markCompactionFinished checkpoint.generation
+                else
+                    match tryCreateCompactionRefreshInput checkpoint summary with
+                    | None ->
+                        report "Answer conversation compaction was discarded because the QA session was reconfigured."
+                        markCompactionFinished checkpoint.generation
+                    | Some(refreshedItems, refreshVersion) ->
+                        let responseTools = responseToolCatalog true
+
+                        let refreshRequest =
+                            responseConversationRefreshRequest answerConfig prompt responseTools.tools refreshedItems
+
+                        let! refreshEvents = runResponsesOfflineRequest refreshRequest token |> Async.AwaitTask
+
+                        match responseIdFromEvents refreshEvents with
+                        | Some responseId ->
+                            if tryApplyCompaction checkpoint refreshVersion refreshedItems responseId then
+                                report
+                                    $"Answer conversation compaction applied: compacted_items={checkpoint.itemCount}; retained_tail={refreshedItems.Length - 1}; summary_chars={summary.Length}; responseId={responseId}."
+                            else
+                                report
+                                    "Answer conversation compaction finished, but new turns arrived before the compacted response root could be applied; a later turn will retry if needed."
+
+                                scheduleAnswerCompactionIfNeeded answerConfig prompt
+                        | None ->
+                            report
+                                $"Answer conversation compaction could not refresh the response root; keeping existing response history. {responsesDiagnostics refreshEvents}."
+
+                            markCompactionFinished checkpoint.generation
+            with
+            | :? OperationCanceledException -> markCompactionFinished checkpoint.generation
+            | ex ->
+                report $"Answer conversation compaction failed: {ex.Message}"
+                markCompactionFinished checkpoint.generation
+        }
+
+    and scheduleAnswerCompactionIfNeeded answerConfig prompt =
+        match options.answerTransport, options.answerCompactionThresholdChars with
+        | Some _, Some threshold when threshold > 0 ->
+            match tryCreateCompactionCheckpoint threshold with
+            | Some checkpoint ->
+                Async.Start(runAnswerCompaction answerConfig prompt checkpoint, sessionCancellation.Token)
+            | None -> ()
+        | _ -> ()
+
+    let blackboardPrunePolicy () =
+        { triggerChars = max 1 options.blackboardPruning.triggerChars
+          targetChars = max 1 options.blackboardPruning.targetChars
+          preserveRecentTurns = max 0 options.blackboardPruning.preserveRecentTurns }
+
+    let blackboardSummarizerAvailable () =
+        options.answerTransport.IsSome || options.clients.answerGenerator.IsSome
+
+    let tryReportBlackboardPruningUnavailable () =
+        let shouldReport =
+            lock blackboardGate (fun () ->
+                let totalChars = Blackboard.totalTextChars blackboard
+
+                if
+                    options.blackboardPruning.enabled
+                    && not blackboardPruningUnavailableLogged
+                    && totalChars > options.blackboardPruning.triggerChars
+                then
+                    blackboardPruningUnavailableLogged <- true
+                    Some totalChars
+                else
+                    None)
+
+        shouldReport
+        |> Option.iter (fun totalChars ->
+            report
+                $"Blackboard pruning skipped because no model summarizer is configured: chars={totalChars}; trigger={options.blackboardPruning.triggerChars}.")
+
+    let tryCreateBlackboardPruningCheckpoint () =
+        if not options.blackboardPruning.enabled then
+            None
+        elif not (blackboardSummarizerAvailable ()) then
+            tryReportBlackboardPruningUnavailable ()
+            None
+        else
+            lock blackboardGate (fun () ->
+                if blackboardPruningInProgress then
+                    None
+                else
+                    match Blackboard.tryCreatePruneSelection (blackboardPrunePolicy ()) blackboard with
+                    | None -> None
+                    | Some selection ->
+                        blackboardPruningInProgress <- true
+
+                        Some
+                            { version = blackboardVersion
+                              selection = selection })
+
+    let markBlackboardPruningFinished () =
+        lock blackboardGate (fun () -> blackboardPruningInProgress <- false)
+
+    let blackboardSummaryInstructions =
+        "Summarize pruned QA blackboard records for future blackboard_search use. Preserve user goals and corrections, prior final answers, source-grounded findings with source names or chunk hints, tool results, durable-memory forget/retract observations, unresolved follow-ups, and conflicts. Do not invent facts. Write compact bullets grouped by topic."
+
+    let renderBlackboardSummaryRecord index (record: BlackboardRecord) =
+        let kind = BlackboardEntryKind.displayName record.kind
+        let score = record.score |> Option.map (sprintf "%.2f") |> Option.defaultValue "n/a"
+
+        $"[{index + 1}] id={record.id}; turn={record.turnId}; kind={kind}; created={record.createdAt:O}; score={score}\n{Text.truncate 3000 record.text}"
+
+    let blackboardSummaryUserText (selection: BlackboardPruneSelection) =
+        let records =
+            selection.recordsToSummarize
+            |> List.sortBy _.createdAt
+            |> List.mapi renderBlackboardSummaryRecord
+            |> String.concat "\n\n"
+
+        let dropOnly =
+            selection.recordsToDrop
+            |> List.map (fun record -> $"{record.id}:{BlackboardEntryKind.displayName record.kind}")
+            |> String.concat ", "
+
+        let preservedTurnIds = selection.preservedTurnIds |> String.concat ", "
+
+        $"Create one compact in-session blackboard summary for these records. Covered records will be removed after the summary is accepted; the summary must be useful for later search.\n\nTotal blackboard chars before pruning: {selection.totalChars}\nTarget chars after pruning: {selection.targetChars}\nPreserved recent turn ids: {preservedTurnIds}\nDrop-only operational records not included in the summary: {dropOnly}\n\nRecords to summarize:\n\n{records}"
+
+    let blackboardSummaryRequest answerConfig selection =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            input = [ FsResponses.IOitem.Message(FsResponses.Message.OfText(blackboardSummaryUserText selection)) ]
+            instructions = Some blackboardSummaryInstructions
+            max_output_tokens = Some(max 1 options.blackboardPruning.summaryMaxOutputTokens)
+            generate = Some true
+            reasoning = answerReasoning answerConfig
+            store = Some false
+            temperature = answerTemperature answerConfig
+            tools = Some []
+            tool_choice = None }
+
+    let summarizeBlackboardSelection selection cancellationToken =
+        async {
+            let answerConfig = modelConfig Answer
+
+            match options.answerTransport with
+            | Some _ ->
+                let request = blackboardSummaryRequest answerConfig selection
+                let! events = runResponsesOfflineRequest request cancellationToken |> Async.AwaitTask
+
+                let summary =
+                    FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace
+
+                if String.IsNullOrWhiteSpace summary then
+                    report
+                        $"Blackboard pruning summary returned empty text; keeping existing blackboard records. {responsesDiagnostics events}."
+
+                    return None
+                elif responseError events |> Option.isSome then
+                    report
+                        $"Blackboard pruning summary returned error; keeping existing blackboard records. {responsesDiagnostics events}."
+
+                    return None
+                else
+                    return Some summary
+            | None ->
+                match options.clients.answerGenerator with
+                | None -> return None
+                | Some client ->
+                    let opts = ChatOptions()
+                    opts.MaxOutputTokens <- Nullable(max 1 options.blackboardPruning.summaryMaxOutputTokens)
+
+                    if ModelCapabilities.supportsTemperature answerConfig.modelId then
+                        opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
+
+                    let messages =
+                        [ ChatMessage(ChatRole.System, blackboardSummaryInstructions)
+                          ChatMessage(ChatRole.User, blackboardSummaryUserText selection) ]
+
+                    let! response = client.GetResponseAsync(messages, opts, cancellationToken) |> Async.AwaitTask
+                    let summary = response.Text |> Text.normalizeWhitespace
+
+                    if String.IsNullOrWhiteSpace summary then
+                        report
+                            $"Blackboard pruning summary returned empty text; keeping existing blackboard records. {responseDiagnostics response}."
+
+                        return None
+                    else
+                        return Some summary
+        }
+
+    let tryApplyBlackboardPruning checkpoint summaryText =
+        let selectedIds =
+            checkpoint.selection.recordsToSummarize @ checkpoint.selection.recordsToDrop
+            |> List.map _.id
+            |> Set.ofList
+
+        let summaryRecord =
+            summaryText
+            |> Blackboard.summaryFromSelection checkpoint.selection
+            |> BlackboardRecords.compactedSummary
+
+        lock blackboardGate (fun () ->
+            let currentIds = blackboard.records |> List.map _.id |> Set.ofList
+
+            let selectedStillPresent =
+                selectedIds |> Set.forall (fun id -> currentIds.Contains id)
+
+            let protectedTurnIds =
+                Blackboard.recentTurnIds options.blackboardPruning.preserveRecentTurns blackboard
+                |> Set.ofList
+
+            let selectedNowProtected =
+                blackboard.records
+                |> List.exists (fun record ->
+                    selectedIds.Contains record.id
+                    && record.kind <> CompactedSummary
+                    && protectedTurnIds.Contains record.turnId)
+
+            if selectedStillPresent && not selectedNowProtected then
+                blackboard <- Blackboard.applyPruneSelection checkpoint.selection summaryRecord blackboard
+                blackboardVersion <- blackboardVersion + 1
+                blackboardPruningInProgress <- false
+                blackboardSummarized <- true
+                true
+            else
+                blackboardPruningInProgress <- false
+                false)
+
+    let runBlackboardPruning checkpoint =
+        async {
+            try
+                let token = sessionCancellation.Token
+
+                report
+                    $"Blackboard pruning started: records={checkpoint.selection.recordsToSummarize.Length}; drop_only={checkpoint.selection.recordsToDrop.Length}; chars={checkpoint.selection.totalChars}; version={checkpoint.version}."
+
+                let! summary = summarizeBlackboardSelection checkpoint.selection token
+
+                match summary with
+                | None -> markBlackboardPruningFinished ()
+                | Some summaryText ->
+                    if tryApplyBlackboardPruning checkpoint summaryText then
+                        report
+                            $"Blackboard pruning applied: summarized_records={checkpoint.selection.recordsToSummarize.Length}; dropped_records={checkpoint.selection.recordsToDrop.Length}; summary_chars={summaryText.Length}."
+                    else
+                        report
+                            "Blackboard pruning summary was discarded because the selected records are no longer safe to replace."
+            with
+            | :? OperationCanceledException -> markBlackboardPruningFinished ()
+            | ex ->
+                report $"Blackboard pruning failed: {ex.Message}"
+                markBlackboardPruningFinished ()
+        }
+
+    let scheduleBlackboardPruningIfNeeded () =
+        match tryCreateBlackboardPruningCheckpoint () with
+        | Some checkpoint -> Async.Start(runBlackboardPruning checkpoint, sessionCancellation.Token)
+        | None -> ()
 
     let responsesCreateAndComplete
         turnId
@@ -1183,7 +1766,9 @@ type QaSession(options: QaSessionOptions) =
 
             let answerAttempt maxOutputTokens replayHistory =
                 async {
-                    let responseTools = responseToolCatalog ()
+                    let responseTools =
+                        responseToolCatalog (answerConversationHasCompacted () || blackboardHasSummary ())
+
                     let! previousResponseId = ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
 
                     let! events, answer, toolObservations =
@@ -1200,11 +1785,13 @@ type QaSession(options: QaSessionOptions) =
 
                     if isPreviousResponseNotFound events && previousResponseId.IsSome then
                         report
-                            $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={answerConversation.items.Length}; {responsesDiagnostics events}."
+                            $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={(getAnswerConversation ()).items.Length}; {responsesDiagnostics events}."
 
-                        answerConversation <-
-                            { answerConversation with
-                                previousResponseId = None }
+                        updateAnswerConversationState (fun state ->
+                            { state with
+                                previousResponseId = None
+                                version = state.version + 1 })
+                        |> ignore
 
                         let! replayPreviousResponseId =
                             ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
@@ -1243,6 +1830,7 @@ type QaSession(options: QaSessionOptions) =
                       observations = toolObservations }
             elif not (String.IsNullOrWhiteSpace answer) then
                 updateAnswerConversation userItem answer events
+                scheduleAnswerCompactionIfNeeded answerConfig prompt
 
                 return
                     { answer = answer
@@ -1267,6 +1855,7 @@ type QaSession(options: QaSessionOptions) =
                           observations = retryToolObservations }
                 elif not (String.IsNullOrWhiteSpace retryAnswer) then
                     updateAnswerConversation userItem retryAnswer retryEvents
+                    scheduleAnswerCompactionIfNeeded answerConfig prompt
 
                     return
                         { answer = retryAnswer
@@ -1361,9 +1950,20 @@ type QaSession(options: QaSessionOptions) =
                                   observations = [] }
         }
 
+    let durableMemoryForgetObservation (snapshot: TranscriptSnapshot) logs =
+        if List.isEmpty logs then
+            []
+        else
+            [ { pluginName = "FsVoiceTools"
+                toolName = "durable_memory_forget"
+                query = snapshot.text
+                content = logs |> String.concat "\n"
+                createdAt = DateTimeOffset.UtcNow } ]
+
     let applyWriteback (snapshot: TranscriptSnapshot) (answer: string) =
         if
-            options.autoWriteback
+            options.enableDurableMemory
+            && options.autoWriteback
             && not (String.IsNullOrWhiteSpace answer)
             && not (isFallbackAnswer answer)
         then
@@ -1396,11 +1996,10 @@ type QaSession(options: QaSessionOptions) =
                     })
                 |> Task.WhenAll
 
-            catalog <- QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
+            catalog <- loadToolCatalog ()
 
-            answerConversation <-
-                { previousResponseId = None
-                  items = [] }
+            updateAnswerConversationState (fun state -> emptyAnswerConversation (state.generation + 1))
+            |> ignore
 
             for log in catalog.logs do
                 report log
@@ -1453,20 +2052,24 @@ type QaSession(options: QaSessionOptions) =
             let totalSw = Stopwatch.StartNew()
             let snapshot = createSnapshot request
 
-            blackboard <- blackboard |> Blackboard.add (BlackboardRecords.transcript snapshot)
+            addBlackboardRecord (BlackboardRecords.transcript snapshot)
 
             request.realtimeJudgement
             |> Option.iter (fun judgement ->
-                blackboard <-
-                    blackboard
-                    |> Blackboard.add (BlackboardRecords.realtimeJudgement snapshot.turnId judgement))
+                addBlackboardRecord (BlackboardRecords.realtimeJudgement snapshot.turnId judgement))
 
             let decision =
                 memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
 
-            blackboard <-
-                blackboard
-                |> Blackboard.add (BlackboardRecords.recallDecision snapshot.turnId decision)
+            addBlackboardRecord (BlackboardRecords.recallDecision snapshot.turnId decision)
+
+            let forgetLogs =
+                if options.enableDurableMemory then
+                    memoryService.RetractFromTurn snapshot
+                else
+                    []
+
+            let forgetObservations = durableMemoryForgetObservation snapshot forgetLogs
 
             let memoryTask =
                 task {
@@ -1504,12 +2107,10 @@ type QaSession(options: QaSessionOptions) =
 
             let allPlannedTools = plannedTools @ llmTools
 
-            blackboard <-
-                blackboard
-                |> Blackboard.addMany (
-                    allPlannedTools
-                    |> List.map (plannedToolSummary >> BlackboardRecords.plannedTool snapshot.turnId)
-                )
+            addBlackboardRecords (
+                allPlannedTools
+                |> List.map (plannedToolSummary >> BlackboardRecords.plannedTool snapshot.turnId)
+            )
 
             let toolSw = Stopwatch.StartNew()
 
@@ -1522,26 +2123,30 @@ type QaSession(options: QaSessionOptions) =
 
             let! memoryHits, memoryElapsedMs = memoryTask
             let! chunks, sourceRetrievalElapsedMs = sourceTask
+            let toolObservations = forgetObservations @ observations
 
-            blackboard <-
-                blackboard
-                |> Blackboard.addMany (memoryHits |> List.map (BlackboardRecords.memoryEvidence snapshot.turnId))
-                |> Blackboard.addMany (chunks |> List.map (BlackboardRecords.sourceEvidence snapshot.turnId))
-                |> Blackboard.addMany (observations |> List.map (BlackboardRecords.toolObservation snapshot.turnId))
+            addBlackboardRecords (
+                (memoryHits |> List.map (BlackboardRecords.memoryEvidence snapshot.turnId))
+                @ (chunks |> List.map (BlackboardRecords.sourceEvidence snapshot.turnId))
+                @ (toolObservations |> List.map (BlackboardRecords.toolObservation snapshot.turnId))
+            )
 
             let answerSw = Stopwatch.StartNew()
 
             let! answerResult =
-                answerWithModel snapshot decision memoryHits chunks observations cancellationToken
+                answerWithModel snapshot decision memoryHits chunks toolObservations cancellationToken
                 |> Async.StartAsTask
 
             answerSw.Stop()
 
             let answer = answerResult.answer
-            let allObservations = observations @ answerResult.observations
+            let allObservations = toolObservations @ answerResult.observations
 
             let writebackSw = Stopwatch.StartNew()
-            applyWriteback snapshot answer
+
+            if List.isEmpty forgetObservations then
+                applyWriteback snapshot answer
+
             writebackSw.Stop()
             totalSw.Stop()
 
@@ -1560,16 +2165,19 @@ type QaSession(options: QaSessionOptions) =
                   timedOut = false
                   createdAt = DateTimeOffset.UtcNow }
 
-            blackboard <-
-                blackboard
-                |> Blackboard.add (BlackboardRecords.answerCandidate snapshot.turnId answer)
-                |> Blackboard.add (BlackboardRecords.finalAnswer qaAnswer)
+            addBlackboardRecords
+                [ BlackboardRecords.answerCandidate snapshot.turnId answer
+                  BlackboardRecords.finalAnswer qaAnswer ]
+
+            scheduleBlackboardPruningIfNeeded ()
 
             return qaAnswer
         }
 
     interface IAsyncDisposable with
         member _.DisposeAsync() =
+            sessionCancellation.Cancel()
+
             for provider in contextProviders do
                 provider.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
@@ -1581,6 +2189,7 @@ type QaSession(options: QaSessionOptions) =
                 client.Dispose()
 
             answerConnection |> Option.iter FsResponses.ResponsesWebSocket.dispose
+            sessionCancellation.Dispose()
 
             ValueTask()
 

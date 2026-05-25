@@ -110,8 +110,6 @@ module Connect =
                                 realtimeConnectionRequested <- true
                                 connectRealtime mailbox session token apiKey connectionId connection realtimeSession
                         | TranscriptFinalized _ -> ()
-                        | ContextReady(_, chunks, inventory) ->
-                            log mailbox $"Context ready: {chunks.Length} chunk(s), {inventory.Length} source(s)."
                         | OracleResponseReady(_, Some candidate) ->
                             log mailbox $"Oracle final response: {Text.normalizeWhitespace candidate.answer}"
                         | OracleResponseReady(_, None) -> log mailbox "Oracle response unavailable."

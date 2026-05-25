@@ -12,19 +12,12 @@ module HostAgent =
 
         member this.Send msg = this.toHost.TryWrite msg |> ignore
 
-    let private sourceNames (chunks: SourceChunk list) =
-        chunks
-        |> List.map (fun c -> c.source.DisplayName)
-        |> List.distinct
-        |> String.concat "; "
-
     let private update (st: State) (msg: AgentMsg) =
         async {
             match msg with
             | Ag_Log msg -> st.Send(Log msg)
             | Ag_RequestRealtimeConnection session -> st.Send(RequestRealtimeConnection session)
             | Ag_TranscriptUpdated snapshot when snapshot.isFinal -> st.Send(TranscriptFinalized snapshot)
-            | Ag_ContextReady(snapshot, chunks, inventory) -> st.Send(ContextReady(snapshot, chunks, inventory))
             | Ag_ResponseReady(snapshot, candidate) -> st.Send(OracleResponseReady(snapshot, candidate))
             | Ag_FlowError err -> st.Send(Log err.ErrorText)
             | Ag_FlowDone e -> st.Send(FlowEnded e.abnormal)

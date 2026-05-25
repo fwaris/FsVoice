@@ -107,7 +107,7 @@ Important settings include:
 - hybrid PDF parsing and layout analysis;
 - plugin-specific settings.
 
-The app stores source files, indexes, durable memory, and settings in app-owned storage. Document indexes are reused until source files or index-affecting settings require reprocessing.
+The app stores source files, indexes, keyword cache, and settings in app-owned storage. Speak2Docs does not use durable memory storage. Document indexes are reused until source files or index-affecting settings require reprocessing.
 
 ## Documentation
 
