@@ -168,6 +168,20 @@ module QaAgent =
             st.bus.PostToAgent(Ag_Log $"PlugIn context providers failed to load: {ex.Message}")
             []
 
+    let private startAnswerTransportPreparation st (session: FsVoice.QA.IQaOrchestrator) =
+        match session with
+        | :? FsVoice.QA.IQaAnswerTransportPreparer as preparer ->
+            async {
+                try
+                    do! preparer.PrepareAnswerTransportAsync(CancellationToken.None) |> Async.AwaitTask
+                    st.bus.PostToAgent(Ag_Log "Answer Responses WebSocket prepared.")
+                with
+                | :? OperationCanceledException -> ()
+                | ex -> st.bus.PostToAgent(Ag_Log $"Answer Responses WebSocket preparation failed: {ex.Message}")
+            }
+            |> Async.Start
+        | _ -> ()
+
     let private configureSession st flags mode sources (session: FsVoice.QA.IQaOrchestrator) =
         async {
             KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
@@ -192,6 +206,8 @@ module QaAgent =
                 Ag_Log
                     $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName}."
             )
+
+            startAnswerTransportPreparation st session
 
             return session
         }

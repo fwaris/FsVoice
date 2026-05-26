@@ -152,3 +152,6 @@ type IQaOrchestrator =
 
     abstract ConfigureAsync: IQaContextProvider list * CancellationToken -> Task<string list>
     abstract AnswerAsync: QaTurnRequest * CancellationToken -> Task<QaAnswer>
+
+type IQaAnswerTransportPreparer =
+    abstract PrepareAnswerTransportAsync: CancellationToken -> Task

@@ -744,6 +744,11 @@ type QaSession(options: QaSessionOptions) =
         let policy = DurableMemory.renderRecallSpec decision
         $"Recall policy:\n{policy}\n\nTyped memory evidence:\n{memories}"
 
+    let answerInstructions () =
+        options.prompts.answerSystem
+        |> Option.orElse options.plugInProfile.answerSystemInstruction
+        |> Option.defaultValue DefaultPlugInPrompts.answerSystem
+
     let answerPrompt
         (snapshot: TranscriptSnapshot)
         (decision: SupervisorDecision)
@@ -758,11 +763,6 @@ type QaSession(options: QaSessionOptions) =
         let typedMemory = renderTypedMemory decision memoryHits
         let toolObservations = renderObservations observations
 
-        let systemPrompt =
-            options.prompts.answerSystem
-            |> Option.orElse options.plugInProfile.answerSystemInstruction
-            |> Option.defaultValue DefaultPlugInPrompts.answerSystem
-
         let userPrompt =
             options.prompts.answerUserTemplate
             |> Option.defaultValue DefaultPlugInPrompts.answerUserTemplate
@@ -773,7 +773,7 @@ type QaSession(options: QaSessionOptions) =
                   "sourceInventory", inventory
                   "sourceContext", sourceContext ]
 
-        { instructions = systemPrompt
+        { instructions = answerInstructions ()
           userPrompt = userPrompt }
 
     let createSnapshot (request: QaTurnRequest) =
@@ -1101,7 +1101,11 @@ type QaSession(options: QaSessionOptions) =
         { tools = List.rev tools
           byName = byName }
 
+    let answerConnectionGate = obj ()
     let mutable answerConnection: FsResponses.ResponseWebSocket option = None
+    let mutable answerConnectionTask: Task<FsResponses.ResponseWebSocket> option = None
+    let answerBootstrapGate = obj ()
+    let mutable answerBootstrapTask: Task<string option> option = None
 
     let emptyAnswerConversation generation =
         { previousResponseId = None
@@ -1132,19 +1136,54 @@ type QaSession(options: QaSessionOptions) =
     let answerConnectionIsOpen (connection: FsResponses.ResponseWebSocket) =
         connection.socket.State = Net.WebSockets.WebSocketState.Open
 
+    let startAnswerConnection config cancellationToken =
+        let task = FsResponses.ResponsesWebSocket.connect config cancellationToken
+        answerConnectionTask <- Some task
+        task
+
+    let clearCompletedAnswerConnectionTask (task: Task<FsResponses.ResponseWebSocket>) =
+        if task.IsCompleted then
+            lock answerConnectionGate (fun () ->
+                match answerConnectionTask with
+                | Some current when Object.ReferenceEquals(current, task) -> answerConnectionTask <- None
+                | _ -> ())
+
     let liveAnswerConnection config cancellationToken =
         task {
-            match answerConnection with
-            | Some connection when answerConnectionIsOpen connection -> return connection
-            | Some connection ->
-                FsResponses.ResponsesWebSocket.dispose connection
-                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
-                answerConnection <- Some connection
-                return connection
-            | None ->
-                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
-                answerConnection <- Some connection
-                return connection
+            let connectionOrTask =
+                lock answerConnectionGate (fun () ->
+                    match answerConnection with
+                    | Some connection when answerConnectionIsOpen connection -> Choice1Of2 connection
+                    | Some connection ->
+                        FsResponses.ResponsesWebSocket.dispose connection
+                        answerConnection <- None
+
+                        match answerConnectionTask with
+                        | Some task -> Choice2Of2 task
+                        | None -> startAnswerConnection config cancellationToken |> Choice2Of2
+                    | None ->
+                        match answerConnectionTask with
+                        | Some task -> Choice2Of2 task
+                        | None -> startAnswerConnection config cancellationToken |> Choice2Of2)
+
+            match connectionOrTask with
+            | Choice1Of2 connection -> return connection
+            | Choice2Of2 connectionTask ->
+                try
+                    let! connection = connectionTask.WaitAsync(cancellationToken)
+
+                    lock answerConnectionGate (fun () ->
+                        answerConnection <- Some connection
+
+                        match answerConnectionTask with
+                        | Some current when Object.ReferenceEquals(current, connectionTask) ->
+                            answerConnectionTask <- None
+                        | _ -> ())
+
+                    return connection
+                with ex ->
+                    clearCompletedAnswerConnectionTask connectionTask
+                    return raise ex
         }
 
     let runResponsesRequest request cancellationToken =
@@ -1297,31 +1336,61 @@ type QaSession(options: QaSessionOptions) =
             return outputs, observations |> List.choose id
         }
 
+    let clearCompletedAnswerBootstrapTask (task: Task<string option>) =
+        if task.IsCompleted then
+            lock answerBootstrapGate (fun () ->
+                match answerBootstrapTask with
+                | Some current when Object.ReferenceEquals(current, task) -> answerBootstrapTask <- None
+                | _ -> ())
+
+    let runAnswerBootstrap answerConfig prompt responseTools cancellationToken =
+        task {
+            let request = responseWarmupRequest answerConfig prompt responseTools.tools
+            let! events = runResponsesWarmupRequest request cancellationToken
+
+            match responseIdFromEvents events with
+            | Some responseId ->
+                let state =
+                    updateAnswerConversationState (fun state ->
+                        match state.previousResponseId with
+                        | Some _ -> state
+                        | None ->
+                            { state with
+                                previousResponseId = Some responseId
+                                version = state.version + 1 })
+
+                return state.previousResponseId
+            | None ->
+                report
+                    $"Answer Responses WebSocket warmup did not return a response id; sending stable instructions and tools with the next turn. {responsesDiagnostics events}."
+
+                return None
+        }
+
     let ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken =
         async {
             match (getAnswerConversation ()).previousResponseId with
             | Some previousResponseId -> return Some previousResponseId
             | None ->
-                let request = responseWarmupRequest answerConfig prompt responseTools.tools
-                let! events = runResponsesWarmupRequest request cancellationToken |> Async.AwaitTask
-
-                match responseIdFromEvents events with
-                | Some responseId ->
-                    let state =
-                        updateAnswerConversationState (fun state ->
-                            match state.previousResponseId with
-                            | Some _ -> state
+                let bootstrapTask =
+                    lock answerBootstrapGate (fun () ->
+                        match (getAnswerConversation ()).previousResponseId with
+                        | Some previousResponseId -> Task.FromResult(Some previousResponseId)
+                        | None ->
+                            match answerBootstrapTask with
+                            | Some task -> task
                             | None ->
-                                { state with
-                                    previousResponseId = Some responseId
-                                    version = state.version + 1 })
+                                let task = runAnswerBootstrap answerConfig prompt responseTools cancellationToken
+                                answerBootstrapTask <- Some task
+                                task)
 
-                    return state.previousResponseId
-                | None ->
-                    report
-                        $"Answer Responses WebSocket warmup did not return a response id; sending stable instructions and tools with the next turn. {responsesDiagnostics events}."
-
-                    return None
+                try
+                    let! responseId = bootstrapTask.WaitAsync(cancellationToken) |> Async.AwaitTask
+                    clearCompletedAnswerBootstrapTask bootstrapTask
+                    return responseId
+                with ex ->
+                    clearCompletedAnswerBootstrapTask bootstrapTask
+                    return raise ex
         }
 
     let updateAnswerConversation userItem answer events =
@@ -1978,6 +2047,30 @@ type QaSession(options: QaSessionOptions) =
 
     member _.ToolCatalog = catalog
 
+    member _.PrepareAnswerTransportAsync(cancellationToken) =
+        task {
+            match options.answerTransport with
+            | Some _ ->
+                use linkedCts =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sessionCancellation.Token)
+
+                let token = linkedCts.Token
+                let answerConfig = modelConfig Answer
+
+                let prompt =
+                    { instructions = answerInstructions ()
+                      userPrompt = "" }
+
+                let responseTools = responseToolCatalog false
+
+                let! _ =
+                    ensureAnswerBootstrap answerConfig prompt responseTools token
+                    |> Async.StartAsTask
+
+                return ()
+            | None -> return ()
+        }
+
     member _.ConfigureAsync(providers: IQaContextProvider list, cancellationToken) =
         task {
             for provider in contextProviders do
@@ -2206,3 +2299,7 @@ type QaSession(options: QaSessionOptions) =
 
         member this.AnswerAsync(request, cancellationToken) =
             this.AnswerAsync(request, cancellationToken)
+
+    interface IQaAnswerTransportPreparer with
+        member this.PrepareAnswerTransportAsync cancellationToken =
+            this.PrepareAnswerTransportAsync cancellationToken

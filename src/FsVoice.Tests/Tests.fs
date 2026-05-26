@@ -817,6 +817,119 @@ let ``qa session answers through responses websocket transport`` () =
     }
 
 [<Fact>]
+let ``qa session prepares responses websocket before first answer`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-prepared"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match request.generate with
+                | Some false -> [ responsesCreatedEvent "resp_prepared" ]
+                | _ -> [ responsesCompletedEvent "resp_answer" "prepared socket response" ])
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport }
+
+        use session = new QaSession(options)
+
+        let preparer = session :> IQaAnswerTransportPreparer
+        do! preparer.PrepareAnswerTransportAsync(CancellationToken.None)
+
+        Assert.Equal(1, captured.Count)
+        Assert.Equal(Some false, captured[0].generate)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("prepared socket response", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(Some "resp_prepared", captured[1].previous_response_id)
+        Assert.Equal(Some true, captured[1].generate)
+        Assert.Equal(None, captured[1].instructions)
+        Assert.Equal(None, captured[1].tools)
+    }
+
+[<Fact>]
+let ``qa session shares in flight response websocket preparation`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-shared-prep"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let capturedGate = obj ()
+
+        let bootstrapStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let releaseBootstrap =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let transport =
+            QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
+                task {
+                    lock capturedGate (fun () -> captured.Add request)
+
+                    match request.generate with
+                    | Some false ->
+                        bootstrapStarted.TrySetResult() |> ignore
+                        do! releaseBootstrap.Task.WaitAsync(cancellationToken)
+                        return [ responsesCreatedEvent "resp_shared_bootstrap" ]
+                    | _ -> return [ responsesCompletedEvent "resp_shared_answer" "shared prepared answer" ]
+                })
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerTransport = Some transport }
+
+        use session = new QaSession(options)
+
+        let preparer = session :> IQaAnswerTransportPreparer
+        let prepareTask = preparer.PrepareAnswerTransportAsync(CancellationToken.None)
+
+        do! bootstrapStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let answerTask = session.AnswerAsync(request, CancellationToken.None)
+        do! Task.Delay 50
+        releaseBootstrap.TrySetResult() |> ignore
+
+        do! prepareTask
+        let! answer = answerTask
+
+        let capturedRequests = lock capturedGate (fun () -> captured |> Seq.toList)
+
+        Assert.Equal("shared prepared answer", answer.answer)
+        Assert.Equal(2, capturedRequests.Length)
+        Assert.Equal(Some false, capturedRequests[0].generate)
+        Assert.Equal(Some "resp_shared_bootstrap", capturedRequests[1].previous_response_id)
+        Assert.Equal(Some true, capturedRequests[1].generate)
+    }
+
+[<Fact>]
 let ``qa session websocket answer uses previous response id after first turn`` () =
     task {
         let source =
