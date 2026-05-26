@@ -1,71 +1,102 @@
 # FsVoice
 
-FsVoice is an F#/.NET platform for constructing voice-enabled applications. The repository contains reusable voice runtime packages, plugin/tool contracts, event and session infrastructure, host bridge components, test helpers, and a .NET MAUI app. Question answering over selected sources is the current primary use case built on top of the platform.
+FsVoice is an F#/.NET 10 workspace for building voice-first question answering systems. The repo currently centers on Speak2Docs, a .NET MAUI app that lets a user select document sources, build or import local retrieval indexes, connect to OpenAI realtime voice, and ask questions about the selected material.
 
-The current mobile app lets a user add local PDF or Markdown sources, import zipped FsColbert index bundles, build or load local retrieval indexes, and ask questions by realtime voice through OpenAI models. The same platform pieces are intended to support other voice-enabled workflows with different plugins, tools, prompts, transports, and host experiences.
+The reusable pieces are split into small packages: typed voice orchestration contracts, RTFlow and ASP.NET hosting adapters, QA/plugin contracts, retrieval and PDF processing, OpenAI Responses helpers, CLI utilities, and tests.
 
-## What Is In This Repo
+## Current App: Speak2Docs
 
-- `src/FsVoice.Abstractions`: shared plugin, tool, event, memory, and transport contracts.
-- `src/FsVoice.Core`: runtime engine, event bus, tool dispatcher, and blackboard implementation.
-- `src/FsVoice.Types`: host/session message types shared by app and bridge layers.
-- `src/FsVoice.RTFlow`: RTFlow adapters for typed FsVoice orchestration sessions.
-- `src/FsVoice.Hosting.AspNetCore`: ASP.NET bridge runtime for browser, WebRTC, and WebSocket hosts.
-- `src/FsVoice.QA.Abstractions`: QA source, chunk, retrieval, tool, session, and plugin contracts.
-- `src/FsVoice.QA`: retrieval, durable memory, QA orchestration, tools, FsColbert indexing, and hybrid PDF processing.
-- `src/FsVoice.PdfRasterization`: platform-specific PDF rasterizers for hybrid PDF parsing.
-- `src/FsVoice.Tools`: reusable QA tool providers, currently including a current-time provider.
-- `src/FsVoice.Testing`: deterministic text runtime and fake transport helpers for tests.
-- `src/FsVoice.Cli`: command-line QA, indexing, and evaluation utilities.
-- `src/Speak2Docs.Orchestration`: platform-neutral mobile workflow and realtime/QA agents.
+Speak2Docs is the primary product built from this repo.
+
+- Realtime voice uses OpenAI Realtime over WebRTC. The app requests microphone permission when a realtime session starts.
+- The user provides an OpenAI API key in Settings. The app does not create an account or ship with a shared key.
+- Local source imports currently support PDF, Markdown, and zipped Speak2Docs/FsColbert index bundles. The QA runtime and CLI also support JSON knowledge sources.
+- The app ships a built-in sample FsColbert index for "AI on the Pulse: Real-Time Health Anomaly Detection with Wearable and Ambient Intelligence." Built-in sources can be hidden and restored.
+- Document state is tracked as queued, processing, ready, or failed. Users can select ready sources, retry failed processing, delete sources, cancel processing, and preview ready indexes.
+- Retrieval can use an internal document index or persisted FsColbert indexes with fallback.
+- Retrieval behavior includes lexical filtering, local query cleanup, optional LLM query expansion, optional keyword metadata generation, and source-balancing for broad summaries or comparisons.
+- PDF parsing can run in legacy mode or hybrid document-structure mode. Hybrid parsing can use layout analysis, platform PDF rasterizers, local ONNX layout models, and optional OCR model discovery.
+- The realtime front-end routes substantive spoken questions through a backend oracle tool. The QA backend then searches selected sources, tool observations, session blackboard context, and configured plugin context providers before producing the answer.
+- Speak2Docs disables durable memory storage in the app flow, but the reusable QA runtime still includes durable memory services for other hosts.
+
+The default model roles in source are:
+
+- Realtime: `gpt-realtime-2`
+- Transcriber: `gpt-4o-mini-transcribe`
+- Answer: `gpt-5.5`
+- Planner: `gpt-5-nano`
+- Keyword generation: `gpt-5-nano`
+- Query expansion: `gpt-5-nano`
+
+All model role ids can be overridden by plugins and by app settings.
+
+## Repository Layout
+
+- `src/FsVoice.Platform`: public typed voice contracts: `VoiceConnection`, `IVoiceSession`, `IVoiceOrchestration`, host context, and host message codecs.
+- `src/FsVoice.RTFlow`: adapter from an RTFlow workflow to the `IVoiceSession<'ToHost, 'FromHost>` contract.
+- `src/FsVoice.Hosting.AspNetCore`: ASP.NET Core bridge session store and endpoints for browser/WebRTC-style hosts.
+- `src/FsResponses`: typed OpenAI Responses API and Responses WebSocket request/event models used by the QA backend.
+- `src/FsVoice.QA.Abstractions`: QA contracts for sources, chunks, retrieval modes, sessions, plugins, tools, context providers, and model roles.
+- `src/FsVoice.QA`: QA runtime, FsColbert retrieval, keyword enrichment, plugin profiles, tool loading, blackboard, durable memory, and hybrid PDF processing.
+- `src/FsVoice.PdfRasterization`: desktop, Android, iOS, and Mac Catalyst PDF rasterizers for hybrid PDF parsing.
+- `src/FsVoice.Tools`: reusable QA tool providers. It currently includes a current-time provider.
+- `src/FsVoice.Cli`: command-line asking, index-bundle creation, and InsuranceQA evaluation utilities.
+- `src/Speak2Docs.Orchestration`: platform-neutral Speak2Docs workflow, agents, runtime settings, plugin loading, and source model.
 - `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst.
-- `src/FsVoice.Tests`: xUnit test suite.
+- `src/FsVoice.Tests`: tests for QA, retrieval, tools, hosting, orchestration, and app-adjacent behavior.
+- `src/FsResponsesTest`: tests for the OpenAI Responses request and stream-event helpers.
+- `data/qa-plug-ins`: sample QA plugin profiles, currently including `insuranceqa.json`.
+- `docs`: public support, settings, privacy, terms, third-party notices, release notes, and store metadata.
+- `build/release`: local release scripts and signing environment templates for Android, iOS, and Mac Catalyst.
 
-## Platform Capabilities
+## QA Plugins And Tools
 
-- Typed voice application contracts for plugins, tools, events, memory, and transports.
-- Runtime engine, event bus, tool dispatcher, and blackboard primitives for voice workflows.
-- RTFlow and ASP.NET bridge layers for composing voice sessions across app and browser/WebRTC hosts.
-- Test/runtime helpers for deterministic text-mode and fake-transport workflows.
-- Plugin-oriented configuration for prompts, model roles, runtime options, settings fields, tools, and context providers.
+QA plugins implement `IQaPlugIn` from `FsVoice.QA.Abstractions`. A plugin supplies a `PlugInDefinition` with:
 
-## QA Features
+- behavior profile, voice replacements, query expansion rules, keyword hints, and answer instructions;
+- prompt templates for realtime, transcription, answers, tool planning, keywords, and spoken oracle results;
+- model role defaults for realtime, transcription, answers, planning, keywords, and query expansion;
+- runtime defaults such as retrieval mode, tool planning, query expansion, keyword elaboration, lexical filtering, context limits, timeouts, and writeback behavior;
+- optional settings fields shown by hosts;
+- optional QA tool providers and context providers.
 
-- Realtime voice session using `gpt-realtime-2` by default.
-- Backend answer/oracle model using `gpt-5.5` by default.
-- Separate model roles for realtime, transcription, answer generation, planning, keyword generation, and query expansion.
-- Unified source picker for `.pdf`, `.md`, and `.zip` files.
-- Local source library with ready, failed, retry, selected, and delete states.
-- FsColbert semantic retrieval with persisted `.fsci` indexes and internal fallback retrieval.
-- Import of zipped FsVoice/FsColbert index bundles.
-- Optional keyword enrichment with `gpt-5-nano`.
-- Hybrid PDF parsing with local layout analysis and OCR-related support.
-- Index preview page for ready sources, showing random chunk samples, keywords, lexical terms, and vector summaries.
-- Built-in and folder-loaded QA plugins with prompt, model, runtime, settings, tool, and context-provider hooks.
-- Durable memory and tool-planning support in the QA backend.
+Speak2Docs loads plugins from bundled assemblies and, where supported, from `AppData/plug-ins/*.dll`. Folder-loaded plugins are disabled on iOS. If no selected plugin is available, the host falls back to the built-in Generic QA plugin.
 
-## Plugins
+The QA runtime always includes built-in tools for selected-source search, source inventory, durable-memory search, and session blackboard search. Additional tools can come from a plugin, from a configured tool-provider directory, or from packages such as `FsVoice.Tools`.
 
-QA plugins implement `IQaPlugIn` from `FsVoice.QA.Abstractions`. A QA plugin provides:
+## Source Indexes And Storage
 
-- a `PlugInDefinition` with prompts, model role defaults, runtime options, settings fields, and behavior profile;
-- optional QA tool providers;
-- optional context providers.
+Speak2Docs stores its document library, copied sources, imported bundles, persisted FsColbert indexes, hidden built-in source list, settings, and keyword caches in app-owned storage.
 
-The app host scans bundled assemblies and, where supported, `AppData/plug-ins/*.dll`. It falls back to the built-in Generic QA plugin when no active plugin is available. The host then applies user overrides for model roles, retrieval mode, lexical filtering, keyword indexing, and plugin settings before starting the realtime and QA agents.
+FsColbert indexes are persisted as `.fsci` files with metadata fingerprints so source changes, parser changes, plugin profile changes, and keyword settings can trigger rebuilding when needed. Index bundles use an `index-bundle.json` manifest plus `documents/` and `indexes/` files. The app can import zipped bundles, and the CLI can create either a directory bundle or a `.zip`.
 
-At the lower platform layer, `FsVoice.Abstractions` and `FsVoice.Core` define more general voice-plugin, tool, runtime, event, memory, and transport contracts that are not tied to document QA.
+Deleting a user source removes the app library entry and clears persisted FsColbert indexes. Deleting a built-in source hides it until the user restores built-in indexes.
 
 ## Build
 
-Restore packages first, then build the solution or a specific target:
+Install the .NET 10 SDK first. Building the MAUI app also requires the relevant MAUI workloads and platform toolchains.
+
+Restore packages:
 
 ```bash
 dotnet restore FsVoice.slnx
+```
+
+Build the core/testable projects without requiring a full MAUI app build:
+
+```bash
+dotnet build src/FsVoice.Tests/FsVoice.Tests.fsproj --no-restore
+dotnet build src/FsResponsesTest/FsResponsesTest.fsproj --no-restore
+dotnet build src/FsVoice.Cli/FsVoice.Cli.fsproj --no-restore
+```
+
+Build the full solution when MAUI workloads are installed:
+
+```bash
 dotnet build FsVoice.slnx --no-restore
 ```
 
-MAUI app targets:
+Build Speak2Docs targets:
 
 ```bash
 dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-android --no-restore --nologo
@@ -73,52 +104,98 @@ dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-ios --no-restore --nolo
 dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-maccatalyst -r maccatalyst-arm64 --no-restore --nologo
 ```
 
-Android builds require minSdk 24 because ONNX Runtime's Android package declares that minimum. Some Android builds currently emit native-library page-size and duplicate WebRTC library warnings; these are non-fatal in the current debug build.
+Android requires minSdk 24 because ONNX Runtime's Android package declares that minimum.
 
 ## Test
 
-Run the main test suite with:
+Run the non-live test suites:
 
 ```bash
 dotnet test src/FsVoice.Tests/FsVoice.Tests.fsproj
+dotnet test src/FsResponsesTest/FsResponsesTest.fsproj
 ```
+
+Some `FsResponsesTest` tests are live OpenAI smoke tests and are skipped by default.
 
 ## CLI
 
-`FsVoice.Cli` supports asking questions over sources, building FsColbert index bundles, and running InsuranceQA evaluation workflows.
+The CLI reads `OPENAI_API_KEY` by default or accepts `--api-key`.
+
+Ask over one or more sources:
 
 ```bash
-dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- ask --question "Summarize the abstract" --source path/to/paper.pdf
-dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- index-folder --input docs --output bundle.zip --bundle-id my-docs --index-keywords
+dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- ask \
+  --question "Summarize the abstract" \
+  --source path/to/paper.pdf
 ```
 
-The CLI reads `OPENAI_API_KEY` by default, or accepts `--api-key`.
+Create an index bundle from a folder of PDF, Markdown, or JSON sources:
+
+```bash
+dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- index-folder \
+  --input docs \
+  --output bundle.zip \
+  --bundle-id my-docs \
+  --index-keywords
+```
+
+Useful CLI options include:
+
+- `--retrieval internal|fscolbert`
+- `--answer-model`
+- `--small-model`
+- `--storage-root`
+- `--plug-in-profile`
+- `--json` for structured `ask` output
+- `--layout-model heron|pp-doclayout-m` for `index-folder`
+- `--layout-plugin` and `--layout-plugin-type` for trusted custom layout providers
+
+The CLI also includes `insuranceqa-eval`, `insuranceqa-search-eval`, and `insuranceqa-elaborate-index` workflows for retrieval and answer-quality experiments.
 
 ## Configuration
 
-In the MAUI app, open Settings and provide an OpenAI API key. Use a separate key for each app, device, automation, or experiment when practical, monitor usage in the OpenAI platform dashboard, and revoke keys that are no longer needed or may have been exposed.
+Important Speak2Docs settings include:
 
-Important settings include:
-
+- OpenAI API key;
+- active QA plugin;
 - model role overrides;
-- retrieval mode: internal document index or FsColbert index with fallback;
+- max answer output tokens;
+- retrieval mode;
 - lexical filtering;
-- index keyword generation;
-- hybrid PDF parsing and layout analysis;
+- keyword index elaboration;
+- hybrid PDF parsing;
+- layout analysis;
+- activity log verbosity;
 - plugin-specific settings.
 
-The app stores source files, indexes, keyword cache, and settings in app-owned storage. Speak2Docs does not use durable memory storage. Document indexes are reused until source files or index-affecting settings require reprocessing.
+The app persists settings with MAUI preferences and app-owned files. Avoid committing API keys, generated release packages, signing files, imported private documents, or local app data.
 
-## Documentation
+## Release
 
-- Platform component assembly: `docs/platform-component-assembly.md`
-- Exploded component diagram: `diagrams/platform-component-assembly.mmd`
-- Settings help: `docs/fsvoice/settings.html`
+Release scripts live under `build/release`:
+
+- `publish-android.sh` builds a signed Android App Bundle.
+- `publish-ios.sh` builds an iOS App Store package.
+- `publish-maccatalyst.sh` builds a Mac Catalyst app.
+- `release.env.example` documents required local environment variables.
+- `android-signing.properties.example` and `ios-export-options.template.plist` are templates only.
+
+See `docs/release.md` for release checklist details. Do not commit keystores, provisioning profiles, certificates, App Store Connect keys, Google Play service-account JSON, OpenAI reviewer keys, or generated `.ipa`, `.aab`, and `.apk` files.
+
+## Public Docs
+
+- Support index: `docs/index.md`
+- Settings help: `docs/fsvoice/settings.md`
+- Terms: `docs/fsvoice/terms.md`
+- Privacy policy: `docs/fsvoice/privacy.md`
+- Third-party notices: `docs/fsvoice/third-party-notices.md`
 - Store listing draft: `docs/store-listing.md`
 - Store privacy notes: `docs/store-privacy.md`
-- Release guide: `docs/release.md`
-- Package readmes live next to their projects under `src/`.
 
 ## Licensing
 
-FsVoice source code is licensed under MIT. Packages that embed or redistribute third-party model assets include package-specific notices. `FsVoice.QA` embeds the `PP-DocLayout-M` ONNX model; see `src/FsVoice.QA/PackageNotices/PP-DocLayout-M-NOTICE.md` for attribution and checksum details.
+FsVoice source code is licensed under MIT.
+
+`FsVoice.QA` is packaged as `MIT AND Apache-2.0` because it embeds the `PP-DocLayout-M` ONNX model. See `src/FsVoice.QA/PackageNotices/PP-DocLayout-M-NOTICE.md` for model attribution and checksum details.
+
+Speak2Docs also includes a built-in sample document and local FsColbert index for an arXiv paper licensed under Creative Commons Attribution 4.0. See `src/Speak2Docs/Resources/Raw/FsColbertIndexes/NOTICE.md`.
