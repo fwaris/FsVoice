@@ -1,8 +1,39 @@
-# FsVoice and Speak2Docs: Building Voice-First Document QA in F#
+# FsVoice - A Platform for Building Conversational Applications
 
 ![FsVoice platform overview](../imgs/platform.png)
 
-Most voice apps still feel like chat apps with a microphone attached.
+In an highly contested AI marketplace, OpenAI currently has a true strategic moat with its `gpt-realtime-XX' voice APIs. Their core advantage is the multitude of available voices that exhibit natural tone, intonation and pacing. OpenAI has truly crossed the [uncanny valley](https://spectrum.ieee.org/the-uncanny-valley?utm_source=chatgpt.com) here.
+
+Despite these capabilities most voice apps still feel like chat apps with a microphone attached. FsVoice exists to exploit the realtime APIs' capabilities to the fullest. The following sections explain what the APIs offer (or don't offer) and how FsVoice exploits the available features or fills the gaps.
+
+## 1. Realtime Two-way Message Streams
+The Realtime API connection is established over either *WebRTC* or *Web Sockets*. Once connected, the API continuously streams events to the application. The application receives these events in real time and can respond immediately: either by adjusting its own behavior or by sending messages back to the API to influence the conversation state, behavior, or flow on the API side.
+
+FsVoice preserves 'mechanical sympathy' by authentically treating the API as two-way message channel rather trying to morph it into a chat-style interface. For this, it builds upon three prior-developed frameworks:
+
+- [*RTOpenAI.Events*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTOpenAI.Events) which provides strongly-typed wrappers over realtime events for easier API discoverability and use. These are usable with both *WebRTC* and *Web Sockets* connections.
+- [*RTOpenAI.Api*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTOpenAI.Api) provides *WebRTC* connectivity for mobile apps (IOS and Android). Other libraries exist for non-mobile use.
+- [*RTFlow*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTFlow) is framework for constructing realtime, multi-agent orchestrations. As we will see later this capability will prove quite useful for addressing some of the realtime APIs short comings.
+
+## 2. Managing the *Realtime* <-> *Instruction Following* Tradeoff
+
+By necessity, gpt-realtime is optimized for low-latency response so that spoken conversations remain fluid and natural. The tradeoff is that it has more limited instruction-following and reasoning capabilities than slower, text-oriented models. Realtime may lose context in long, drawn out conversations. And its certainly not as strong a reasoner as the gpt-5.X family. FsVoice manages this tradeoff in a two distinct ways, discussed next.
+
+### Multi-Agent: Voice + Oracle
+FsVoice pairs the real-time voice model with a gpt-5.x model in a multi-agent setup. The Voice agent owns the real-time connection and handles the live conversational flow, while collaborating with an Oracle agent for complex queries through real-time messages sent over the Agent Bus. This does introduce additional latency, but the overall experience remains acceptable because the real-time model can bridge the delay with natural conversational fillers such as “Let me check...” or “Give me a moment...”. This idea is inspired by [Kame](https://pub.sakana.ai/kame/) from *sakana.ai*. In my experiments I found that gpt-realtime does not respond so well to injected suggestions from the *Oracle* but rather what works well is gpt-realtime using the *Oracle* as a *tool provider*. It then honors the responses much more.
+
+### OpenAI *Responses* API over *Web Sockets*
+To further reduce *Oracle* latency, I moved FsVoice to the new *Web Sockets*-based version of the OpenAI *Responses* API. This gives FsVoice a persistent, low-overhead communication channel between the *Oracle* agent and the serving LLM.
+
+Key benefits include:
+
+- **Lower per-call latency**: With traditional HTTP requests, each model call incurs request setup overhead. With *Web Sockets*, the connection remains open, allowing FsVoice to send Oracle requests immediately over an already-established channel.
+
+- **Server-side conversation state**: The *Responses* API allows FsVoice to send only the latest message while the prior conversation context is retained server-side. This reduces latency when compared to the common pattern in traditional chat APIs, where the full message history must be resent on every call.
+
+- **High cache hit rate**: Since *Responses* encourages append-only context, the chances of using cached tokens becomes much higher. The use of cached tokens significantly reduces not only latency but also cost. Cached tokens are about 1/10th the cost of regular tokens. Cache strategy should be a significant component of contemporary AI systems. 
+
+To reduce context bloat and the potential dilution of recent information, FsVoice periodically compacts the *Oracle* context. This is done offline so as not not impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via a tool call if required.
 
 That is useful, but it is not the same thing as a voice-first system. A voice-first app has to listen continuously, decide when speech is casual and when it needs a grounded answer, coordinate realtime audio with slower backend reasoning, search local context, call tools, and return something short enough to speak without losing the evidence behind it.
 
