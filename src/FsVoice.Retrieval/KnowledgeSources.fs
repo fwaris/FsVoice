@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Retrieval
 
 open System
 open System.IO
@@ -11,6 +11,8 @@ open FSharp.Control
 open Microsoft.Extensions.AI
 open System.Text
 open System.Text.RegularExpressions
+open FsVoice.Core
+open FsVoice.Ctx
 
 module KnowledgeSources =
     [<Literal>]
@@ -694,8 +696,7 @@ module KnowledgeSources =
         if String.IsNullOrWhiteSpace query then
             None
         else
-            let processed =
-                Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile query
+            let processed = QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile query
 
             let target = tryExtractRetrievalTarget query
 

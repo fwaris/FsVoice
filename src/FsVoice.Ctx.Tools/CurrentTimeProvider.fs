@@ -1,10 +1,10 @@
-namespace FsVoice.Tools
+namespace FsVoice.Ctx.Tools
 
 open System
 open System.Collections.Generic
 open System.Threading
 open System.Threading.Tasks
-open FsVoice.QA
+open FsVoice.Ctx
 
 type CurrentTimeQaTool() =
     interface IQaTool with

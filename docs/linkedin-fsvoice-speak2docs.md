@@ -64,9 +64,9 @@ In topology D, FsVoice sits directly on the SIP side of a telephony flow. It rec
 
 
 ## 2. FsVoice Architecture
-As a platform, FsVoice has an open, pluggable architecture. Applications can be constructed by implementing well defined interfaces and assembling pre-built components a-la-carte. The top infographic depicts the platform artifacts and how they are used to construct the Speak2Docs sample application. The main interfaces and components are described next.
+As a platform, FsVoice has an open, pluggable architecture. Applications can be constructed by implementing well defined interfaces and assembling pre-built components a-la-carte. The top infographic depicts the platform artifacts and how they are used to construct the Speak2Docs sample application. The main interfaces and components are described in more detail next.
 
-- **FsVoice.Platform**: Contains interfaces that abstracts the orchestration functionality from the hosting environment so orchestrations to be plugged into mobile, Web or SIP-enabled hosts. 
+- **FsVoice.Platform**: Contains interfaces that abstract the orchestration functionality from the hosting environment so orchestrations are pluggable into mobile, Web or SIP-enabled hosts. 
 
 - **FsResponses**: Supports the OpenAI *Responses* API over *Web Sockets* with strongly-types message wrappers for easier discoverability and use.
 

@@ -1,5 +1,11 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/FsVoice.Core/FsVoice.Core.fsproj" />
+    <Project Path="src/FsVoice.Ctx.Contracts/FsVoice.Ctx.Contracts.fsproj" />
+    <Project Path="src/FsVoice.Retrieval/FsVoice.Retrieval.fsproj" />
+    <Project Path="src/FsVoice.Ctx.Runtime/FsVoice.Ctx.Runtime.fsproj" />
+    <Project Path="src/FsVoice.Ctx.Tools/FsVoice.Ctx.Tools.fsproj" />
+    <Project Path="src/FsVoice.Retrieval.PdfRasterization/FsVoice.Retrieval.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.QA.Abstractions/FsVoice.QA.Abstractions.fsproj" />
     <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
     <Project Path="src/FsVoice.QA/FsVoice.QA.fsproj" />

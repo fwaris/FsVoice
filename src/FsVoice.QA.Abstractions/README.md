@@ -1,7 +1,7 @@
 # FsVoice.QA.Abstractions
 
-Shared contracts for FsVoice question-answering integrations.
+Deprecated compatibility facade for `FsVoice.Ctx.Contracts`.
 
-This package contains the source, chunk, retrieval, tool, provider, and session types used by FsVoice QA implementations. Use it when building plugins or host applications that need to integrate with FsVoice without taking a dependency on the full QA runtime.
+New code should reference `FsVoice.Ctx.Contracts` directly. This package forwards the old `FsVoice.QA` source names during migration.
 
 License: MIT.

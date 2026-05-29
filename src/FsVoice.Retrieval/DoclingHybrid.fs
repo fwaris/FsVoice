@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Retrieval
 
 open System
 open System.Diagnostics
@@ -12,6 +12,7 @@ open Microsoft.ML.OnnxRuntime.Tensors
 open FsColbert
 open RapidOcrNet
 open SkiaSharp
+open FsVoice.Core
 
 type DoclingLayoutModelProviderContext =
     { storageRoot: string
@@ -145,7 +146,7 @@ module DoclingHybrid =
                     async {
                         return
                             Error
-                                $"No document structure PDF rasterizer is registered for '{path}'. Reference FsVoice.PdfRasterization and call PdfRasterizer.register() before using Hybrid PDF parsing."
+                                $"No document structure PDF rasterizer is registered for '{path}'. Reference FsVoice.Retrieval.PdfRasterization and call PdfRasterizer.register() before using Hybrid PDF parsing."
                     } }
 
     type private RapidOcrProvider(ocr: RapidOcr) =
@@ -258,7 +259,7 @@ module DoclingHybrid =
         |> String.concat ""
 
     let private ppDocLayoutMResourceName =
-        "FsVoice.QA.Resources.Models.pp-doclayout-m.onnx"
+        "FsVoice.Retrieval.Resources.Models.pp-doclayout-m.onnx"
 
     let private tryExtractEmbeddedPpDocLayoutM path =
         try

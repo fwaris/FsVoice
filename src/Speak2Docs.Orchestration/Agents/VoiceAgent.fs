@@ -7,6 +7,7 @@ open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open FSharp.Control
+open FsVoice.Core
 open FsVoice.Platform
 open RTOpenAI.Events
 open RTFlow
@@ -90,23 +91,23 @@ module VoiceAgent =
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
 
-    let private plugInConfig initialSourceCount (plugIn: FsVoice.QA.PlugInDefinition) =
-        let plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
-        let realtime = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Realtime plugIn
-        let transcriber = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Transcriber plugIn
-        let answer = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer plugIn
+    let private plugInConfig initialSourceCount (plugIn: FsVoice.Ctx.PlugInDefinition) =
+        let plugIn = FsVoice.Ctx.PlugInDefinition.sanitize plugIn
+        let realtime = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Realtime plugIn
+        let transcriber = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Transcriber plugIn
+        let answer = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer plugIn
 
         { realtimeModel = realtime.modelId
           transcriberModel = transcriber.modelId
           transcriberPrompt =
             plugIn.prompts.transcriberPrompt
-            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.transcriberPrompt
+            |> Option.defaultValue FsVoice.Ctx.DefaultPlugInPrompts.transcriberPrompt
           instructions =
             plugIn.prompts.realtimeInstructions
-            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.realtimeInstructions
+            |> Option.defaultValue FsVoice.Ctx.DefaultPlugInPrompts.realtimeInstructions
           speechResultInstructions =
             plugIn.prompts.speechResultInstruction
-            |> Option.defaultValue FsVoice.QA.DefaultPlugInPrompts.speechResultInstruction
+            |> Option.defaultValue FsVoice.Ctx.DefaultPlugInPrompts.speechResultInstruction
           initialSourceCount = max 0 initialSourceCount
           answerMaxOutputTokens =
             answer.maxOutputTokens
@@ -288,12 +289,13 @@ module VoiceAgent =
         let revision = st.revision + 1
 
         revision,
-        { turnId = itemId
-          itemId = itemId
-          revision = revision
-          text = text
-          isFinal = isFinal
-          receivedAt = DateTimeOffset.UtcNow }
+        ({ turnId = itemId
+           itemId = itemId
+           revision = revision
+           text = text
+           isFinal = isFinal
+           receivedAt = DateTimeOffset.UtcNow }
+        : TranscriptSnapshot)
 
     let private userSnapshotForToolCall (toolQuestion: string) (snapshot: TranscriptSnapshot) =
         let text =
@@ -404,7 +406,7 @@ module VoiceAgent =
         | _, Some value when stringIsAny [ "correct"; "forget" ] value -> true
         | _ -> false
 
-    let private tryRealtimeJudgement (content: string) =
+    let private tryRealtimeJudgement (content: string) : RealtimeJudgement option =
         let parsed =
             tryDeserialize<RealtimeJudgementEnvelope> content
             |> Option.bind _.realtime_judgement
@@ -446,16 +448,19 @@ module VoiceAgent =
                     (dto.conflict_likely |> Option.defaultValue false)
                     || isCorrectionTurn turnKind memoryAction
 
-                Some
+                Some(
                     { turnKind = turnKind
                       topicContinuity = dto.topic_continuity
                       memoryAction = memoryAction
                       needsExternalContext = needsExternalContext
                       confidence = dto.confidence |> Option.defaultValue 0.5
                       riskFlags =
-                        { memoryMutation = memoryMutation
-                          sensitive = sensitive
-                          conflictLikely = conflictLikely } }
+                        ({ memoryMutation = memoryMutation
+                           sensitive = sensitive
+                           conflictLikely = conflictLikely }
+                        : RiskFlags) }
+                    : RealtimeJudgement
+                )
 
     let private dispatchToolCall (st: VoiceState) (fc: ContentFunctionCall) =
         let question = toolQuestion fc.arguments

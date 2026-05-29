@@ -13,8 +13,10 @@ open System.Text.Json.Serialization
 open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
-open FsVoice.PdfRasterization
-open FsVoice.QA
+open FsVoice.Retrieval.PdfRasterization
+open FsVoice.Ctx
+open FsVoice.Retrieval
+open FsVoice.Core
 open Microsoft.Extensions.AI
 
 module Program =
@@ -1434,7 +1436,7 @@ Answers:
         (parsed: ParsedArgs)
         (retrieval: KnowledgeSources.RetrievalIndex)
         (maxResults: int)
-        (processed: Text.ProcessedQuery)
+        (processed: ProcessedQuery)
         (replay: ReplayExpansion)
         : Async<SourceChunk list * string list> =
         async {
@@ -1547,7 +1549,7 @@ Answers:
 
             for index, question in selected |> List.indexed do
                 let processed =
-                    Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile question.question
+                    QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile question.question
 
                 let expansionLogs = ResizeArray<string>()
                 let sw = Stopwatch.StartNew()

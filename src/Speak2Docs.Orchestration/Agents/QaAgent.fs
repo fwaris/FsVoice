@@ -14,10 +14,10 @@ module QaAgent =
         { bus: WBus<FlowMsg, AgentMsg>
           storageRoot: string
           apiKey: string
-          plugIn: FsVoice.QA.PlugInDefinition
-          qaPlugIn: FsVoice.QA.IQaPlugIn
+          plugIn: FsVoice.Ctx.PlugInDefinition
+          qaPlugIn: FsVoice.Ctx.IQaPlugIn
           plugInSettings: Map<string, string>
-          session: FsVoice.QA.IQaOrchestrator option
+          session: FsVoice.Ctx.IQaOrchestrator option
           retrievalMode: Speak2Docs.RetrievalMode
           sources: KnowledgeSource list
           flags: SourceFlags }
@@ -26,89 +26,50 @@ module QaAgent =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
-    let private toQaMode (mode: Speak2Docs.RetrievalMode) : FsVoice.QA.RetrievalMode =
+    let private toQaMode (mode: Speak2Docs.RetrievalMode) : FsVoice.Ctx.RetrievalMode =
         match mode with
-        | InternalDocumentIndex -> FsVoice.QA.RetrievalMode.InternalDocumentIndex
-        | FsColbertWithFallback -> FsVoice.QA.RetrievalMode.FsColbertWithFallback
-
-    let private toQaSource (source: KnowledgeSource) : FsVoice.QA.KnowledgeSource =
-        let kind =
-            match source.kind with
-            | Pdf -> FsVoice.QA.KnowledgeSourceKind.Pdf
-            | Markdown -> FsVoice.QA.KnowledgeSourceKind.Markdown
-            | Json -> FsVoice.QA.KnowledgeSourceKind.Json
-
-        { FsVoice.QA.KnowledgeSource.kind = kind
-          location = source.location
-          enabled = source.enabled }
+        | InternalDocumentIndex -> FsVoice.Ctx.RetrievalMode.InternalDocumentIndex
+        | FsColbertWithFallback -> FsVoice.Ctx.RetrievalMode.FsColbertWithFallback
 
     let private pdfParsingMode flags =
         if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.Hybrid
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
         elif flags.useHybridPdfParsing then
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.Legacy
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
-    let private toWorkflowSource (source: FsVoice.QA.KnowledgeSource) : KnowledgeSource =
-        let kind =
-            match source.kind with
-            | FsVoice.QA.KnowledgeSourceKind.Pdf -> Pdf
-            | FsVoice.QA.KnowledgeSourceKind.Markdown -> Markdown
-            | FsVoice.QA.KnowledgeSourceKind.Json -> Json
+    let private modelConfig role (plugIn: FsVoice.Ctx.PlugInDefinition) =
+        FsVoice.Ctx.PlugInDefinition.model role plugIn
 
-        { kind = kind
-          location = source.location
-          enabled = source.enabled }
-
-    let private toWorkflowChunk (chunk: FsVoice.QA.SourceChunk) : SourceChunk =
-        { source = toWorkflowSource chunk.source
-          index = chunk.index
-          text = chunk.text
-          score = chunk.score }
-
-    let private toQaJudgement (judgement: RealtimeJudgement) : FsVoice.QA.RealtimeJudgement =
-        { FsVoice.QA.RealtimeJudgement.turnKind = judgement.turnKind
-          topicContinuity = judgement.topicContinuity
-          memoryAction = judgement.memoryAction
-          needsExternalContext = judgement.needsExternalContext
-          confidence = judgement.confidence
-          riskFlags =
-            { FsVoice.QA.RiskFlags.memoryMutation = judgement.riskFlags.memoryMutation
-              sensitive = judgement.riskFlags.sensitive
-              conflictLikely = judgement.riskFlags.conflictLikely } }
-
-    let private modelConfig role (plugIn: FsVoice.QA.PlugInDefinition) =
-        FsVoice.QA.PlugInDefinition.model role plugIn
-
-    let private createSession (st: State) flags : FsVoice.QA.IQaOrchestrator =
-        let clients: FsVoice.QA.QaModelClients =
+    let private createSession (st: State) flags : FsVoice.Ctx.IQaOrchestrator =
+        let clients: FsVoice.Ctx.QaModelClients =
             if String.IsNullOrWhiteSpace st.apiKey then
-                FsVoice.QA.QaModelClients.none
+                FsVoice.Ctx.QaModelClients.none
             else
                 let queryExpansion =
-                    createClient st.apiKey (modelConfig FsVoice.QA.QueryExpansion st.plugIn).modelId
+                    createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
 
                 let planner =
-                    createClient st.apiKey (modelConfig FsVoice.QA.Planner st.plugIn).modelId
+                    createClient st.apiKey (modelConfig FsVoice.Ctx.Planner st.plugIn).modelId
 
                 { queryExpansion = Some queryExpansion
                   toolPlanner = Some planner
                   answerGenerator = None }
 
         let storageRoot = st.storageRoot
-        let answerModel = modelConfig FsVoice.QA.Answer st.plugIn
-        let keywordModel = modelConfig FsVoice.QA.Keyword st.plugIn
+        let answerModel = modelConfig FsVoice.Ctx.Answer st.plugIn
+        let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
 
         let options =
-            { FsVoice.QA.QaSessionOptions.create storageRoot with
+            { FsVoice.Ctx.QaSessionOptions.create storageRoot with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
                 answerTransport =
                     if String.IsNullOrWhiteSpace st.apiKey then
                         None
                     else
-                        Some(FsVoice.QA.QaAnswerTransport.openAIResponsesWebSocket st.apiKey)
+                        Some(FsVoice.Ctx.QaAnswerTransport.openAIResponsesWebSocket st.apiKey)
                 toolProviders = st.qaPlugIn.GetToolProviders()
                 plugInProfile = st.plugIn.profile
                 prompts = st.plugIn.prompts
@@ -129,21 +90,20 @@ module QaAgent =
                 useLexicalFilter = flags.useLexicalFilter
                 report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
 
-        new FsVoice.QA.QaSession(options) :> FsVoice.QA.IQaOrchestrator
+        new FsVoice.Ctx.QaSession(options) :> FsVoice.Ctx.IQaOrchestrator
 
-    let private createContextProvider st flags mode sources : FsVoice.QA.IQaContextProvider =
+    let private createContextProvider st flags mode sources : FsVoice.Ctx.IQaContextProvider =
         let qaMode = toQaMode mode
-        let qaSources = sources |> List.map toQaSource
 
-        let keywordModel = modelConfig FsVoice.QA.Keyword st.plugIn
+        let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
 
         let options =
-            { FsVoice.QA.FsColbertContextProviderOptions.create st.storageRoot qaMode qaSources with
+            { FsVoice.Retrieval.FsColbertContextProviderOptions.create st.storageRoot qaMode sources with
                 queryExpansionClient = None
                 keywordGenerationClient = None
                 disposeKeywordGenerationClient = false
                 plugInProfile = st.plugIn.profile
-                plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint st.plugIn
+                plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint st.plugIn
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
@@ -153,11 +113,11 @@ module QaAgent =
                 useLexicalFilter = flags.useLexicalFilter
                 report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
 
-        new FsVoice.QA.FsColbertContextProvider(options) :> FsVoice.QA.IQaContextProvider
+        new FsVoice.Retrieval.FsColbertContextProvider(options) :> FsVoice.Ctx.IQaContextProvider
 
     let private createPlugInContextProviders st =
         try
-            let hostContext: FsVoice.QA.PlugInHostContext =
+            let hostContext: FsVoice.Ctx.PlugInHostContext =
                 { storageRoot = st.storageRoot
                   packageRoot = None
                   settings = st.plugInSettings
@@ -168,9 +128,9 @@ module QaAgent =
             st.bus.PostToAgent(Ag_Log $"PlugIn context providers failed to load: {ex.Message}")
             []
 
-    let private startAnswerTransportPreparation st (session: FsVoice.QA.IQaOrchestrator) =
+    let private startAnswerTransportPreparation st (session: FsVoice.Ctx.IQaOrchestrator) =
         match session with
-        | :? FsVoice.QA.IQaAnswerTransportPreparer as preparer ->
+        | :? FsVoice.Ctx.IQaAnswerTransportPreparer as preparer ->
             async {
                 try
                     do! preparer.PrepareAnswerTransportAsync(CancellationToken.None) |> Async.AwaitTask
@@ -182,7 +142,7 @@ module QaAgent =
             |> Async.Start
         | _ -> ()
 
-    let private configureSession st flags mode sources (session: FsVoice.QA.IQaOrchestrator) =
+    let private configureSession st flags mode sources (session: FsVoice.Ctx.IQaOrchestrator) =
         async {
             KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
 
@@ -231,7 +191,7 @@ module QaAgent =
         (inventory: KnowledgeSource list)
         =
         let decision =
-            DurableMemory.createSupervisorDecision request.snapshot request.realtimeJudgement
+            FsVoice.Ctx.DurableMemory.createSupervisorDecision request.snapshot request.realtimeJudgement
 
         { requestId = request.requestId
           snapshot = request.snapshot
@@ -244,19 +204,19 @@ module QaAgent =
           timedOut = false
           createdAt = DateTimeOffset.UtcNow }
 
-    let private answerRequest (st: State) (session: FsVoice.QA.IQaOrchestrator) (request: MemoryRequest) =
+    let private answerRequest (st: State) (session: FsVoice.Ctx.IQaOrchestrator) (request: MemoryRequest) =
         async {
             try
-                let qaRequest: FsVoice.QA.QaTurnRequest =
+                let qaRequest: FsVoice.Ctx.QaTurnRequest =
                     { turnId = request.snapshot.turnId
                       question = request.snapshot.text
-                      realtimeJudgement = request.realtimeJudgement |> Option.map toQaJudgement
+                      realtimeJudgement = request.realtimeJudgement
                       deadline = Some request.deadline }
 
                 let! answer = session.AnswerAsync(qaRequest, request.cancellationToken) |> Async.AwaitTask
 
-                let chunks: SourceChunk list = answer.context |> List.map toWorkflowChunk
-                let inventory: KnowledgeSource list = answer.inventory |> List.map toWorkflowSource
+                let chunks: SourceChunk list = answer.context
+                let inventory: KnowledgeSource list = answer.inventory
                 let context = createMemoryContext request chunks inventory
 
                 st.bus.PostToAgent(Ag_Log $"Context ready: {chunks.Length} chunk(s), {inventory.Length} source(s).")
@@ -337,7 +297,7 @@ module QaAgent =
             { bus = bus
               storageRoot = storageRoot
               apiKey = apiKey
-              plugIn = FsVoice.QA.PlugInDefinition.sanitize plugIn
+              plugIn = FsVoice.Ctx.PlugInDefinition.sanitize plugIn
               qaPlugIn = qaPlugIn
               plugInSettings = plugInSettings
               session = None

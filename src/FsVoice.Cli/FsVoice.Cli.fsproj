@@ -13,8 +13,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
-    <ProjectReference Include="..\FsVoice.PdfRasterization\FsVoice.PdfRasterization.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval.PdfRasterization\FsVoice.Retrieval.PdfRasterization.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

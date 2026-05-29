@@ -11,7 +11,7 @@ The exploded component diagram is in [../diagrams/platform-component-assembly.mm
 | Host shell | Typed session contracts, ASP.NET bridge, test/text runtime helpers | MAUI UI, browser UI, CLI, app settings, audio permissions, storage roots |
 | Runtime | `FsVoice.Abstractions`, `FsVoice.Core`, event bus, blackboard, tool dispatcher, transport contracts | Concrete `IVoicePlugin`, host context, transport, runtime options |
 | Typed orchestration | `FsVoice.Types`, `FsVoice.RTFlow` adapter | `IVoiceOrchestration<'ToHost,'FromHost>`, app-specific message types, agents, workflow state |
-| QA | `FsVoice.QA.Abstractions`, `FsVoice.QA`, built-in source/memory tools, FsColbert provider, durable memory, PDF processing | `IQaPlugIn`, optional `IQaToolProvider`, optional `IQaContextProvider`, prompts, model roles, source policy |
+| Context + Retrieval | `FsVoice.Ctx.Contracts`, `FsVoice.Ctx.Runtime`, `FsVoice.Retrieval`, built-in source/memory tools, FsColbert provider, durable memory, PDF processing | `IQaPlugIn`, optional `IQaToolProvider`, optional `IQaContextProvider`, prompts, model roles, source policy |
 | Integration | `FsVoice.Hosting.AspNetCore` bridge endpoints and session store | ASP.NET route registration, browser client, WebRTC signaling/event projection |
 
 ## Speak2Docs Assembly
@@ -25,7 +25,7 @@ Speak2Docs is the direct mobile/desktop assembly example.
 5. `Connect.start` creates a `VoiceConnection` from local channels, connects those channels to the realtime WebRTC client, creates the orchestration session, and starts host/client/server pumps.
 6. `StateMachine.create` starts `VoiceAgent`, `QaAgent`, and `HostAgent`.
 7. `VoiceAgent` configures the realtime session and exposes the `QUERY_ORACLE` tool.
-8. `QaAgent` creates model clients, builds a `QaSession`, creates the FsColbert context provider for selected sources, appends plug-in context providers, and passes plug-in tool providers into the QA runtime.
+8. `QaAgent` creates model clients, builds a `QaSession`, creates the FsColbert context provider for selected sources, appends plug-in context providers, and passes plug-in tool providers into the Ctx runtime.
 9. A substantive spoken turn flows through realtime tool calling into `QaSession.AnswerAsync`, then returns context, oracle answer text, logs, and speech output to the host.
 
 The main assembly points are:
@@ -34,7 +34,7 @@ The main assembly points are:
 - `src/Speak2Docs/Interaction/Connect.fs`: MAUI/WebRTC connection and session pumps.
 - `src/Speak2Docs.Orchestration/DemoVoiceOrchestration.fs`: typed voice orchestration.
 - `src/Speak2Docs.Orchestration/Agents/WorkFlow.fs`: workflow agent assembly.
-- `src/Speak2Docs.Orchestration/Agents/QaAgent.fs`: QA runtime assembly.
+- `src/Speak2Docs.Orchestration/Agents/QaAgent.fs`: Ctx runtime and retrieval assembly.
 
 ## ASP.NET Core Hosting Assembly
 
@@ -67,14 +67,7 @@ FsVoice.Hosting.AspNetCore.BridgeEndpoints.map "/fsvoice" store createOptions ap
 |> ignore
 ```
 
-For a QA-oriented web app, a QA plug-in can be adapted into the generic runtime contract:
-
-```fsharp
-let myVoicePlugin =
-    FsVoice.QA.VoicePluginAdapters.fromQaPlugIn myQaPlugIn
-```
-
-Use that adapter when the browser host needs the generic `IVoicePlugin` surface. Use the full Speak2Docs-style orchestration when the app needs richer typed host messages, workflow agents, source lifecycle, realtime voice UX, and QA answer coordination.
+For a Ctx-oriented web app, compose the Ctx runtime directly when the host needs grounded answer behavior. Use the full Speak2Docs-style orchestration when the app needs richer typed host messages, workflow agents, source lifecycle, realtime voice UX, and answer coordination.
 
 ## What Developers Usually Replace
 
@@ -88,7 +81,7 @@ Use that adapter when the browser host needs the generic `IVoicePlugin` surface.
 ## Assembly Checklist
 
 1. Choose the host: direct typed orchestration, ASP.NET bridge, CLI, or deterministic test runtime.
-2. Choose the contract level: generic `IVoicePlugin` for platform voice sessions, or `IQaPlugIn` for QA workflows.
+2. Choose the contract level: typed voice orchestration for full workflows, or `IQaPlugIn` for context-backed answer workflows.
 3. Provide host context: storage root, settings, reporting/logging, and any app-specific services.
 4. Compose plug-in defaults with host overrides.
 5. Attach sources and context providers.

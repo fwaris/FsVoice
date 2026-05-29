@@ -159,9 +159,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
-    <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
-    <ProjectReference Include="..\FsVoice.PdfRasterization\FsVoice.PdfRasterization.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval.PdfRasterization\FsVoice.Retrieval.PdfRasterization.fsproj" />
     <ProjectReference Include="..\Speak2Docs.Orchestration\Speak2Docs.Orchestration.fsproj" />
   </ItemGroup>
 
@@ -206,7 +208,7 @@
   </Target>
 
   <Target Name="EnsurePdfRasterizationReferenceBuilt" BeforeTargets="CoreCompile" Condition="('$(TargetPlatformIdentifier)' == 'ios' or '$(TargetPlatformIdentifier)' == 'android' or '$(TargetPlatformIdentifier)' == 'maccatalyst') and '$(DesignTimeBuild)' != 'true'">
-    <MSBuild Projects="..\FsVoice.PdfRasterization\FsVoice.PdfRasterization.fsproj" Targets="Build" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)" RemoveProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained" BuildInParallel="false" />
+    <MSBuild Projects="..\FsVoice.Retrieval.PdfRasterization\FsVoice.Retrieval.PdfRasterization.fsproj" Targets="Build" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)" RemoveProperties="RuntimeIdentifier;RuntimeIdentifiers;SelfContained" BuildInParallel="false" />
   </Target>
 
   <Target Name="RemoveAndroid16IncompatibleNativeLibraries" AfterTargets="_GetLibraryImports" Condition="$(TargetPlatformIdentifier) == 'android'">

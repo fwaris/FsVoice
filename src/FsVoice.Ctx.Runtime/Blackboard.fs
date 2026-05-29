@@ -1,6 +1,7 @@
-namespace FsVoice.QA
+namespace FsVoice.Ctx
 
 open System
+open FsVoice.Core
 
 type BlackboardEntryKind =
     | Transcript

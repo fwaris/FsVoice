@@ -4,7 +4,7 @@ open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open Microsoft.Maui.Hosting
 open Fabulous.Maui
-open FsVoice.PdfRasterization
+open FsVoice.Retrieval.PdfRasterization
 
 type MauiProgram =
     static member CreateMauiApp() =

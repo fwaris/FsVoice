@@ -2,16 +2,19 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>FsVoice.QA</RootNamespace>
+    <RootNamespace>FsVoice.Ctx</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
-    <PackageId>FsVoice.QA.Abstractions</PackageId>
-    <Description>Deprecated compatibility facade for FsVoice.Ctx.Contracts.</Description>
+    <PackageId>FsVoice.Ctx.Contracts</PackageId>
+    <Description>Contracts for FsVoice context-backed answering, plugins, tools, memory, and context providers.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageTags>FSharp;Voice;QA;Abstractions;AI</PackageTags>
+    <PackageTags>FSharp;Voice;Context;Contracts;AI</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Compatibility.fs" />
+    <Compile Include="Types.fs" />
+    <Compile Include="MemoryTypes.fs" />
+    <Compile Include="Defaults.fs" />
+    <Compile Include="PlugIn.fs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -19,7 +22,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
     <PackageReference Include="FSharp.Core" />
   </ItemGroup>
 

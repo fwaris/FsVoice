@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Ctx
 
 open System
 open System.Collections.Generic
@@ -6,6 +6,7 @@ open System.IO
 open System.Reflection
 open System.Threading
 open System.Threading.Tasks
+open FsVoice.Core
 
 type QaToolCatalog =
     { tools: IQaTool list

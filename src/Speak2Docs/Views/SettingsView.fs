@@ -35,14 +35,14 @@ module SettingsView =
             ActivityLogVerbosityChanged Informational
 
     let private roleLabel role =
-        $"{FsVoice.QA.ModelRole.storageName role} model"
+        $"{FsVoice.Ctx.ModelRole.storageName role} model"
 
     let private roleValue model role =
         model.modelRoleOverrides
         |> Map.tryFind role
-        |> Option.defaultValue (FsVoice.QA.PlugInDefinition.model role model.activePlugIn).modelId
+        |> Option.defaultValue (FsVoice.Ctx.PlugInDefinition.model role model.activePlugIn).modelId
 
-    let private facetValue model (field: FsVoice.QA.PlugInSettingsField) =
+    let private facetValue model (field: FsVoice.Ctx.PlugInSettingsField) =
         model.plugInSettings
         |> Map.tryFind field.key
         |> Option.orElse field.defaultValue
@@ -53,7 +53,7 @@ module SettingsView =
         | true, parsed -> parsed
         | false, _ -> false
 
-    let private isBoolFacet (field: FsVoice.QA.PlugInSettingsField) =
+    let private isBoolFacet (field: FsVoice.Ctx.PlugInSettingsField) =
         match (defaultArg (Option.ofObj field.kind) "").Trim().ToLowerInvariant() with
         | "bool"
         | "boolean"
@@ -133,7 +133,7 @@ module SettingsView =
                 .padding (10.))
 
     let private modelsSection model canEdit =
-        let roles = FsVoice.QA.ModelRole.all
+        let roles = FsVoice.Ctx.ModelRole.all
         let tokenRow = roles.Length + 1
 
         sectionBorder

@@ -67,9 +67,9 @@ module PdfLibrary =
 
     let private qaSourceKind kind =
         match kind with
-        | PdfFile -> FsVoice.QA.KnowledgeSourceKind.Pdf
-        | MarkdownFile -> FsVoice.QA.KnowledgeSourceKind.Markdown
-        | JsonFile -> FsVoice.QA.KnowledgeSourceKind.Json
+        | PdfFile -> FsVoice.Ctx.KnowledgeSourceKind.Pdf
+        | MarkdownFile -> FsVoice.Ctx.KnowledgeSourceKind.Markdown
+        | JsonFile -> FsVoice.Ctx.KnowledgeSourceKind.Json
 
     let private readJsonPassages source path =
         async {
@@ -85,28 +85,30 @@ module PdfLibrary =
 
     let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
         if useHybridPdfParsing && useLayoutAnalysis then
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.Hybrid
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
         elif useHybridPdfParsing then
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
-            FsVoice.QA.KnowledgeSources.PdfParsingMode.Legacy
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
     let private readPassages report useHybridPdfParsing useLayoutAnalysis (doc: PdfDocumentSource) cancellationToken =
-        let source: FsVoice.QA.KnowledgeSource =
-            { FsVoice.QA.KnowledgeSource.kind = qaSourceKind doc.kind
+        let source: FsVoice.Ctx.KnowledgeSource =
+            { FsVoice.Ctx.KnowledgeSource.kind = qaSourceKind doc.kind
               location = doc.storedPath
               enabled = true }
 
         KnowledgeSources.configurePdfParser useLayoutAnalysis
 
-        FsVoice.QA.KnowledgeSources.loadPassagesForIndexingWithCancellation
+        FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithCancellation
             FileSystem.AppDataDirectory
             report
             (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
             source
             cancellationToken
 
-    let private throwIfKeywordCancellationRequested (options: FsVoice.QA.KnowledgeSources.KeywordGenerationOptions) =
+    let private throwIfKeywordCancellationRequested
+        (options: FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions)
+        =
         options.cancellationToken |> Option.iter _.ThrowIfCancellationRequested()
 
     let private hasExisting (docs: PdfDocumentSource list) originalPath fileName =
@@ -791,13 +793,13 @@ module PdfLibrary =
                 cancellationToken.ThrowIfCancellationRequested()
                 throwIfKeywordCancellationRequested keywordOptions
 
-                let source: FsVoice.QA.KnowledgeSource =
-                    { FsVoice.QA.KnowledgeSource.kind = qaSourceKind doc.kind
+                let source: FsVoice.Ctx.KnowledgeSource =
+                    { FsVoice.Ctx.KnowledgeSource.kind = qaSourceKind doc.kind
                       location = doc.storedPath
                       enabled = true }
 
                 match!
-                    FsVoice.QA.KnowledgeSources.InindexPassagesWithCancellation
+                    FsVoice.Retrieval.KnowledgeSources.InindexPassagesWithCancellation
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions

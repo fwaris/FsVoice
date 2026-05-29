@@ -1,4 +1,4 @@
-namespace Speak2Docs.WorkFlow
+namespace FsVoice.Core
 
 open System
 open System.Collections.Generic
@@ -15,7 +15,7 @@ type private AsyncPriorityQueueMsg<'T> =
 
 /// Thread-safe priority queue backed by a MailboxProcessor.
 /// Lower priority values are dequeued first; equal priorities are FIFO.
-type internal AsyncPriorityQueue<'T>() =
+type AsyncPriorityQueue<'T>() =
     let completedExn = InvalidOperationException("Queue has been completed.")
 
     let tryDequeue (queue: PriorityQueue<'T, QueueKey>) =

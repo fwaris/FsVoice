@@ -1,7 +1,7 @@
 # FsVoice.QA
 
-Retrieval, memory, tool orchestration, and hybrid PDF processing for FsVoice.
+Deprecated compatibility facade for `FsVoice.Ctx.Runtime` and `FsVoice.Retrieval`.
 
-This package provides FsVoice QA runtime components including source loading, keyword enrichment, FsColbert indexing, context providers, durable memory support, and document structure PDF parsing.
+New code should reference `FsVoice.Ctx.Runtime` for oracle/context answering and `FsVoice.Retrieval` for source loading, indexing, ranking, and document parsing.
 
-The package embeds `PP-DocLayout-M` ONNX for offline document layout detection. FsVoice code is MIT licensed; the embedded model is Apache-2.0. See `PP-DocLayout-M-NOTICE.md` in the package for model attribution and checksum details.
+This facade keeps common `FsVoice.QA` source names available during migration.

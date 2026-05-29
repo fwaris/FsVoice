@@ -14,7 +14,9 @@ open System.Collections.Generic
 open Microsoft.Extensions.AI
 open FSharp.Control
 open FsVoice.Hosting.AspNetCore
-open FsVoice.QA
+open FsVoice.Ctx
+open FsVoice.Retrieval
+open FsVoice.Core
 open FsVoice.Platform
 open RTOpenAI.Events
 
@@ -672,6 +674,43 @@ let ``model capability omits temperature for models that reject it`` modelId =
 [<InlineData("gpt-4.1-mini")>]
 let ``model capability keeps temperature for supported models`` modelId =
     Assert.True(ModelCapabilities.supportsTemperature modelId)
+
+[<Fact>]
+let ``async priority queue dequeues lower priority first and preserves FIFO`` () =
+    task {
+        let queue = AsyncPriorityQueue<string>()
+        queue.Enqueue("low", 10)
+        queue.Enqueue("first", 1)
+        queue.Enqueue("second", 1)
+
+        let! first = queue.DequeueTask()
+        let! second = queue.DequeueTask()
+        let! low = queue.DequeueTask()
+
+        Assert.Equal("first", first)
+        Assert.Equal("second", second)
+        Assert.Equal("low", low)
+    }
+
+[<Fact>]
+let ``async priority queue completion releases waiters`` () =
+    task {
+        let queue = AsyncPriorityQueue<string>()
+        let pending = queue.DequeueTask()
+
+        queue.Complete()
+
+        do! Assert.ThrowsAsync<InvalidOperationException>(fun () -> pending) :> Task
+    }
+
+[<Fact>]
+let ``ctx and legacy qa facades expose compatible plugin defaults`` () =
+    let ctxPlugIn = FsVoice.Ctx.GenericQaPlugIn() :> FsVoice.Ctx.IQaPlugIn
+    let legacyPlugIn = FsVoice.QA.GenericQaPlugIn() :> FsVoice.QA.IQaPlugIn
+
+    Assert.Equal(ctxPlugIn.Definition.id, legacyPlugIn.Definition.id)
+    Assert.Equal(ctxPlugIn.Definition.displayName, legacyPlugIn.Definition.displayName)
+    Assert.Equal(ctxPlugIn.ContractVersion, legacyPlugIn.ContractVersion)
 
 [<Fact>]
 let ``generic PlugIn supplies model roles and runtime defaults`` () =
@@ -1381,10 +1420,10 @@ let ``query post-processing keeps domain expansion in supplied plug-in profile``
                 [ { triggers = [ "medigap" ]
                     terms = [ "medicare"; "supplement"; "plan" ] } ] }
 
-    let generic = Text.QueryPostProcessing.forVoiceLikeRetrieval "medicare gap"
+    let generic = QueryPostProcessing.forVoiceLikeRetrieval "medicare gap"
 
     let profiled =
-        Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile "medicare gap"
+        QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile "medicare gap"
 
     Assert.DoesNotContain("supplement", generic.searchTerms)
     Assert.Contains("supplement", profiled.searchTerms)
@@ -2528,7 +2567,7 @@ let ``keyword schema rejection keeps cached keyword records`` () =
 [<Fact>]
 let ``tool loader includes current time tool from tools project`` () =
     let providerFolder =
-        System.IO.Path.GetDirectoryName(typeof<FsVoice.Tools.CurrentTimeToolProvider>.Assembly.Location)
+        System.IO.Path.GetDirectoryName(typeof<FsVoice.Ctx.Tools.CurrentTimeToolProvider>.Assembly.Location)
 
     let catalog = QaToolLoader.load (FakeQaToolHost()) (Some providerFolder)
 
@@ -3232,11 +3271,13 @@ let ``qa session prunes old blackboard records into model summary and keeps rece
                 "Compacted alpha older source summary with alpha older source topic and retained source finding."
             )
 
+        let logs = ResizeArray<string>()
         let storageRoot = tempStorageRoot ()
 
         let options =
             { QaSessionOptions.create storageRoot with
                 autoWriteback = false
+                report = logs.Add
                 clients =
                     { QaModelClients.none with
                         answerGenerator = Some answerClient }
@@ -3261,7 +3302,11 @@ let ``qa session prunes old blackboard records into model summary and keeps rece
         let! _ = session.AnswerAsync(request "bravo middle source topic", CancellationToken.None)
         let! _ = session.AnswerAsync(request "gamma recent source topic", CancellationToken.None)
 
-        do! waitForAsync "Expected blackboard pruning summary call." (fun () -> answerClient.SummaryCalls > 0)
+        do!
+            waitForAsync "Expected blackboard pruning to apply." (fun () ->
+                logs
+                |> Seq.exists (fun log ->
+                    log.Contains("Blackboard pruning applied", StringComparison.OrdinalIgnoreCase)))
 
         let! oldFollowup =
             session.AnswerAsync(
@@ -3824,7 +3869,7 @@ let private demoRuntimeSettings values =
     settings
 
 let private demoOrchestration settings =
-    let qaPlugIn = FsVoice.QA.GenericQaPlugIn() :> IQaPlugIn
+    let qaPlugIn = FsVoice.Ctx.GenericQaPlugIn() :> IQaPlugIn
 
     let options: Speak2Docs.WorkFlow.DemoVoiceOrchestrationOptions =
         { settings = settings
@@ -4077,11 +4122,11 @@ let ``runtime settings apply answer max output tokens to answer model`` () =
         demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AnswerMaxOutputTokens, "2500" ]
 
     let plugIn =
-        FsVoice.QA.PlugInDefinition.generic
+        FsVoice.Ctx.PlugInDefinition.generic
         |> Speak2Docs.RuntimeSettings.composePlugIn
             Speak2Docs.InternalDocumentIndex
             (Speak2Docs.RuntimeSettings.snapshot settings)
 
-    let answer = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer plugIn
+    let answer = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer plugIn
 
     Assert.Equal(2500, answer.maxOutputTokens |> Option.defaultValue 0)

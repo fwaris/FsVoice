@@ -76,16 +76,16 @@ module RuntimeSettings =
         |> clamp MinAnswerMaxOutputTokens MaxAnswerMaxOutputTokens
 
     let modelRoleKey role =
-        $"model.{FsVoice.QA.ModelRole.storageName role}"
+        $"model.{FsVoice.Ctx.ModelRole.storageName role}"
 
     let plugInSettingKey key = $"plugin.{key}"
 
     let modelRoleOverrides values =
-        FsVoice.QA.ModelRole.all
+        FsVoice.Ctx.ModelRole.all
         |> List.choose (fun role -> values |> tryGet (modelRoleKey role) |> Option.map (fun value -> role, value))
         |> Map.ofList
 
-    let plugInSettings (definition: FsVoice.QA.PlugInDefinition) values =
+    let plugInSettings (definition: FsVoice.Ctx.PlugInDefinition) values =
         definition.settingsFacets
         |> List.choose (fun field ->
             values
@@ -105,7 +105,7 @@ module RuntimeSettings =
     let composePlugIn
         (retrievalMode: RetrievalMode)
         (values: Map<string, string>)
-        (definition: FsVoice.QA.PlugInDefinition)
+        (definition: FsVoice.Ctx.PlugInDefinition)
         =
         let definition =
             PlugInComposer.withHostOverrides
@@ -115,12 +115,12 @@ module RuntimeSettings =
                 (bool ElaborateIndexKeywords definition.runtime.elaborateIndexKeywords values)
                 definition
 
-        let answerModel = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Answer definition
+        let answerModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer definition
 
         { definition with
             models =
                 definition.models
                 |> Map.add
-                    FsVoice.QA.Answer
+                    FsVoice.Ctx.Answer
                     { answerModel with
                         maxOutputTokens = Some(answerMaxOutputTokens values) } }

@@ -1,8 +1,8 @@
-namespace FsVoice.PdfRasterization
+namespace FsVoice.Retrieval.PdfRasterization
 
 open System.IO
 open FsColbert
-open FsVoice.QA
+open FsVoice.Retrieval
 open PDFtoImage
 open SkiaSharp
 

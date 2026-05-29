@@ -10,8 +10,8 @@ open RTFlow
 
 type DemoVoiceOrchestrationOptions =
     { settings: RuntimeSettings
-      plugIn: FsVoice.QA.PlugInDefinition
-      qaPlugIn: FsVoice.QA.IQaPlugIn
+      plugIn: FsVoice.Ctx.PlugInDefinition
+      qaPlugIn: FsVoice.Ctx.IQaPlugIn
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list }
 

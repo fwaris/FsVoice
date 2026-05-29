@@ -20,8 +20,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
     <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
     <ProjectReference Include="..\FsVoice.Hosting.AspNetCore\FsVoice.Hosting.AspNetCore.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Tools\FsVoice.Ctx.Tools.fsproj" />
     <ProjectReference Include="..\FsVoice.Tools\FsVoice.Tools.fsproj" />
     <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
     <ProjectReference Include="..\Speak2Docs.Orchestration\Speak2Docs.Orchestration.fsproj" />

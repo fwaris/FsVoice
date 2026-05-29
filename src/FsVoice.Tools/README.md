@@ -1,7 +1,7 @@
 # FsVoice.Tools
 
-Small tool-provider helpers for FsVoice QA workflows.
+Deprecated compatibility facade for `FsVoice.Ctx.Tools`.
 
-This package currently includes a current-time QA tool provider that can be plugged into FsVoice QA sessions and agents.
+New code should reference `FsVoice.Ctx.Tools` directly.
 
 License: MIT.

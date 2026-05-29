@@ -5,13 +5,13 @@
     <RootNamespace>FsVoice.Tools</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <PackageId>FsVoice.Tools</PackageId>
-    <Description>Tool provider helpers for FsVoice QA workflows.</Description>
+    <Description>Deprecated compatibility facade for FsVoice.Ctx.Tools.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>FSharp;Voice;QA;Tools;AI</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="QaCurrentTimeProvider.fs" />
+    <Compile Include="Compatibility.fs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.QA.Abstractions\FsVoice.QA.Abstractions.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Tools\FsVoice.Ctx.Tools.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

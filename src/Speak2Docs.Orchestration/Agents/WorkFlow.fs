@@ -12,8 +12,8 @@ module StateMachine =
           bus: WBus<FlowMsg, AgentMsg>
           storageRoot: string
           apiKey: string
-          plugIn: FsVoice.QA.PlugInDefinition
-          qaPlugIn: FsVoice.QA.IQaPlugIn
+          plugIn: FsVoice.Ctx.PlugInDefinition
+          qaPlugIn: FsVoice.Ctx.IQaPlugIn
           plugInSettings: Map<string, string>
           retrievalMode: RetrievalMode
           voiceConnection: VoiceConnection

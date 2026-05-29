@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Ctx
 
 type GenericQaPlugIn() =
     interface IQaPlugIn with

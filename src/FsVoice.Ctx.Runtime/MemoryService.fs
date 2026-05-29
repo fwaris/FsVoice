@@ -1,8 +1,9 @@
-namespace FsVoice.QA
+namespace FsVoice.Ctx
 
 open System
 open System.Threading
 open System.Threading.Tasks
+open FsVoice.Core
 
 type IMemoryService =
     abstract StartupLogs: string list

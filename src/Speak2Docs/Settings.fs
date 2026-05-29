@@ -382,7 +382,7 @@ module Settings =
         Preferences.Default.Get(key, fallback)
 
     let modelRoleModelId plugInId role fallback =
-        let suffix = $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
+        let suffix = $"Models.{FsVoice.Ctx.ModelRole.storageName role}.ModelId"
 
         getScopedString plugInId suffix fallback
         |> Text.notEmpty
@@ -391,13 +391,13 @@ module Settings =
     let setModelRoleModelId plugInId role value =
         let fallback =
             match role with
-            | FsVoice.QA.Answer -> C.DEFAULT_ORACLE_MODEL
+            | FsVoice.Ctx.Answer -> C.DEFAULT_ORACLE_MODEL
             | _ -> ""
 
         let value = value |> Text.notEmpty |> Option.defaultValue fallback
 
         let key =
-            plugInScopedKey plugInId $"Models.{FsVoice.QA.ModelRole.storageName role}.ModelId"
+            plugInScopedKey plugInId $"Models.{FsVoice.Ctx.ModelRole.storageName role}.ModelId"
 
         Preferences.Default.Set(key, value)
 
@@ -498,7 +498,7 @@ module Settings =
     let setPlugInSetting plugInId key value =
         Preferences.Default.Set(plugInScopedKey plugInId $"Settings.{key}", value)
 
-    let plugInSettings plugInId (fields: FsVoice.QA.PlugInSettingsField list) =
+    let plugInSettings plugInId (fields: FsVoice.Ctx.PlugInSettingsField list) =
         fields
         |> List.map (fun field ->
             let fallback = field.defaultValue |> Option.defaultValue ""

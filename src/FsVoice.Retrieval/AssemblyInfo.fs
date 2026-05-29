@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Retrieval
 
 open System.Runtime.CompilerServices
 

@@ -62,11 +62,11 @@ and Model =
       disconnectedConnectionIds: Set<string>
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
-      activePlugIn: FsVoice.QA.PlugInDefinition
-      qaPlugIn: FsVoice.QA.IQaPlugIn
+      activePlugIn: FsVoice.Ctx.PlugInDefinition
+      qaPlugIn: FsVoice.Ctx.IQaPlugIn
       runtimeSettings: RuntimeSettings
       plugInSettings: Map<string, string>
-      modelRoleOverrides: Map<FsVoice.QA.ModelRole, string>
+      modelRoleOverrides: Map<FsVoice.Ctx.ModelRole, string>
       retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
       log: string list
@@ -98,7 +98,7 @@ and Msg =
     | OpenAiDisclosureAcknowledged
     | OpenAiDisclosureDismissed
     | OpenAiKeyChanged of string
-    | ModelRoleModelChanged of FsVoice.QA.ModelRole * string
+    | ModelRoleModelChanged of FsVoice.Ctx.ModelRole * string
     | PlugInSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode
     | Settings_Show

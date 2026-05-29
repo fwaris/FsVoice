@@ -1,11 +1,11 @@
-namespace FsVoice.PdfRasterization
+namespace FsVoice.Retrieval.PdfRasterization
 
 open System
 open Android.Graphics
 open Android.Graphics.Pdf
 open Android.OS
 open FsColbert
-open FsVoice.QA
+open FsVoice.Retrieval
 
 module PdfRasterizer =
     let private bitmapToRgbImage (bitmap: Bitmap) =

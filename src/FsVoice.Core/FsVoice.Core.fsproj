@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Core</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Core</PackageId>
+    <Description>Core reusable helpers for FsVoice packages.</Description>
+    <PackageTags>FSharp;Voice;Core;Utilities;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Text.fs" />
+    <Compile Include="AsyncPriorityQueue.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Ctx</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Ctx.Runtime</PackageId>
+    <Description>Oracle-style context runtime for grounded FsVoice answers, tools, blackboard, and durable memory.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;Context;Oracle;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="PlugIns.fs" />
+    <Compile Include="DurableMemory.fs" />
+    <Compile Include="MemoryService.fs" />
+    <Compile Include="Blackboard.fs" />
+    <Compile Include="Tools.fs" />
+    <Compile Include="QaSession.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" />
+    <PackageReference Include="FSharp.SystemTextJson" />
+    <PackageReference Include="FsColbert" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+  </ItemGroup>
+
+</Project>

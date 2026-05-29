@@ -1,9 +1,10 @@
-namespace FsVoice.QA
+namespace FsVoice.Retrieval
 
 open System
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.AI
+open FsVoice.Ctx
 
 type FsColbertContextProviderOptions =
     { storageRoot: string

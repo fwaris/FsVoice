@@ -1,4 +1,4 @@
-namespace FsVoice.QA
+namespace FsVoice.Ctx
 
 open System
 open System.Collections.Generic
@@ -8,6 +8,8 @@ open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.AI
+open FsVoice.Core
+open FsVoice.Retrieval
 
 type QaModelClients =
     { queryExpansion: IChatClient option

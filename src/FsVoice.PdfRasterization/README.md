@@ -1,7 +1,7 @@
 # FsVoice.PdfRasterization
 
-Cross-platform PDF rasterization support for FsVoice hybrid PDF parsing.
+Deprecated compatibility facade for `FsVoice.Retrieval.PdfRasterization`.
 
-This package registers platform-specific PDF rasterizers used by `FsVoice.QA` when running document structure PDF processing. It includes desktop, iOS, Mac Catalyst, and Android implementations.
+New code should reference `FsVoice.Retrieval.PdfRasterization` directly.
 
 License: MIT.

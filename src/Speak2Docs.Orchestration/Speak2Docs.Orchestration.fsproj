@@ -16,8 +16,6 @@
     <Compile Include="WorkFlowTypes.fs" />
     <Compile Include="RuntimeSettings.fs" />
     <Compile Include="KnowledgeSources.fs" />
-    <Compile Include="DurableMemory.fs" />
-    <Compile Include="Agents\AsyncPriorityQueue.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />
     <Compile Include="Agents\HostAgent.fs" />
     <Compile Include="Agents\QaAgent.fs" />
@@ -26,8 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
-    <ProjectReference Include="..\FsVoice.QA\FsVoice.QA.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

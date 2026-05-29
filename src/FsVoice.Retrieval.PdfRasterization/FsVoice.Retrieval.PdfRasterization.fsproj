@@ -2,13 +2,13 @@
 
   <PropertyGroup>
     <TargetFrameworks>net10.0;net10.0-ios;net10.0-maccatalyst;net10.0-android</TargetFrameworks>
-    <RootNamespace>FsVoice.PdfRasterization</RootNamespace>
+    <RootNamespace>FsVoice.Retrieval.PdfRasterization</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <EnableDefaultItems>false</EnableDefaultItems>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <NoWarn>$(NoWarn);57</NoWarn>
-    <PackageId>FsVoice.PdfRasterization</PackageId>
-    <Description>Deprecated compatibility facade for FsVoice.Retrieval.PdfRasterization.</Description>
+    <PackageId>FsVoice.Retrieval.PdfRasterization</PackageId>
+    <Description>Cross-platform PDF rasterizers for FsVoice retrieval document-structure parsing.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>FSharp;PDF;Rasterization;Docling;ONNX;AI</PackageTags>
 
@@ -18,12 +18,20 @@
     <SupportedOSPlatformVersion Condition="$(TargetPlatformIdentifier) == 'android'">24.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Include="Compatibility.fs" />
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <Compile Include="DesktopRasterizer.fs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$(TargetPlatformIdentifier) == 'android'">
+    <Compile Include="AndroidRasterizer.fs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$(TargetPlatformIdentifier) == 'ios' Or $(TargetPlatformIdentifier) == 'maccatalyst'">
+    <Compile Include="AppleRasterizer.fs" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.Retrieval.PdfRasterization\FsVoice.Retrieval.PdfRasterization.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +40,12 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FsColbert" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="PDFtoImage" />
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
 </Project>

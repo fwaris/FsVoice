@@ -6,8 +6,8 @@ open System.Reflection
 open System.Runtime.InteropServices
 
 type LoadedPlugIn =
-    { plugIn: FsVoice.QA.IQaPlugIn
-      definition: FsVoice.QA.PlugInDefinition }
+    { plugIn: FsVoice.Ctx.IQaPlugIn
+      definition: FsVoice.Ctx.PlugInDefinition }
 
 module PlugInHost =
     let private plugInFolder storageRoot = Path.Combine(storageRoot, "plug-ins")
@@ -16,7 +16,7 @@ module PlugInHost =
         not (RuntimeInformation.IsOSPlatform(OSPlatform.Create("IOS")))
 
     let private bundledAssemblies hostAssemblies =
-        [ yield typeof<FsVoice.QA.GenericQaPlugIn>.Assembly
+        [ yield typeof<FsVoice.Ctx.GenericQaPlugIn>.Assembly
           yield Assembly.GetExecutingAssembly()
           yield! hostAssemblies ]
         |> List.distinctBy _.FullName
@@ -27,7 +27,7 @@ module PlugInHost =
             |> Array.filter (fun t ->
                 t.IsPublic
                 && not t.IsAbstract
-                && typeof<FsVoice.QA.IQaPlugIn>.IsAssignableFrom t)
+                && typeof<FsVoice.Ctx.IQaPlugIn>.IsAssignableFrom t)
             |> Array.toList
         with ex ->
             ignore ex
@@ -37,7 +37,7 @@ module PlugInHost =
         try
             match plugInType.GetConstructor(Type.EmptyTypes) with
             | null -> Error $"PlugIn {plugInType.FullName} must expose a public parameterless constructor."
-            | ctor -> Ok(ctor.Invoke(Array.empty) :?> FsVoice.QA.IQaPlugIn)
+            | ctor -> Ok(ctor.Invoke(Array.empty) :?> FsVoice.Ctx.IQaPlugIn)
         with ex ->
             Error $"Unable to create plug-in {plugInType.FullName}: {ex.Message}"
 
@@ -74,7 +74,7 @@ module PlugInHost =
             | Error err ->
                 logs.Add err
                 None
-            | Ok plugIn when plugIn.ContractVersion <> FsVoice.QA.PlugInDefinition.currentContractVersion ->
+            | Ok plugIn when plugIn.ContractVersion <> FsVoice.Ctx.PlugInDefinition.currentContractVersion ->
                 logs.Add
                     $"Skipping plug-in {plugInType.FullName}: contract version {plugIn.ContractVersion} is not supported."
 
@@ -82,7 +82,7 @@ module PlugInHost =
             | Ok plugIn ->
                 Some
                     { plugIn = plugIn
-                      definition = FsVoice.QA.PlugInDefinition.sanitize plugIn.Definition })
+                      definition = FsVoice.Ctx.PlugInDefinition.sanitize plugIn.Definition })
 
     let loadAll storageRoot hostAssemblies =
         let logs = ResizeArray<string>()
@@ -115,33 +115,33 @@ module PlugInHost =
                     String.Equals(loaded.definition.id, id, StringComparison.OrdinalIgnoreCase)))
             |> Option.orElse (
                 plugIns
-                |> List.tryFind (fun loaded -> loaded.definition.id = FsVoice.QA.PlugInDefinition.generic.id)
+                |> List.tryFind (fun loaded -> loaded.definition.id = FsVoice.Ctx.PlugInDefinition.generic.id)
             )
             |> Option.defaultWith (fun () ->
-                { plugIn = FsVoice.QA.GenericQaPlugIn() :> FsVoice.QA.IQaPlugIn
-                  definition = FsVoice.QA.PlugInDefinition.generic })
+                { plugIn = FsVoice.Ctx.GenericQaPlugIn() :> FsVoice.Ctx.IQaPlugIn
+                  definition = FsVoice.Ctx.PlugInDefinition.generic })
 
         active, logs
 
 module PlugInComposer =
     let toQaRetrievalMode (mode: RetrievalMode) =
         match mode with
-        | InternalDocumentIndex -> FsVoice.QA.InternalDocumentIndex
-        | FsColbertWithFallback -> FsVoice.QA.FsColbertWithFallback
+        | InternalDocumentIndex -> FsVoice.Ctx.InternalDocumentIndex
+        | FsColbertWithFallback -> FsVoice.Ctx.FsColbertWithFallback
 
-    let fromQaRetrievalMode (mode: FsVoice.QA.RetrievalMode) =
+    let fromQaRetrievalMode (mode: FsVoice.Ctx.RetrievalMode) =
         match mode with
-        | FsVoice.QA.InternalDocumentIndex -> InternalDocumentIndex
-        | FsVoice.QA.FsColbertWithFallback -> FsColbertWithFallback
+        | FsVoice.Ctx.InternalDocumentIndex -> InternalDocumentIndex
+        | FsVoice.Ctx.FsColbertWithFallback -> FsColbertWithFallback
 
     let withHostOverrides
-        (modelOverrides: Map<FsVoice.QA.ModelRole, string>)
+        (modelOverrides: Map<FsVoice.Ctx.ModelRole, string>)
         retrievalMode
         useLexicalFilter
         elaborateIndexKeywords
-        (definition: FsVoice.QA.PlugInDefinition)
+        (definition: FsVoice.Ctx.PlugInDefinition)
         =
-        let definition = FsVoice.QA.PlugInDefinition.sanitize definition
+        let definition = FsVoice.Ctx.PlugInDefinition.sanitize definition
 
         let models =
             modelOverrides
@@ -153,7 +153,7 @@ module PlugInComposer =
                         let current =
                             definition.models
                             |> Map.tryFind role
-                            |> Option.defaultValue (FsVoice.QA.PlugInDefinition.model role definition)
+                            |> Option.defaultValue (FsVoice.Ctx.PlugInDefinition.model role definition)
 
                         models |> Map.add role { current with modelId = modelId })
                 definition.models

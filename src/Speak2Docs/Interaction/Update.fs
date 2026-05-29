@@ -75,9 +75,9 @@ module Update =
 
     let private sourceKindFromDocument kind =
         match kind with
-        | PdfFile -> Pdf
-        | MarkdownFile -> Markdown
-        | JsonFile -> Json
+        | PdfFile -> FsVoice.Ctx.KnowledgeSourceKind.Pdf
+        | MarkdownFile -> FsVoice.Ctx.KnowledgeSourceKind.Markdown
+        | JsonFile -> FsVoice.Ctx.KnowledgeSourceKind.Json
 
     let private sourceFromDocument (doc: PdfDocumentSource) : KnowledgeSource =
         { kind = sourceKindFromDocument doc.kind
@@ -216,10 +216,10 @@ module Update =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
-    let private plugInModelRoleOverrides (definition: FsVoice.QA.PlugInDefinition) =
-        FsVoice.QA.ModelRole.all
+    let private plugInModelRoleOverrides (definition: FsVoice.Ctx.PlugInDefinition) =
+        FsVoice.Ctx.ModelRole.all
         |> List.map (fun role ->
-            let fallback = (FsVoice.QA.PlugInDefinition.model role definition).modelId
+            let fallback = (FsVoice.Ctx.PlugInDefinition.model role definition).modelId
             role, Settings.modelRoleModelId definition.id role fallback)
         |> Map.ofList
 
@@ -233,28 +233,28 @@ module Update =
 
     let private keywordOptions (model: Model) =
         if not model.elaborateIndexKeywords then
-            FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.disabled
+            FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.disabled
         else
             let plugIn = composePlugIn model
 
-            let keywordModel = FsVoice.QA.PlugInDefinition.model FsVoice.QA.Keyword plugIn
+            let keywordModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Keyword plugIn
 
             model.openAiKey
             |> Text.notEmpty
             |> Option.map (fun key ->
-                { FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
+                { FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.defaults with
                     client = Some(createChatClient key keywordModel.modelId)
                     modelId = keywordModel.modelId
                     plugInProfile = plugIn.profile
-                    plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint plugIn })
+                    plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn })
             |> Option.defaultValue
-                { FsVoice.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
+                { FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.defaults with
                     client = None
                     modelId = keywordModel.modelId
                     plugInProfile = plugIn.profile
-                    plugInFingerprint = FsVoice.QA.PlugInDefinition.fingerprint plugIn }
+                    plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn }
 
-    let private withKeywordCancellation token (options: FsVoice.QA.KnowledgeSources.KeywordGenerationOptions) =
+    let private withKeywordCancellation token (options: FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions) =
         { options with
             cancellationToken = Some token }
 
@@ -822,7 +822,7 @@ module Update =
                 |> refreshRuntimeSettings,
                 Cmd.none
         | ModelRoleModelChanged(role, value) ->
-            match sourceConfigBlocked model $"Changing {FsVoice.QA.ModelRole.storageName role} model" with
+            match sourceConfigBlocked model $"Changing {FsVoice.Ctx.ModelRole.storageName role} model" with
             | Some msg ->
                 { model with
                     log = msg :: model.log |> List.truncate C.MAX_LOG },

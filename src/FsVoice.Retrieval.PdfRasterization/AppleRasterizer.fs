@@ -1,10 +1,10 @@
-namespace FsVoice.PdfRasterization
+namespace FsVoice.Retrieval.PdfRasterization
 
 open System
 open System.Runtime.InteropServices
 open CoreGraphics
 open FsColbert
-open FsVoice.QA
+open FsVoice.Retrieval
 
 module PdfRasterizer =
     let private bgraToRgbImage width height (buffer: byte[]) =
