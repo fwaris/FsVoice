@@ -5,6 +5,7 @@ module C =
     let APP_NAME = PRODUCT_NAME
     let TOOL_PLUGIN_NAME = "FsVoiceTools"
     let TERMS_VERSION = "2026-05-21"
+    let OPENAI_DATA_DISCLOSURE_VERSION = "2026-05-29"
     let TERMS_URL = "https://fwaris.github.io/docs/fsvoice/terms.html"
     let PRIVACY_POLICY_URL = "https://fwaris.github.io/docs/fsvoice/privacy.html"
 
@@ -27,6 +28,9 @@ module C =
     let SETTINGS_ACTIVE_PLUG_IN = "FsVoice.ActivePlugIn"
     let SETTINGS_HIDDEN_BUILT_IN_SOURCES = "FsVoice.HiddenBuiltInSources"
     let SETTINGS_ACCEPTED_TERMS_VERSION = "FsVoice.AcceptedTermsVersion"
+
+    let SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION =
+        "FsVoice.SuppressOpenAIDataDisclosureVersion"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.5"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-2"

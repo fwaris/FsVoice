@@ -287,10 +287,10 @@ module SettingsView =
             })
                 .padding (10.))
 
-    let private linksSection appTheme =
+    let private linksSection model =
         sectionBorder
-            appTheme
-            ((Grid(columns, sectionRows 4) {
+            model.appTheme
+            ((Grid(columns, sectionRows 5) {
                 sectionTitle "Links"
 
                 ViewControls.formLabel "Terms" 1
@@ -325,6 +325,21 @@ module SettingsView =
                 Button("Help", OpenAppLink SettingsHelp)
                     .font(size = 13.)
                     .gridRow(4)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "AI Data" 5
+
+                Button(
+                    (if model.openAiDisclosureSuppressed then
+                         "OpenAI Notice: Hidden"
+                     else
+                         "OpenAI Data Notice"),
+                    OpenAiDisclosure_Show ReviewOnly
+                )
+                    .font(size = 13.)
+                    .gridRow(5)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
@@ -372,7 +387,7 @@ module SettingsView =
             retrievalSection model canEdit
             pdfParsingSection model canEdit
             runtimeSection model.appTheme
-            linksSection model.appTheme
+            linksSection model
 
             if not (List.isEmpty model.activePlugIn.settingsFacets) then
                 plugInSettingsSection model canEdit

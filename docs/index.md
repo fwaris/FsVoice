@@ -8,7 +8,8 @@ Speak2Docs lets you ask questions about selected PDFs, Markdown files, JSON file
 2. Add a PDF, Markdown, JSON, or Speak2Docs index bundle, or use a bundled index if one is available.
 3. Wait for the source to show as ready.
 4. Select the source with the checkbox.
-5. Tap Connect and ask a question about the selected documents.
+5. Tap Connect, review the OpenAI data notice popup, and acknowledge it.
+6. Ask a question about the selected documents.
 
 ## Help Topics
 
@@ -18,4 +19,4 @@ Speak2Docs lets you ask questions about selected PDFs, Markdown files, JSON file
 
 ## Notes
 
-Speak2Docs does not create an app account. Realtime voice question answering requires your OpenAI API key and microphone permission.
+Speak2Docs does not create an app account. Realtime voice question answering requires your OpenAI API key, microphone permission, and acknowledgement of the OpenAI data notice before selected audio, prompts, and document context are sent to OpenAI for processing.

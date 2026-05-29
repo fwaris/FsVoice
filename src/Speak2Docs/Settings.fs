@@ -104,11 +104,46 @@ module Settings =
           chunkCount = dto.chunkCount
           error = error }
 
-    let openAiKey () =
+    let private legacyOpenAiKey () =
         Preferences.Default.Get(C.SETTINGS_OPENAI_KEY, "").Trim()
 
+    let openAiKey () =
+        let legacy = legacyOpenAiKey ()
+
+        try
+            match
+                SecureStorage.Default.GetAsync(C.SETTINGS_OPENAI_KEY).GetAwaiter().GetResult()
+                |> Option.ofObj
+                |> Option.bind Text.notEmpty
+            with
+            | Some key ->
+                if Text.notEmpty legacy |> Option.isSome then
+                    Preferences.Default.Remove(C.SETTINGS_OPENAI_KEY)
+
+                key
+            | None ->
+                match Text.notEmpty legacy with
+                | Some key ->
+                    SecureStorage.Default.SetAsync(C.SETTINGS_OPENAI_KEY, key).GetAwaiter().GetResult()
+                    Preferences.Default.Remove(C.SETTINGS_OPENAI_KEY)
+                    key
+                | None -> ""
+        with _ ->
+            legacy
+
     let setOpenAiKey (value: string) =
-        Preferences.Default.Set(C.SETTINGS_OPENAI_KEY, value.Trim())
+        try
+            let value = value.Trim()
+
+            if String.IsNullOrWhiteSpace value then
+                SecureStorage.Default.Remove(C.SETTINGS_OPENAI_KEY) |> ignore
+            else
+                SecureStorage.Default.SetAsync(C.SETTINGS_OPENAI_KEY, value).GetAwaiter().GetResult()
+
+            Preferences.Default.Remove(C.SETTINGS_OPENAI_KEY)
+            Ok "secure storage"
+        with ex ->
+            Error ex.Message
 
     let acceptedTermsVersion () =
         Preferences.Default.Get(C.SETTINGS_ACCEPTED_TERMS_VERSION, "").Trim()
@@ -118,6 +153,22 @@ module Settings =
 
     let setAcceptedTermsVersion (value: string) =
         Preferences.Default.Set(C.SETTINGS_ACCEPTED_TERMS_VERSION, value.Trim())
+
+    let suppressedOpenAiDataDisclosureVersion () =
+        Preferences.Default.Get(C.SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION, "").Trim()
+
+    let shouldSuppressOpenAiDataDisclosure () =
+        String.Equals(
+            suppressedOpenAiDataDisclosureVersion (),
+            C.OPENAI_DATA_DISCLOSURE_VERSION,
+            StringComparison.Ordinal
+        )
+
+    let setSuppressOpenAiDataDisclosureVersion (value: string) =
+        Preferences.Default.Set(C.SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION, value.Trim())
+
+    let clearSuppressOpenAiDataDisclosureVersion () =
+        Preferences.Default.Remove(C.SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION)
 
     let private deserializePdfLibrary json =
         if String.IsNullOrWhiteSpace json then
@@ -417,7 +468,7 @@ module Settings =
         setUseLexicalFilter value
 
     let elaborateIndexKeywords () =
-        Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
+        Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, false)
 
     let setElaborateIndexKeywords value =
         Preferences.Default.Set(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, value)

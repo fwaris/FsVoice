@@ -131,52 +131,59 @@ module Connect =
                     RuntimeSettings.snapshot parms.runtimeSettings
                     |> RuntimeSettings.string RuntimeSettings.OpenAiKey parms.apiKey
 
-                match Text.notEmpty apiKey with
-                | None -> return Error(InvalidOperationException "OpenAI API key is required." :> exn)
-                | Some apiKey ->
-                    let! hasPermission = Audio.haveRecordPermission ()
+                if not parms.openAiDataSharingAcknowledged then
+                    return Error(UnauthorizedAccessException "OpenAI data notice acknowledgement is required." :> exn)
+                else
+                    match Text.notEmpty apiKey with
+                    | None -> return Error(InvalidOperationException "OpenAI API key is required." :> exn)
+                    | Some apiKey ->
+                        let! hasPermission = Audio.haveRecordPermission ()
 
-                    if not hasPermission then
-                        return Error(UnauthorizedAccessException "Microphone permission was not granted." :> exn)
-                    else
-                        let conn = Connection.create ()
-                        let cancellation = new CancellationTokenSource()
-                        let serverEvents = Channel.CreateUnbounded<JsonElement>()
-                        let clientEvents = Channel.CreateUnbounded<JsonElement>()
+                        if not hasPermission then
+                            return Error(UnauthorizedAccessException "Microphone permission was not granted." :> exn)
+                        else
+                            let conn = Connection.create ()
+                            let cancellation = new CancellationTokenSource()
+                            let serverEvents = Channel.CreateUnbounded<JsonElement>()
+                            let clientEvents = Channel.CreateUnbounded<JsonElement>()
 
-                        let voiceConnection =
-                            { VoiceConnection.receiver = serverEvents.Reader
-                              sender = clientEvents.Writer }
+                            let voiceConnection =
+                                { VoiceConnection.receiver = serverEvents.Reader
+                                  sender = clientEvents.Writer }
 
-                        let! session =
-                            parms.orchestration.CreateSessionAsync(parms.context, voiceConnection, cancellation.Token)
-                            |> Async.AwaitTask
+                            let! session =
+                                parms.orchestration.CreateSessionAsync(
+                                    parms.context,
+                                    voiceConnection,
+                                    cancellation.Token
+                                )
+                                |> Async.AwaitTask
 
-                        let stateSubscription =
-                            conn.WebRtcClient.StateChanged.Subscribe(fun state ->
-                                parms.mailbox.Writer.TryWrite(WebRTC_StateChanged(parms.connectionId, state))
-                                |> ignore
+                            let stateSubscription =
+                                conn.WebRtcClient.StateChanged.Subscribe(fun state ->
+                                    parms.mailbox.Writer.TryWrite(WebRTC_StateChanged(parms.connectionId, state))
+                                    |> ignore
 
-                                notifyHost session cancellation.Token (RealtimeStateChanged(realtimeState state)))
+                                    notifyHost session cancellation.Token (RealtimeStateChanged(realtimeState state)))
 
-                        let conn =
-                            { conn with
-                                Disposables = stateSubscription :: conn.Disposables }
+                            let conn =
+                                { conn with
+                                    Disposables = stateSubscription :: conn.Disposables }
 
-                        startClientPump parms.mailbox conn clientEvents cancellation.Token
-                        startServerPump parms.mailbox conn serverEvents cancellation.Token
-                        startHostPump parms.mailbox session cancellation.Token apiKey parms.connectionId conn
+                            startClientPump parms.mailbox conn clientEvents cancellation.Token
+                            startServerPump parms.mailbox conn serverEvents cancellation.Token
+                            startHostPump parms.mailbox session cancellation.Token apiKey parms.connectionId conn
 
-                        do! session.StartAsync cancellation.Token |> Async.AwaitTask
+                            do! session.StartAsync cancellation.Token |> Async.AwaitTask
 
-                        return
-                            Ok
-                                { id = parms.connectionId
-                                  session = session
-                                  connection = conn
-                                  serverEvents = serverEvents
-                                  clientEvents = clientEvents
-                                  cancellation = cancellation }
+                            return
+                                Ok
+                                    { id = parms.connectionId
+                                      session = session
+                                      connection = conn
+                                      serverEvents = serverEvents
+                                      clientEvents = clientEvents
+                                      cancellation = cancellation }
             with ex ->
                 Log.exn (ex, "Connect.start")
                 return Error ex

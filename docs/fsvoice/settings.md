@@ -4,6 +4,8 @@
 
 Speak2Docs uses your OpenAI API key to connect to OpenAI services for realtime voice interaction, answers, and optional keyword enrichment.
 
+Before sending microphone audio, transcripts, prompts, or selected document passages to OpenAI during a realtime connection, Speak2Docs asks you to acknowledge an OpenAI data notice inside the app. You can choose not to show the notice again before connecting, and you can review or re-enable the notice from Settings.
+
 To create a key:
 
 1. Sign in to the OpenAI platform.

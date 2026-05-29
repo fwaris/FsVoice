@@ -161,7 +161,7 @@ module Update =
 
     let private saveSettings model =
         refreshRuntimeSettings model |> ignore
-        Settings.setOpenAiKey model.openAiKey
+        Settings.setOpenAiKey model.openAiKey |> ignore
         Settings.setActivePlugInId model.activePlugIn.id
 
         model.modelRoleOverrides
@@ -624,7 +624,7 @@ module Update =
         else
             { model with sessionState = state }, Cmd.none
 
-    let private startParams connectionId model =
+    let private startParams connectionId openAiDataSharingAcknowledged model =
         refreshRuntimeSettings model |> ignore
 
         let orchestrationOptions =
@@ -639,6 +639,7 @@ module Update =
 
         { connectionId = connectionId
           apiKey = model.openAiKey
+          openAiDataSharingAcknowledged = openAiDataSharingAcknowledged
           orchestration = orchestration
           context =
             { storageRoot = FileSystem.AppDataDirectory
@@ -646,6 +647,23 @@ module Update =
               report = fun msg -> model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore }
           mailbox = model.mailbox
           runtimeSettings = model.runtimeSettings }
+
+    let private startRealtimeFlow openAiDataSharingAcknowledged model =
+        saveSettings model
+        let connectionId = Guid.NewGuid().ToString("N")
+
+        { model with
+            isBusy = true
+            pendingConnectionId = Some connectionId
+            disconnectedConnectionIds = model.disconnectedConnectionIds |> Set.remove connectionId
+            sessionState = RTOpenAI.WebRTC.State.Connecting
+            openAiDisclosure = None
+            log = "Starting realtime Speak2Docs flow..." :: model.log },
+        Cmd.OfAsync.either
+            Connect.start
+            (startParams connectionId openAiDataSharingAcknowledged model)
+            (fun result -> StartCompleted(connectionId, result))
+            EventError
 
     let init () =
         let docs = Settings.pdfLibrary ()
@@ -671,6 +689,7 @@ module Update =
             |> List.truncate C.MAX_LOG
 
         let runtimeSettings = RuntimeSettings.empty ()
+        let openAiDisclosureSuppressed = Settings.shouldSuppressOpenAiDataDisclosure ()
 
         let model =
             { currentPage = if Settings.hasAcceptedCurrentTerms () then Main else Terms
@@ -691,6 +710,9 @@ module Update =
               logFontSize = 12.
               activityLogVerbosity = Settings.activityLogVerbosity ()
               hideSecrets = true
+              openAiDisclosureSuppressed = openAiDisclosureSuppressed
+              openAiDisclosure = None
+              openAiDisclosureDoNotShowAgain = openAiDisclosureSuppressed
               isBusy = false
               documentProcessingCancellation = None
               logExpansions = Settings.logExpansions ()
@@ -700,10 +722,7 @@ module Update =
                 Settings.plugInUseLexicalFilter
                     loadedPlugIn.definition.id
                     loadedPlugIn.definition.runtime.useLexicalFilter
-              elaborateIndexKeywords =
-                Settings.plugInElaborateIndexKeywords
-                    loadedPlugIn.definition.id
-                    loadedPlugIn.definition.runtime.elaborateIndexKeywords
+              elaborateIndexKeywords = Settings.plugInElaborateIndexKeywords loadedPlugIn.definition.id false
               useHybridPdfParsing = Settings.useHybridPdfParsing ()
               useLayoutAnalysis = Settings.useLayoutAnalysis ()
               notification = None
@@ -730,6 +749,60 @@ module Update =
         | TermsDeclined ->
             exitApplication ()
             model, Cmd.none
+        | OpenAiDisclosure_Show mode ->
+            match sourceConfigBlocked model "Showing OpenAI data notice" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    currentPage = Main
+                    openAiDisclosure = Some mode
+                    openAiDisclosureDoNotShowAgain = model.openAiDisclosureSuppressed },
+                Cmd.none
+        | OpenAiDisclosureDoNotShowAgainChanged value ->
+            { model with
+                openAiDisclosureDoNotShowAgain = value },
+            Cmd.none
+        | OpenAiDisclosureAcknowledged ->
+            let disclosureMode = model.openAiDisclosure
+            let suppressDisclosure = model.openAiDisclosureDoNotShowAgain
+
+            if suppressDisclosure then
+                Settings.setSuppressOpenAiDataDisclosureVersion C.OPENAI_DATA_DISCLOSURE_VERSION
+            else
+                Settings.clearSuppressOpenAiDataDisclosureVersion ()
+
+            let model =
+                { model with
+                    currentPage = Main
+                    openAiDisclosure = None
+                    openAiDisclosureSuppressed = suppressDisclosure
+                    log =
+                        (if suppressDisclosure then
+                             "Acknowledged OpenAI data notice and enabled Do not show again."
+                         else
+                             "Acknowledged OpenAI data notice for this action.")
+                        :: model.log
+                        |> List.truncate C.MAX_LOG }
+
+            match disclosureMode with
+            | Some ConnectAfterAcknowledgement -> startRealtimeFlow true model
+            | Some ReviewOnly
+            | None -> model, Cmd.none
+        | OpenAiDisclosureDismissed ->
+            let message =
+                match model.openAiDisclosure with
+                | Some ConnectAfterAcknowledgement -> "Connection canceled. No data was sent to OpenAI."
+                | Some ReviewOnly
+                | None -> "OpenAI data notice dismissed."
+
+            { model with
+                currentPage = Main
+                openAiDisclosure = None
+                openAiDisclosureDoNotShowAgain = model.openAiDisclosureSuppressed }
+            |> showNotification message
         | OpenAiKeyChanged value ->
             match sourceConfigBlocked model "Changing OpenAI key" with
             | Some msg ->
@@ -1337,21 +1410,16 @@ module Update =
                 | None, None ->
                     match Text.notEmpty model.openAiKey with
                     | None -> showNotification "Set your OpenAI API key in Settings before connecting." model
-                    | Some _ ->
-                        saveSettings model
-                        let connectionId = Guid.NewGuid().ToString("N")
-
+                    | Some _ when not model.openAiDisclosureSuppressed ->
                         { model with
-                            isBusy = true
-                            pendingConnectionId = Some connectionId
-                            disconnectedConnectionIds = model.disconnectedConnectionIds |> Set.remove connectionId
-                            sessionState = RTOpenAI.WebRTC.State.Connecting
-                            log = "Starting realtime Speak2Docs flow..." :: model.log },
-                        Cmd.OfAsync.either
-                            Connect.start
-                            (startParams connectionId model)
-                            (fun result -> StartCompleted(connectionId, result))
-                            EventError
+                            currentPage = Main
+                            openAiDisclosure = Some ConnectAfterAcknowledgement
+                            openAiDisclosureDoNotShowAgain = false
+                            log =
+                                "Review the OpenAI data notice before starting realtime voice QA." :: model.log
+                                |> List.truncate C.MAX_LOG },
+                        Cmd.none
+                    | Some _ -> startRealtimeFlow true model
                 | Some bundle, _ -> { model with isBusy = true }, stopBundleCommand bundle
         | StartCompleted(connectionId, Ok bundle) ->
             match model.pendingConnectionId with

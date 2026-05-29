@@ -31,6 +31,101 @@ module MainView =
             .centerHorizontal()
             .margin (0., 8., 0., 0.)
 
+    let private disclosureLink text link =
+        Button(text, OpenAppLink link)
+            .font(size = 14., attributes = FontAttributes.Bold)
+            .background(Colors.Transparent)
+            .textColor(Colors.DarkMagenta)
+            .height (42.)
+
+    let private disclosureText appTheme text =
+        Label(text).font(size = 13.).textColor(Theme.textColor appTheme).lineBreakMode (LineBreakMode.WordWrap)
+
+    let private disclosureMutedText appTheme text =
+        Label(text).font(size = 12.).textColor(Theme.secondaryTextColor appTheme).lineBreakMode (LineBreakMode.WordWrap)
+
+    let private disclosurePopupTitle mode =
+        match mode with
+        | ConnectAfterAcknowledgement -> "Before Connecting"
+        | ReviewOnly -> "OpenAI Data Notice"
+
+    let private openAiDisclosureOverlay model mode =
+        (Grid([ Dimension.Star ], [ Dimension.Star ]) {
+            Border(
+                ScrollView(
+                    (VStack(spacing = 10.) {
+                        Label(disclosurePopupTitle mode)
+                            .font(size = 18., attributes = FontAttributes.Bold)
+                            .textColor(Theme.textColor model.appTheme)
+                            .lineBreakMode(LineBreakMode.WordWrap)
+                            .horizontalTextAlignment (TextAlignment.Center)
+
+                        disclosureText
+                            model.appTheme
+                            "Speak2Docs uses OpenAI to answer questions about selected documents."
+
+                        disclosureMutedText
+                            model.appTheme
+                            "Sent to OpenAI: microphone audio, transcripts, prompts, and selected document passages."
+
+                        disclosureMutedText
+                            model.appTheme
+                            "Recipient: OpenAI, the third-party AI service used for processing."
+
+                        disclosureMutedText
+                            model.appTheme
+                            "Purpose: realtime answers, transcription, and retrieval support."
+
+                        disclosureText
+                            model.appTheme
+                            "Documents and indexes stay on this device unless selected context is needed for OpenAI processing."
+
+                        Grid([ Dimension.Star; Dimension.Star ], [ Dimension.Absolute 42. ]) {
+                            (disclosureLink "Privacy Policy" PrivacyPolicy).gridColumn (0)
+                            (disclosureLink "Terms of Use" TermsOfUse).gridColumn (1)
+                        }
+
+                        Grid([ Dimension.Absolute 42.; Dimension.Star ], [ Dimension.Auto ]) {
+                            CheckBox(model.openAiDisclosureDoNotShowAgain, OpenAiDisclosureDoNotShowAgainChanged)
+                                .gridColumn(0)
+                                .centerVertical ()
+
+                            Label("Do not show again before connecting")
+                                .font(size = 12.)
+                                .textColor(Theme.textColor model.appTheme)
+                                .lineBreakMode(LineBreakMode.WordWrap)
+                                .gridColumn(1)
+                                .centerVertical ()
+                        }
+
+                        Grid([ Dimension.Star; Dimension.Star ], [ Dimension.Absolute 46. ]) {
+                            Button("Dismiss", OpenAiDisclosureDismissed)
+                                .font(size = 14., attributes = FontAttributes.Bold)
+                                .background(Colors.Transparent)
+                                .textColor(Theme.textColor model.appTheme)
+                                .gridColumn (0)
+
+                            Button("Acknowledge", OpenAiDisclosureAcknowledged)
+                                .font(size = 14., attributes = FontAttributes.Bold)
+                                .background(Colors.DarkMagenta)
+                                .textColor(Colors.White)
+                                .cornerRadius(8)
+                                .gridColumn (1)
+                        }
+                    })
+                        .padding (16.)
+                )
+            )
+                .background(Theme.pageBackgroundColor model.appTheme)
+                .stroke(SolidColorBrush(Theme.borderColor model.appTheme))
+                .strokeThickness(1.)
+                .strokeShape(RoundRectangle(CornerRadius(8.)))
+                .width(340.)
+                .centerHorizontal()
+                .centerVertical ()
+        })
+            .background (Color.FromArgb("#99000000"))
+
     let private logView model =
         let logItems =
             model.log
@@ -97,6 +192,10 @@ module MainView =
                 (logView model).gridRow (3)
 
                 (aiDisclaimerView model).gridRow (4)
+
+                match model.openAiDisclosure with
+                | Some mode -> (openAiDisclosureOverlay model mode).gridRowSpan (5)
+                | None -> ()
             })
                 .padding (18.)
         )

@@ -1,23 +1,33 @@
 # Speak2Docs Privacy Policy
 
-Effective date: May 20, 2026
+Effective date: May 28, 2026
 
 Speak2Docs is a document question-answering app that lets you ask questions about selected documents by voice. This policy explains the main data the app handles.
 
 ## Data You Provide
 
-- OpenAI API key: entered by you in Settings so the app can connect to OpenAI services.
+- OpenAI API key: entered by you in Settings so the app can connect to OpenAI services using your OpenAI account.
 - Microphone audio: captured only after you start a realtime voice session and grant microphone permission.
 - Documents and indexes: PDFs, Markdown files, JSON files, and Speak2Docs index bundles that you add or select.
 - Local logs and settings: preferences, source names, processing status, and troubleshooting messages stored by the app.
 
 ## How Data Is Used
 
-Speak2Docs uses your selected sources to retrieve relevant document passages and answer your questions. Realtime audio, transcripts, prompts, and selected context may be sent to OpenAI when you use voice question answering. If keyword enrichment is enabled, selected passage text may also be sent to OpenAI to generate search keywords.
+Speak2Docs uses your selected sources to retrieve relevant document passages and answer your questions. Documents and retrieval indexes are stored locally on your device.
+
+Before Speak2Docs connects to OpenAI and sends personal data or document context, the app shows an in-app OpenAI data notice popup with links to the Privacy Policy and Terms of Use. If you acknowledge the notice, Speak2Docs may send OpenAI:
+
+- microphone audio and realtime transcripts,
+- prompts and questions you ask,
+- selected passages from the documents or indexes you choose.
+
+This data is sent to OpenAI to provide realtime transcription, voice answers, and retrieval support. Speak2Docs does not operate a separate developer backend for these requests; requests are authenticated with the OpenAI API key you provide. OpenAI handles API data under its applicable terms, privacy policy, and API data-use controls.
+
+You can dismiss the notice to cancel the connection. You can also choose not to show the notice again before connecting; this preference is stored locally and can be changed from Settings.
 
 ## Local Storage
 
-Documents, indexes, settings, cached keywords, and logs are stored in the app container on your device. Your OpenAI API key is intended to be stored using the platform secure storage mechanism.
+Documents, indexes, settings, cached keywords, and logs are stored in the app container on your device. Your OpenAI API key is stored using the platform secure storage mechanism. You can remove documents, indexes, and settings from inside the app or by deleting the app and its data from your device.
 
 ## Accounts
 

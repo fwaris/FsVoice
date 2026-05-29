@@ -1,6 +1,6 @@
 # Speak2Docs Terms of Use
 
-Effective date: May 21, 2026
+Effective date: May 29, 2026
 
 By using Speak2Docs, you agree to these Terms of Use. If you do not agree, do not use the app.
 
@@ -18,7 +18,9 @@ You are solely responsible for the documents you add, the questions you ask, how
 
 ## Documents and Third-Party Services
 
-You are responsible for ensuring that you have the right to use documents, files, and indexes you add to the app. When you use realtime question answering, audio, transcripts, prompts, and selected document context may be sent to OpenAI or other configured services under their applicable terms.
+You are responsible for ensuring that you have the right to use documents, files, and indexes you add to the app.
+
+Speak2Docs uses OpenAI as a third-party AI service for realtime transcription, voice answers, retrieval support, and optional keyword enrichment. Before a realtime connection sends personal data or document context to OpenAI, the app shows an in-app OpenAI data notice popup. If you acknowledge the notice, microphone audio, transcripts, prompts, and selected document passages may be sent to OpenAI under OpenAI's applicable terms, privacy policy, and API data-use controls. Dismissing the notice cancels the connection.
 
 ## As-Is Service
 

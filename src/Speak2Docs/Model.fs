@@ -15,6 +15,10 @@ type AppPage =
     | Info
     | IndexPreview of documentId: string
 
+type OpenAiDisclosureMode =
+    | ConnectAfterAcknowledgement
+    | ReviewOnly
+
 type ConnectionBundle =
     { id: string
       session: IVoiceSession<ToHost, FromHost>
@@ -32,6 +36,7 @@ type AppLink =
 type StartParams =
     { connectionId: string
       apiKey: string
+      openAiDataSharingAcknowledged: bool
       orchestration: IVoiceOrchestration<ToHost, FromHost>
       context: VoiceOrchestrationContext
       mailbox: Channel<Msg>
@@ -68,6 +73,9 @@ and Model =
       logFontSize: float
       activityLogVerbosity: ActivityLogVerbosity
       hideSecrets: bool
+      openAiDisclosureSuppressed: bool
+      openAiDisclosure: OpenAiDisclosureMode option
+      openAiDisclosureDoNotShowAgain: bool
       isBusy: bool
       documentProcessingCancellation: CancellationTokenSource option
       logExpansions: bool
@@ -85,6 +93,10 @@ and Model =
 and Msg =
     | TermsAccepted
     | TermsDeclined
+    | OpenAiDisclosure_Show of OpenAiDisclosureMode
+    | OpenAiDisclosureDoNotShowAgainChanged of bool
+    | OpenAiDisclosureAcknowledged
+    | OpenAiDisclosureDismissed
     | OpenAiKeyChanged of string
     | ModelRoleModelChanged of FsVoice.QA.ModelRole * string
     | PlugInSettingChanged of string * string

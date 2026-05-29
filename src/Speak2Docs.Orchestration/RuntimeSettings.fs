@@ -98,7 +98,7 @@ module RuntimeSettings =
         { logExpansions = bool LogExpansions false values
           logChunks = bool LogChunks false values
           useLexicalFilter = bool UseLexicalFilter true values
-          elaborateIndexKeywords = bool ElaborateIndexKeywords true values
+          elaborateIndexKeywords = bool ElaborateIndexKeywords false values
           useHybridPdfParsing = bool UseHybridPdfParsing true values
           useLayoutAnalysis = bool UseLayoutAnalysis true values }
 
