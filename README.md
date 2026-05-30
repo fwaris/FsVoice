@@ -42,7 +42,7 @@ All model role ids can be overridden by plugins and by app settings.
 - `src/FsVoice.Ctx.Runtime`: oracle/context answer runtime, tool loading, blackboard, durable memory, plugin profiles, and answer transport.
 - `src/FsVoice.Retrieval.PdfRasterization`: desktop, Android, iOS, and Mac Catalyst PDF rasterizers for hybrid PDF parsing.
 - `src/FsVoice.Ctx.Tools`: reusable context tool providers. It currently includes a current-time provider.
-- `src/FsVoice.QA*`, `src/FsVoice.Tools`, and `src/FsVoice.PdfRasterization`: deprecated compatibility facades for older source names.
+- `src/FsVoice.Tools` and `src/FsVoice.PdfRasterization`: deprecated compatibility facades for older source names.
 - `src/FsVoice.Cli`: command-line asking, index-bundle creation, and InsuranceQA evaluation utilities.
 - `src/Speak2Docs.Orchestration`: platform-neutral Speak2Docs workflow, agents, runtime settings, plugin loading, and source model.
 - `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst.

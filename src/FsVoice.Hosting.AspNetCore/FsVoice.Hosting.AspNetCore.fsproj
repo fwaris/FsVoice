@@ -10,9 +10,18 @@
 
   <ItemGroup>
     <Compile Include="BridgeTypes.fs" />
+    <Compile Include="RealtimePipes.fs" />
+    <Compile Include="SipTypes.fs" />
+    <Compile Include="OpenAiRealtimeRestClient.fs" />
+    <Compile Include="OpenAiRtcConfiguration.fs" />
+    <Compile Include="OpenAiWebRtcConnectionGate.fs" />
+    <Compile Include="OpenAiRealtimeWebRtcSession.fs" />
     <Compile Include="BridgeSession.fs" />
     <Compile Include="BridgeSessionStore.fs" />
     <Compile Include="BridgeEndpoints.fs" />
+    <Compile Include="SipCallBridge.fs" />
+    <Compile Include="SipHostedService.fs" />
+    <Compile Include="SipBridge.fs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -22,6 +31,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="SIPSorcery" />
   </ItemGroup>
 
 </Project>

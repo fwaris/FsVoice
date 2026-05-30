@@ -6,9 +6,7 @@
     <Project Path="src/FsVoice.Ctx.Runtime/FsVoice.Ctx.Runtime.fsproj" />
     <Project Path="src/FsVoice.Ctx.Tools/FsVoice.Ctx.Tools.fsproj" />
     <Project Path="src/FsVoice.Retrieval.PdfRasterization/FsVoice.Retrieval.PdfRasterization.fsproj" />
-    <Project Path="src/FsVoice.QA.Abstractions/FsVoice.QA.Abstractions.fsproj" />
     <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
-    <Project Path="src/FsVoice.QA/FsVoice.QA.fsproj" />
     <Project Path="src/FsVoice.PdfRasterization/FsVoice.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
     <Project Path="src/FsVoice.Tests/FsVoice.Tests.fsproj" />

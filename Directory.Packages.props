@@ -23,6 +23,7 @@
     <PackageVersion Include="RTOpenAI.Api" Version="0.9.3.7" />
     <PackageVersion Include="RTOpenAI.Events" Version="0.9.3.7" />
     <PackageVersion Include="RTFlow" Version="0.9.3.3" />
+    <PackageVersion Include="SIPSorcery" Version="8.0.22" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.Extensions" Version="0.15.2-dev-20251214-1129-7387a4eb" />
     <PackageVersion Include="SkiaSharp" Version="3.119.2" />

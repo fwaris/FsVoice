@@ -1,5 +1,7 @@
 # FsVoice - A Platform for Building Conversational Applications
 
+[![Download on the App Store](../imgs/white.svg)](https://apps.apple.com/app/6771490875) 
+
 ![FsVoice platform overview](../imgs/platform.png)
 
 In an highly contested AI marketplace, OpenAI currently has a true strategic moat with its `gpt-realtime` voice API. Their core advantage is the multitude of available voices that exhibit natural tone, intonation and pacing. OpenAI has truly crossed the [uncanny valley](https://spectrum.ieee.org/the-uncanny-valley?utm_source=chatgpt.com) here.
@@ -39,7 +41,7 @@ Key benefits include:
 To reduce context bloat and the potential dilution of recent information, for long conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not not impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
 
 ## 2. FsVoice Deployment Topologies
-The FsVoice platform affords several types of deployment topologies from mobile, desktop to web. While many configurations are possible, the main ones are described below.
+The FsVoice platform affords several types of deployment topologies from mobile, desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:
 
 <ol type = "A">
 <li style="margin-bottom: 0.75rem;">{▣ Mobile app + <strong><code>[FsVoice Orch.]</code></strong>} <br/> &rarr;[WebRTC] {⌬ OpenAI backend}
@@ -51,7 +53,7 @@ The FsVoice platform affords several types of deployment topologies from mobile,
 <li style="margin-bottom: 0.75rem;">▣ SPA Web Page <br /> &rarr; [WebRTC-1] {🔌 Web API + <strong><code>[FsVoice Orch.]</code></strong>} <br/> &rarr; [WebRTC-2] {⌬ OpenAI backend}
 </li>
 
-<li style="margin-bottom: 0.75rem;">[SIP] <strong><code>[FsVoice Orch.]</code></strong>} <br /> &rarr; [WebRTC | Web Sockets] ⌬ OpenAI backend
+<li style="margin-bottom: 0.75rem;">[SIP] <strong><code>[FsVoice Orch.]</code></strong>} <br /> &rarr; [WebRTC] ⌬ OpenAI backend
 </li>
 
 </ol>
@@ -60,8 +62,7 @@ The leg containing <strong><code>[FsVoice Orch.]</code></strong> is where the Fs
 
 In topology B, the mobile app establishes a first WebRTC connection (*WebRTC-1*) to the Web API. The Web API then acts as the bridge, forwarding the app’s audio stream to OpenAI over a second WebRTC connection (*WebRTC-2*). The FsVoice orchestration runs inside the Web API and coordinates both sides of the interaction: it manages the OpenAI realtime message stream over *WebRTC-2* while also maintaining a separate application-level message stream with the mobile app over *WebRTC-1*. The main benefit here is that the audio conversation can be synced with on-screen updates in the app UI. For example, if the user says show me product X then that will result in the UI getting updated accordingly.
 
-In topology D, FsVoice sits directly on the SIP side of a telephony flow. It receives audio from the phone network over SIP, runs the FsVoice orchestration server-side, and connects to the OpenAI backend over either WebRTC or WebSockets. This topology is especially relevant for enterprise telephony, contact-center, and SIP trunk integration scenarios. While the FsVoice project does not showcase SIP connectivity, a somewhat related project - [FsTranslate](https://github.com/fwaris/fstranslate) - does.
-
+In topology D, FsVoice sits directly on the SIP side of a telephony flow. It receives audio from the phone network over SIP, runs the FsVoice orchestration server-side, and connects to the OpenAI backend over *WebRTC* (or optionally *Web Sockets*). This topology is especially relevant for enterprise telephony, contact-center, and SIP trunk integration scenarios.
 
 ## 2. FsVoice Architecture
 As a platform, FsVoice has an open, pluggable architecture. Applications can be constructed by implementing well defined interfaces and assembling pre-built components a-la-carte. The top infographic depicts the platform artifacts and how they are used to construct the Speak2Docs sample application. The main interfaces and components are described in more detail next.
@@ -107,8 +108,9 @@ FsVoice is the reusable architecture underneath Speak2Docs.
 At the center are typed contracts and runtime packages:
 
 - `FsVoice.Platform` defines typed voice sessions, voice connections, orchestration contexts, and host message codecs.
-- `FsVoice.QA.Abstractions` defines QA sources, chunks, retrieval modes, sessions, tools, plugins, context providers, and model roles.
-- `FsVoice.QA` implements retrieval, keyword enrichment, tool orchestration, blackboard context, durable memory support, FsColbert indexing, and hybrid PDF processing.
+- `FsVoice.Ctx.Contracts` defines context answer sources, chunks, retrieval modes, sessions, tools, plugins, context providers, memory, and model roles.
+- `FsVoice.Retrieval` implements source loading, FsColbert retrieval, keyword enrichment, index preview, and hybrid PDF processing.
+- `FsVoice.Ctx.Runtime` implements tool orchestration, blackboard context, durable memory support, plugins, and grounded answer generation.
 - `FsVoice.PdfRasterization` supplies platform-specific PDF rasterizers for hybrid parsing.
 - `FsVoice.Hosting.AspNetCore` provides a bridge for browser/WebRTC-style hosts.
 - `FsVoice.RTFlow` adapts RTFlow workflows to the public voice session contract.
@@ -238,7 +240,7 @@ flowchart TD
         AnswerRequest --> QaTurn["QaTurnRequest<br/>turnId + question + realtime judgement + deadline"]
     end
 
-    subgraph QaSession["FsVoice.QA QaSession.AnswerAsync"]
+    subgraph QaSession["FsVoice.Ctx.Runtime QaSession.AnswerAsync"]
         QaTurn --> BBStart["Blackboard add<br/>transcript, realtime judgement,<br/>recall policy decision"]
 
         BBStart --> DurableDisabled["Speak2Docs durable memory disabled<br/>DisabledMemoryService returns no recall hits<br/>durable_memory_search omitted"]
@@ -325,7 +327,7 @@ Document QA is rarely generic for long.
 
 An insurance benchmark, a legal review app, a research assistant, and an internal support tool may all need voice QA, but they do not share the same prompts, vocabulary, tools, model roles, or retrieval defaults.
 
-FsVoice QA plugins let each domain define:
+FsVoice Ctx plugins let each domain define:
 
 - prompt templates;
 - model role defaults;
@@ -373,4 +375,4 @@ Those are the pieces you need when voice becomes an application surface instead 
 - User flow Mermaid source: [`diagrams/user_flow.mmd`](../diagrams/user_flow.mmd)
 - Runtime flow Mermaid source: [`diagrams/global_flow.mmd`](../diagrams/global_flow.mmd)
 - Main README: [`README.md`](../README.md)
-
+![Speak2Docs App](../imgs/qr-code.png)

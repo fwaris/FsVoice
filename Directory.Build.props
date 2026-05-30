@@ -12,7 +12,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(MSBuildProjectName)' != 'FsVoice.QA'">
+  <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)PackageReadme.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 </Project>

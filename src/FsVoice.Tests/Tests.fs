@@ -12,6 +12,8 @@ open System.Threading.Channels
 open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.Extensions.AI
+open Microsoft.Extensions.Logging
+open Microsoft.Extensions.Options
 open FSharp.Control
 open FsVoice.Hosting.AspNetCore
 open FsVoice.Ctx
@@ -702,15 +704,6 @@ let ``async priority queue completion releases waiters`` () =
 
         do! Assert.ThrowsAsync<InvalidOperationException>(fun () -> pending) :> Task
     }
-
-[<Fact>]
-let ``ctx and legacy qa facades expose compatible plugin defaults`` () =
-    let ctxPlugIn = FsVoice.Ctx.GenericQaPlugIn() :> FsVoice.Ctx.IQaPlugIn
-    let legacyPlugIn = FsVoice.QA.GenericQaPlugIn() :> FsVoice.QA.IQaPlugIn
-
-    Assert.Equal(ctxPlugIn.Definition.id, legacyPlugIn.Definition.id)
-    Assert.Equal(ctxPlugIn.Definition.displayName, legacyPlugIn.Definition.displayName)
-    Assert.Equal(ctxPlugIn.ContractVersion, legacyPlugIn.ContractVersion)
 
 [<Fact>]
 let ``generic PlugIn supplies model roles and runtime defaults`` () =
@@ -3499,10 +3492,13 @@ let ``qa session delayed blackboard pruning keeps newer turns`` () =
 type TestToHost =
     | ShowThing of string
     | VoiceActivityChanged of bool
+    | RequestSipRealtime of JsonElement
 
 type TestFromHost =
     | ScreenShown of string
     | ProjectionCompleted of string
+    | SipStateChanged of SipRealtimeState
+    | SipConnectionFailed of string
 
 type FakeTypedVoiceSession(startMessages: TestToHost list) =
     let toHost = Channel.CreateUnbounded<TestToHost>()
@@ -3549,6 +3545,85 @@ type FakeTypedVoiceOrchestration() =
         member _.CreateSessionAsync(_, _, _) =
             Task.FromResult(session :> IVoiceSession<TestToHost, TestFromHost>)
 
+type FakeSipVoiceOrchestration(startMessages: TestToHost list) =
+    let session = FakeTypedVoiceSession(startMessages)
+    let gate = obj ()
+    let mutable createCount = 0
+    let mutable connection: VoiceConnection option = None
+
+    member _.Session = session
+    member _.CreateCount = lock gate (fun () -> createCount)
+    member _.Connection = lock gate (fun () -> connection)
+
+    interface IVoiceOrchestration<TestToHost, TestFromHost> with
+        member _.Definition =
+            { VoiceOrchestrationDefinition.create "fake.sip" "0.1.0" "Fake SIP Orchestration" with
+                description = Some "A SIP orchestration used by tests." }
+
+        member _.CreateSessionAsync(_, voiceConnection, _) =
+            lock gate (fun () ->
+                createCount <- createCount + 1
+                connection <- Some voiceConnection)
+
+            Task.FromResult(session :> IVoiceSession<TestToHost, TestFromHost>)
+
+type FakeOpenAiRealtimeWebRtcSession(?startError: exn) =
+    let received = Event<JsonElement>()
+    let connected = Event<unit>()
+    let closed = Event<exn option>()
+    let gate = obj ()
+    let mutable startedSession: JsonElement option = None
+    let mutable startedCodec: SipAudioCodec option = None
+    let sentClientEvents = ResizeArray<JsonElement>()
+    let mutable fromSipPipeCount = 0
+    let mutable toSipPipeCount = 0
+    let mutable disposed = false
+
+    member _.StartedSession = lock gate (fun () -> startedSession)
+    member _.StartedCodec = lock gate (fun () -> startedCodec)
+    member _.SentClientEvents = lock gate (fun () -> sentClientEvents |> Seq.toList)
+    member _.FromSipPipeCount = lock gate (fun () -> fromSipPipeCount)
+    member _.ToSipPipeCount = lock gate (fun () -> toSipPipeCount)
+    member _.Disposed = lock gate (fun () -> disposed)
+
+    member _.EmitReceived(event: JsonElement) = received.Trigger(event.Clone())
+
+    member _.Close(?error: exn) = closed.Trigger error
+
+    interface IOpenAiRealtimeWebRtcSession with
+        member _.Received = received.Publish
+        member _.Connected = connected.Publish
+        member _.Closed = closed.Publish
+
+        member _.StartAsync(session, codec, _cancellationToken) =
+            task {
+                lock gate (fun () ->
+                    startedSession <- Some(session.Clone())
+                    startedCodec <- Some codec)
+
+                match startError with
+                | Some ex -> return raise ex
+                | None -> connected.Trigger()
+            }
+            :> Task
+
+        member _.SendClientEvent(event: JsonElement) =
+            lock gate (fun () -> sentClientEvents.Add(event.Clone()))
+
+        member _.PipeFromRtpSession(_, _, _, _) =
+            lock gate (fun () -> fromSipPipeCount <- fromSipPipeCount + 1)
+            null
+
+        member _.PipeToRtpSession(_, _, _, _, _) =
+            lock gate (fun () -> toSipPipeCount <- toSipPipeCount + 1)
+            null
+
+        member _.Dispose() = lock gate (fun () -> disposed <- true)
+
+type FakeOpenAiRealtimeWebRtcSessionFactory(session: IOpenAiRealtimeWebRtcSession) =
+    interface IOpenAiRealtimeWebRtcSessionFactory with
+        member _.Create _ = session
+
 let private typedVoiceConnection () =
     let inbound = Channel.CreateUnbounded<JsonElement>()
     let outbound = Channel.CreateUnbounded<JsonElement>()
@@ -3569,6 +3644,11 @@ let private testHostCodec: HostMessageCodec<TestToHost, TestFromHost> =
             JsonSerializer.SerializeToElement(
                 {| case = "VoiceActivityChanged"
                    active = active |}
+            )
+        | RequestSipRealtime session ->
+            JsonSerializer.SerializeToElement(
+                {| case = "RequestSipRealtime"
+                   session = session |}
             )
 
     let decodeFromHost (json: JsonElement) =
@@ -3762,6 +3842,241 @@ let ``bridge session store creates and removes typed sessions`` () =
         Assert.True(store.TryGet(session.SessionId).IsNone)
     }
 
+let private sipRealtimeSession model =
+    JsonSerializer.SerializeToElement(
+        {| model = model
+           instructions = "test realtime session" |}
+    )
+
+let private sipCallContext codec =
+    { callId = Guid.NewGuid().ToString("N")
+      sessionId = BridgeSessionId.newId ()
+      sipUri = "sip:test@example.test"
+      remoteEndPoint = "127.0.0.1:5060"
+      negotiatedCodec = codec }
+
+let private sipHostAdapter =
+    { tryGetRealtimeSession =
+        function
+        | RequestSipRealtime session -> Some session
+        | _ -> None
+      stateChanged = SipStateChanged >> Some
+      connectionFailed = SipConnectionFailed >> Some }
+
+let private sipOptions enabled port =
+    let options = SipListenerOptions()
+    options.Enabled <- enabled
+    options.ListenUdpPort <- port
+    options.RealtimeRequestTimeoutSeconds <- 1
+    Options.Create options
+
+let private sipLoggerFactory () = LoggerFactory.Create(fun _ -> ())
+
+let private createSipBridge orchestration openAi =
+    let registration =
+        { createSessionOptions =
+            fun context ->
+                { sessionId = context.sessionId
+                  orchestration = orchestration
+                  context = typedVoiceContext ()
+                  hostMessageCodec = Some testHostCodec }
+          hostAdapter = sipHostAdapter }
+
+    let factory =
+        FakeOpenAiRealtimeWebRtcSessionFactory(openAi) :> IOpenAiRealtimeWebRtcSessionFactory
+
+    let loggerFactory = sipLoggerFactory ()
+
+    new SipCallBridge<TestToHost, TestFromHost>(
+        registration,
+        sipOptions true 0,
+        factory,
+        loggerFactory.CreateLogger<SipCallBridge<TestToHost, TestFromHost>>()
+    )
+
+let private readSipConnectionFailureAsync (session: FakeTypedVoiceSession) =
+    task {
+        use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 3.0)
+        let mutable result = None
+
+        while result.IsNone do
+            let! message = session.FromHost.ReadAsync(timeout.Token).AsTask()
+
+            match message with
+            | SipConnectionFailed message -> result <- Some message
+            | _ -> ()
+
+        return result.Value
+    }
+
+[<Fact>]
+let ``sip codec helpers parse defaults and validate SDP answers`` () =
+    Assert.Equal<SipAudioCodec list>([ PCMU; PCMA ], SipAudioCodec.defaultAllowed)
+    Assert.Equal(Some PCMU, SipAudioCodec.tryParse "ulaw")
+    Assert.Equal(Some PCMA, SipAudioCodec.tryParse "G.711A")
+    Assert.Equal(Some Opus, SipAudioCodec.tryParse "opus")
+    Assert.Equal<SipAudioCodec list>([ PCMA; PCMU ], SipAudioCodec.fromConfig [ "pcma"; "pcmu"; "pcma" ])
+
+    let answer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0\r\na=rtpmap:0 PCMU/8000\r\n"
+
+    Assert.True(SdpCodec.answerContainsCodec PCMU answer)
+    Assert.False(SdpCodec.answerContainsCodec PCMA answer)
+
+[<Fact>]
+let ``sip call bridge creates orchestration and starts OpenAI realtime session`` () =
+    task {
+        let realtimeSession = sipRealtimeSession "gpt-realtime-test"
+
+        let orchestration =
+            FakeSipVoiceOrchestration([ RequestSipRealtime realtimeSession ])
+
+        let openAi = new FakeOpenAiRealtimeWebRtcSession()
+
+        let bridge =
+            createSipBridge (orchestration :> IVoiceOrchestration<_, _>) (openAi :> IOpenAiRealtimeWebRtcSession)
+
+        use cts = new CancellationTokenSource()
+
+        let runTask = bridge.RunAsync(sipCallContext PCMU, null, null, cts.Token)
+
+        do! waitForAsync "Expected OpenAI realtime session to start." (fun () -> openAi.StartedSession.IsSome)
+
+        Assert.Equal(1, orchestration.CreateCount)
+        Assert.Equal(Some PCMU, openAi.StartedCodec)
+        Assert.Equal("gpt-realtime-test", openAi.StartedSession.Value.GetProperty("model").GetString())
+        Assert.Equal(1, openAi.FromSipPipeCount)
+        Assert.Equal(1, openAi.ToSipPipeCount)
+
+        cts.Cancel()
+        do! runTask
+        Assert.True(openAi.Disposed)
+    }
+
+[<Fact>]
+let ``sip call bridge forwards voice connection events to and from OpenAI data channel`` () =
+    task {
+        let realtimeSession = sipRealtimeSession "gpt-realtime-test"
+
+        let orchestration =
+            FakeSipVoiceOrchestration([ RequestSipRealtime realtimeSession ])
+
+        let openAi = new FakeOpenAiRealtimeWebRtcSession()
+
+        let bridge =
+            createSipBridge (orchestration :> IVoiceOrchestration<_, _>) (openAi :> IOpenAiRealtimeWebRtcSession)
+
+        use cts = new CancellationTokenSource()
+
+        let runTask = bridge.RunAsync(sipCallContext PCMU, null, null, cts.Token)
+
+        do! waitForAsync "Expected SIP voice connection to be created." (fun () -> orchestration.Connection.IsSome)
+        do! waitForAsync "Expected OpenAI realtime session to start." (fun () -> openAi.StartedSession.IsSome)
+
+        let connection = orchestration.Connection.Value
+
+        do!
+            connection.sender
+                .WriteAsync(
+                    JsonSerializer.SerializeToElement(
+                        {| event_id = "client_1"
+                           ``type`` = "session.update" |}
+                    ),
+                    CancellationToken.None
+                )
+                .AsTask()
+
+        do!
+            waitForAsync "Expected client event to reach OpenAI data channel." (fun () ->
+                openAi.SentClientEvents.Length = 1)
+
+        Assert.Equal("session.update", openAi.SentClientEvents.Head.GetProperty("type").GetString())
+
+        openAi.EmitReceived(
+            JsonSerializer.SerializeToElement(
+                {| event_id = "server_1"
+                   ``type`` = "response.created" |}
+            )
+        )
+
+        let! received = connection.receiver.ReadAsync(CancellationToken.None).AsTask()
+        Assert.Equal("response.created", received.GetProperty("type").GetString())
+
+        cts.Cancel()
+        do! runTask
+    }
+
+[<Fact>]
+let ``sip call bridge reports OpenAI codec rejection to host`` () =
+    task {
+        let realtimeSession = sipRealtimeSession "gpt-realtime-test"
+
+        let orchestration =
+            FakeSipVoiceOrchestration([ RequestSipRealtime realtimeSession ])
+
+        let openAi =
+            new FakeOpenAiRealtimeWebRtcSession(
+                OpenAiCodecRejectedException "OpenAI rejected requested strict codec PCMU."
+            )
+
+        let bridge =
+            createSipBridge (orchestration :> IVoiceOrchestration<_, _>) (openAi :> IOpenAiRealtimeWebRtcSession)
+
+        do! bridge.RunAsync(sipCallContext PCMU, null, null, CancellationToken.None)
+
+        let! message = readSipConnectionFailureAsync orchestration.Session
+        Assert.Contains("strict codec", message, StringComparison.OrdinalIgnoreCase)
+    }
+
+[<Fact>]
+let ``sip hosted service disabled listener does not bind`` () =
+    task {
+        let orchestration = FakeSipVoiceOrchestration([])
+        let openAi = new FakeOpenAiRealtimeWebRtcSession()
+
+        let bridge =
+            createSipBridge (orchestration :> IVoiceOrchestration<_, _>) (openAi :> IOpenAiRealtimeWebRtcSession)
+
+        use loggerFactory = sipLoggerFactory ()
+
+        let service =
+            new SipHostedService<TestToHost, TestFromHost>(
+                sipOptions false 0,
+                bridge,
+                loggerFactory.CreateLogger<SipHostedService<TestToHost, TestFromHost>>(),
+                loggerFactory
+            )
+
+        do! (service :> Microsoft.Extensions.Hosting.IHostedService).StartAsync CancellationToken.None
+        Assert.False service.IsListening
+        do! (service :> Microsoft.Extensions.Hosting.IHostedService).StopAsync CancellationToken.None
+        Assert.False service.IsListening
+    }
+
+[<Fact>]
+let ``sip hosted service enabled listener starts and stops`` () =
+    task {
+        let orchestration = FakeSipVoiceOrchestration([])
+        let openAi = new FakeOpenAiRealtimeWebRtcSession()
+
+        let bridge =
+            createSipBridge (orchestration :> IVoiceOrchestration<_, _>) (openAi :> IOpenAiRealtimeWebRtcSession)
+
+        use loggerFactory = sipLoggerFactory ()
+
+        let service =
+            new SipHostedService<TestToHost, TestFromHost>(
+                sipOptions true 0,
+                bridge,
+                loggerFactory.CreateLogger<SipHostedService<TestToHost, TestFromHost>>(),
+                loggerFactory
+            )
+
+        do! (service :> Microsoft.Extensions.Hosting.IHostedService).StartAsync CancellationToken.None
+        Assert.True service.IsListening
+        do! (service :> Microsoft.Extensions.Hosting.IHostedService).StopAsync CancellationToken.None
+        Assert.False service.IsListening
+    }
+
 [<Fact>]
 let ``pure voice orchestration can use unit host messages`` () =
     task {
@@ -3798,7 +4113,8 @@ let ``FsVoice Platform public contract stays dependency light`` () =
     let publicApi = assembly.GetExportedTypes() |> Array.map _.FullName
 
     Assert.DoesNotContain("RTFlow", references)
-    Assert.DoesNotContain("FsVoice.QA", references)
+    Assert.DoesNotContain("FsVoice.Ctx.Contracts", references)
+    Assert.DoesNotContain("FsVoice.Retrieval", references)
     Assert.DoesNotContain("Microsoft.Maui", references)
     Assert.DoesNotContain("OpenAI", references)
 
