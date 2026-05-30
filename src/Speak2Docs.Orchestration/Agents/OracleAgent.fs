@@ -9,7 +9,7 @@ open OpenAI.Chat
 open RTFlow
 open RTFlow.Functions
 
-module QaAgent =
+module OracleAgent =
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
           storageRoot: string

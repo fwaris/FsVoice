@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FsVoice.Core/FsVoice.Core.fsproj" />
+    <Project Path="src/FsVoice.Platform/FsVoice.Platform.fsproj" />
     <Project Path="src/FsVoice.Ctx.Contracts/FsVoice.Ctx.Contracts.fsproj" />
     <Project Path="src/FsVoice.Retrieval/FsVoice.Retrieval.fsproj" />
     <Project Path="src/FsVoice.Ctx.Runtime/FsVoice.Ctx.Runtime.fsproj" />
@@ -8,14 +9,13 @@
     <Project Path="src/FsVoice.Retrieval.PdfRasterization/FsVoice.Retrieval.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
     <Project Path="src/FsVoice.PdfRasterization/FsVoice.PdfRasterization.fsproj" />
-    <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
-    <Project Path="src/FsVoice.Tests/FsVoice.Tests.fsproj" />
     <Project Path="src/FsVoice.Tools/FsVoice.Tools.fsproj" />
-    <Project Path="src/FsVoice.Platform/FsVoice.Platform.fsproj" />
-    <Project Path="src/FsVoice.RTFlow/FsVoice.RTFlow.fsproj" />
-    <Project Path="src/FsResponses/FsResponses.fsproj" />
-    <Project Path="src/FsResponsesTest/FsResponsesTest.fsproj" />
+    <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
     <Project Path="src/Speak2Docs.Orchestration/Speak2Docs.Orchestration.fsproj" />
     <Project Path="src/Speak2Docs/Speak2Docs.fsproj" />
+    <Project Path="src/FsResponses/FsResponses.fsproj" />
+    <Project Path="src/FsVoice.RTFlow/FsVoice.RTFlow.fsproj" />
+    <Project Path="src/FsVoice.Tests/FsVoice.Tests.fsproj" />
+    <Project Path="src/FsResponsesTest/FsResponsesTest.fsproj" />
   </Folder>
 </Solution>

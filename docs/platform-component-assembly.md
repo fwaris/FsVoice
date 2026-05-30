@@ -23,9 +23,9 @@ Speak2Docs is the direct mobile/desktop assembly example.
 3. `PlugInComposer.withHostOverrides` combines plug-in defaults with host settings such as model overrides, retrieval mode, lexical filtering, and keyword indexing.
 4. `DemoVoiceOrchestration` implements `IVoiceOrchestration<ToHost, FromHost>` for the app workflow.
 5. `Connect.start` creates a `VoiceConnection` from local channels, connects those channels to the realtime WebRTC client, creates the orchestration session, and starts host/client/server pumps.
-6. `StateMachine.create` starts `VoiceAgent`, `QaAgent`, and `HostAgent`.
+6. `StateMachine.create` starts `VoiceAgent`, `OracleAgent`, and `HostAgent`.
 7. `VoiceAgent` configures the realtime session and exposes the `QUERY_ORACLE` tool.
-8. `QaAgent` creates model clients, builds a `QaSession`, creates the FsColbert context provider for selected sources, appends plug-in context providers, and passes plug-in tool providers into the Ctx runtime.
+8. `OracleAgent` creates model clients, builds a `QaSession`, creates the FsColbert context provider for selected sources, appends plug-in context providers, and passes plug-in tool providers into the Ctx runtime.
 9. A substantive spoken turn flows through realtime tool calling into `QaSession.AnswerAsync`, then returns context, oracle answer text, logs, and speech output to the host.
 
 The main assembly points are:
@@ -34,7 +34,7 @@ The main assembly points are:
 - `src/Speak2Docs/Interaction/Connect.fs`: MAUI/WebRTC connection and session pumps.
 - `src/Speak2Docs.Orchestration/DemoVoiceOrchestration.fs`: typed voice orchestration.
 - `src/Speak2Docs.Orchestration/Agents/WorkFlow.fs`: workflow agent assembly.
-- `src/Speak2Docs.Orchestration/Agents/QaAgent.fs`: Ctx runtime and retrieval assembly.
+- `src/Speak2Docs.Orchestration/Agents/OracleAgent.fs`: Ctx runtime and retrieval assembly.
 
 ## ASP.NET Core Hosting Assembly
 

@@ -18,7 +18,7 @@
     <Compile Include="KnowledgeSources.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />
     <Compile Include="Agents\HostAgent.fs" />
-    <Compile Include="Agents\QaAgent.fs" />
+    <Compile Include="Agents\OracleAgent.fs" />
     <Compile Include="Agents\WorkFlow.fs" />
     <Compile Include="DemoVoiceOrchestration.fs" />
   </ItemGroup>

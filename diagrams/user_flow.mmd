@@ -11,12 +11,12 @@ flowchart TD
     NeedAnswer -- "Yes" --> OracleCall["VoiceAgent starts oracle tool call"]
     OracleCall --> Pending["Show/log pending transcript<br/>and wait for QA answer"]
 
-    Pending --> QA["QaAgent asks QaSession"]
+    Pending --> QA["OracleAgent asks QaSession"]
     QA --> Sources["Search selected documents<br/>and plug-in context"]
     Sources --> Tools["Run QA tools if needed<br/>source search, inventory, blackboard"]
     Tools --> AnswerModel["Answer model writes grounded answer"]
 
-    AnswerModel --> Ready["QaAgent returns OracleCandidate"]
+    AnswerModel --> Ready["OracleAgent returns OracleCandidate"]
     Ready --> ToolOutput["VoiceAgent sends function_call_output<br/>back to realtime session"]
     ToolOutput --> Ack["Realtime acknowledges tool output"]
     Ack --> SpeakRequest["VoiceAgent requests speech<br/>using the oracle answer exactly"]

@@ -46,7 +46,7 @@ flowchart TD
         FunctionCall -- "Other tool" --> UnknownTool["Send unavailable-tool output"]
     end
 
-    subgraph QaAgent["QaAgent.fs"]
+    subgraph OracleAgent["OracleAgent.fs"]
         AgentMemoryRequested --> EnsureSession["ensureSession"]
         EnsureSession --> CreateQaSession{"QA session exists?"}
         CreateQaSession -- "No" --> BuildOptions["Create QaSessionOptions<br/>answerTransport = Responses WebSocket<br/>enableDurableMemory = false"]

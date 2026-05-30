@@ -24,7 +24,7 @@ module StateMachine =
         async {
             HostAgent.start ss.toHost ss.bus
 
-            QaAgent.start
+            OracleAgent.start
                 ss.storageRoot
                 ss.apiKey
                 ss.plugIn

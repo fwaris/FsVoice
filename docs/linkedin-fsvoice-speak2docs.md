@@ -1,12 +1,13 @@
 # FsVoice - A Platform for Building Conversational Applications
 
-[![Download on the App Store](../imgs/white.svg)](https://apps.apple.com/app/6771490875) 
-
 ![FsVoice platform overview](../imgs/platform.png)
 
 In an highly contested AI marketplace, OpenAI currently has a true strategic moat with its `gpt-realtime` voice API. Their core advantage is the multitude of available voices that exhibit natural tone, intonation and pacing. OpenAI has truly crossed the [uncanny valley](https://spectrum.ieee.org/the-uncanny-valley?utm_source=chatgpt.com) here.
 
-Despite these capabilities, most voice applications still feel like chat applications with a microphone attached. FsVoice is designed to take full advantage of the gpt-realtime API’s native capabilities while compensating for its current limitations. Additionally, FsVoice is architected as a set of interfaces and components that can be implemented/assembled a la carte to build highly customizable applications.
+Despite these capabilities, most voice applications still feel like chat applications with a microphone attached. FsVoice is designed to take full advantage of the gpt-realtime API’s native capabilities while compensating for its current limitations. Additionally, FsVoice is architected as a set of interfaces and components that can be implemented/assembled a la carte to build highly customized applications.
+
+The following sections describe the various aspects of the FsVoice platform, culminating with a high level descriptions of the FsVoice-based [Speak2Docs](https://apps.apple.com/app/6771490875) mobile application that puts it all together.
+
 
 ## 1. Exploiting the Realtime API
 The following sections describe what gpt-realtime provides, how FsVoice exploits those capabilities, and where FsVoice adds architectural support to fill the gaps.
@@ -25,7 +26,7 @@ FsVoice preserves 'mechanical sympathy' by authentically treating the API as two
 By necessity, gpt-realtime is optimized for low-latency response so that spoken conversations remain fluid and natural. The tradeoff is that it has more limited instruction-following and reasoning capabilities than slower, text-oriented models. Realtime may lose context in long, drawn out conversations. And its certainly not as strong a reasoner as the gpt-5.X family. FsVoice manages this tradeoff in a two distinct ways, discussed next.
 
 #### 1.2.1 Multi-Agent: Voice + Oracle
-FsVoice pairs the real-time voice model with a gpt-5.x model in a multi-agent setup. The Voice agent owns the real-time connection and handles the live conversational flow, while collaborating with an Oracle agent for complex queries through real-time messages sent over the Agent Bus. This does introduce additional latency, but the overall experience remains acceptable because the real-time model can bridge the delay with natural conversational fillers such as “Let me check...” or “Give me a moment...”. This idea is inspired by [Kame](https://pub.sakana.ai/kame/) from *sakana.ai*. In my experiments I found that gpt-realtime does not respond so well to injected suggestions from the *Oracle* but rather what works well is gpt-realtime using the *Oracle* as a *tool provider*. It then honors the responses much more.
+FsVoice pairs the real-time voice model with a gpt-5.x model in a multi-agent setup implemented using RTFlow. The Voice agent owns the real-time connection and handles the live conversational flow, while collaborating with an Oracle agent for complex queries through real-time messages sent over the Agent Bus. This does introduce additional latency, but the overall experience remains acceptable because the real-time model can bridge the delay with natural conversational fillers such as “Let me check...” or “Give me a moment...”. This idea is inspired by [Kame](https://pub.sakana.ai/kame/) from *sakana.ai*. In my experiments I found that gpt-realtime does not respond so well to injected suggestions from the *Oracle* but rather what works well is gpt-realtime using the *Oracle* as a *tool provider*. It then honors the responses much more.
 
 #### 1.2.2 OpenAI *Responses* API over *Web Sockets*
 To further reduce *Oracle* latency, I moved FsVoice to the new *Web Sockets*-based version of the OpenAI *Responses* API. This gives FsVoice a persistent, low-overhead communication channel between the *Oracle* agent and the serving LLM.
@@ -38,7 +39,7 @@ Key benefits include:
 
 - **High cache hit rate**: Since *Responses* encourages append-only context, the chances of using cached tokens becomes much higher. The use of cached tokens significantly reduces not only latency but also cost. Cached tokens are about 1/10th the cost of regular tokens. Cache strategy should be a significant component of contemporary AI systems. 
 
-To reduce context bloat and the potential dilution of recent information, for long conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not not impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
+To reduce context bloat and the potential dilution of recent information, in the case of long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
 
 ## 2. FsVoice Deployment Topologies
 The FsVoice platform affords several types of deployment topologies from mobile, desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:
@@ -64,12 +65,70 @@ In topology B, the mobile app establishes a first WebRTC connection (*WebRTC-1*)
 
 In topology D, FsVoice sits directly on the SIP side of a telephony flow. It receives audio from the phone network over SIP, runs the FsVoice orchestration server-side, and connects to the OpenAI backend over *WebRTC* (or optionally *Web Sockets*). This topology is especially relevant for enterprise telephony, contact-center, and SIP trunk integration scenarios.
 
-## 2. FsVoice Architecture
+## 3. FsVoice Architecture
 As a platform, FsVoice has an open, pluggable architecture. Applications can be constructed by implementing well defined interfaces and assembling pre-built components a-la-carte. The top infographic depicts the platform artifacts and how they are used to construct the Speak2Docs sample application. The main interfaces and components are described in more detail next.
 
-- **FsVoice.Platform**: Contains interfaces that abstract the orchestration functionality from the hosting environment so orchestrations are pluggable into mobile, Web or SIP-enabled hosts. 
+- **Platform Components**: The core collection of components and interfaces to build FsVoice-based applications:
+    - Interfaces that abstract the orchestration functionality from the hosting environment so that multi-agent orchestrations are pluggable into mobile, Web or SIP-enabled hosts.
+    - *Oracle*-style question-answering enablers
+    - Other supporting interfaces and components, e.g., for loading custom tools and plug-ins which enable quick customization. 
 
-- **FsResponses**: Supports the OpenAI *Responses* API over *Web Sockets* with strongly-types message wrappers for easier discoverability and use.
+- **Memory, Indexed Content, Search & Retrieval**: FsVoice applications can include pre-packaged, chunked indexed content. This content can be searched and retrieved from an orchestration using built-in tools. A hybrid - *keyword plus semantic* - search strategy is used. The semantic part is based on the *late interaction* approach described in [ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT](https://arxiv.org/abs/2004.12832) (Khattab and Zaharia, SIGIR 2020). Note that late interaction requires a multi-vector embedding model. For FsVoice, a small ONNX model, running locally, generates embedding vectors for user queries. It is fast enough for use on contemporary, higher-end, smart phones. Search and indexing uses the externally referenced [FsColbert](https://github.com/fwaris/fscolbert) project/package.
+
+- **FsResponses**: Supports the OpenAI *Responses* API over *Web Sockets* with strongly-typed message wrappers for easier discoverability and use.
+
+## 4. Speak2Docs - FsVoice-based Sample Application
+*Speak2Docs* is a FsVoice-based mobile application for 'conversing with your documents'. It serves as a demo for FsVoice but should be useful also for people on the move who want to query content in a hands-free way. For example, mobile technicians, first responders, nurses, etc. Topologically, it conforms to pattern A above.
+
+ *Speak2Docs* is currently available for IOS in US and Canada:
+
+-  [![Download on the App Store](../imgs/white.svg)](https://apps.apple.com/app/6771490875)
+
+- Or use the QR-code at the end of this post.
+
+> Note: *Speak2Docs* uses the cross-platform framework [*Maui*](https://dotnet.microsoft.com/en-us/apps/maui) so its also an Android app. Its not in the store yet but can be built from source to test. See *References* for links. 
+
+### 4.1 Operation and Use
+The app can be used to query indexed document content via voice - in a natural conversational way. 
+
+>The app needs an OpenAI key to work. Users can generate a key at https://platform.openai.com. The key has to be funded for the app to work.
+
+ The connection is established when the microphone icon is tapped (see screenshot below). A noise-cancelling headset works best otherwise the voice model can pick up ambient noise (or its own audio from the speaker) and get interrupted. 
+
+A pre-built document index is included for quick start. Users can index additional PDF and Markdown content via the '+' button. One or more of the available content can be selected for a single question-answer session.
+
+#### Screenshot:
+![screenshot](../imgs/speak2docs.png)
+
+### 4.2. Question-Answering
+*Speak2Docs*'s orchestration is multi-agent. The agents collaborate via messages broadcasted over the Agent bus. 
+
+![agent](../imgs/Agent%20(1).png)
+
+The three agents are:
+
+- **Voice**: Manages the gpt-realtime API communication. Note that the user's audio conversation happens concurrent to the messaging between gpt-realtime and the app. The realtime API sends a steady stream of messages intimating the app of every detail. However, the app need only handle the messages it cares about. Tool calls do have to be handled. The voice model is configured to use the *Oracle* agent via a tool call - if the voice model cannot easily answer the user query by itself. The voice model speaks fillers like "Let me check ..." when it makes a tool call due to the expected latency of the response. It then speaks the final answer when the results of the tool call becomes available.
+
+- **Oracle**: Maintains a *Web Socket* based *Responses* API connection to the reasoning model (default `gpt-5.5` ). Primarily the *Oracle* listens for query requests from the *Voice* agent. It relay's the query to the reasoning model which then formulates the response. The reasoning model may invoke one or more of the available tools before the final response. Indexed content search is one of the available tools.
+
+- **Host**: The *Host* agent is a bridge between the agent orchestration and the app. It listens to messages of interests and relays them to the app for UI updates, etc. It can also work the other way where the app can control the orchestration by injecting messages into the bus via the *Host* agent.
+
+The multi-agent setup enables the app to answer complex queries which would be beyond the capabilities of the voice model alone to handle. There is increased latency but its still acceptable as the reasoning model is accessed via the the low-latency *Web Sockets* connection and the voice model tries to maintain a natural conversational flow.
+ 
+
+### 4.3 Content Indexing and Search
+Additional Markdown and PDF content can be ingested and indexed locally in the app. For Markdown, the parsing and chunking process takes advantage of the Markdown structure - headings, sub headings, etc. - so that indexed chunks retain semantic context. For PDFs, something similar is done but with the help of a small ONNX model to 'understand' page layout from rendered page images.
+
+Additionally, the keywords extracted from the text chunks can be optionally expanded via gpt-nano calls before building the final index. 
+
+At query time, gpt-nano is also used to extract keywords from the user query and optionally expand them with synonyms before doing the keyword and semantic searches on the selected content. The searches are combined with RRF ([Reciprocal Rank Fusion](https://dl.acm.org/doi/10.1145/1571941.1572114?)) with adjustable weights.
+
+
+
+
+
+
+
 
 The following sections define oo
 a
