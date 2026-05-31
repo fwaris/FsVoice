@@ -1,203 +1,138 @@
-# FsVoice
+# FsVoice - A Platform for Building Conversational Applications
 
-FsVoice is an F#/.NET 10 workspace for building voice-first question answering systems. The repo currently centers on Speak2Docs, a .NET MAUI app that lets a user select document sources, build or import local retrieval indexes, connect to OpenAI realtime voice, and ask questions about the selected material.
+![FsVoice platform overview](imgs/platform.png)
 
-The reusable pieces are split into small packages: typed voice orchestration contracts, RTFlow and ASP.NET hosting adapters, QA/plugin contracts, retrieval and PDF processing, OpenAI Responses helpers, CLI utilities, and tests.
+In a highly contested AI marketplace, OpenAI currently has a true strategic moat with its `gpt-realtime` voice API. Its core advantage is the multitude of available voices that exhibit natural tone, intonation, and pacing. OpenAI has truly crossed the [uncanny valley](https://spectrum.ieee.org/the-uncanny-valley?utm_source=chatgpt.com) here.
 
-## Current App: Speak2Docs
+Despite these capabilities, most voice applications still feel like chat applications with a microphone attached. FsVoice is designed to take full advantage of the gpt-realtime API’s native capabilities while compensating for its current limitations. Additionally, FsVoice is architected as a set of interfaces and components that can be implemented and assembled à la carte to build highly customized applications.
 
-Speak2Docs is the primary product built from this repo.
+The following sections describe the various aspects of the FsVoice platform, culminating with a high-level description of the FsVoice-based [Speak2Docs](https://apps.apple.com/app/6771490875) mobile application that puts it all together.
 
-- Realtime voice uses OpenAI Realtime over WebRTC. The app requests microphone permission when a realtime session starts.
-- The user provides an OpenAI API key in Settings. The app does not create an account or ship with a shared key.
-- Local source imports currently support PDF, Markdown, and zipped Speak2Docs/FsColbert index bundles. The retrieval layer and CLI also support JSON knowledge sources.
-- The app ships a built-in sample FsColbert index for "AI on the Pulse: Real-Time Health Anomaly Detection with Wearable and Ambient Intelligence." Built-in sources can be hidden and restored.
-- Document state is tracked as queued, processing, ready, or failed. Users can select ready sources, retry failed processing, delete sources, cancel processing, and preview ready indexes.
-- Retrieval can use an internal document index or persisted FsColbert indexes with fallback.
-- Retrieval behavior includes lexical filtering, local query cleanup, optional LLM query expansion, optional keyword metadata generation, and source-balancing for broad summaries or comparisons.
-- PDF parsing can run in legacy mode or hybrid document-structure mode. Hybrid parsing can use layout analysis, platform PDF rasterizers, local ONNX layout models, and optional OCR model discovery.
-- The realtime front-end routes substantive spoken questions through a backend oracle tool. The Ctx runtime then searches selected sources, tool observations, session blackboard context, and configured plugin context providers before producing the answer.
-- Speak2Docs disables durable memory storage in the app flow, but the reusable Ctx runtime still includes durable memory services for other hosts.
 
-The default model roles in source are:
+## 1. Exploiting the Realtime API
+The following sections describe what gpt-realtime provides, how FsVoice exploits those capabilities, and where FsVoice adds architectural support to fill the gaps.
 
-- Realtime: `gpt-realtime-2`
-- Transcriber: `gpt-4o-mini-transcribe`
-- Answer: `gpt-5.5`
-- Keyword generation: `gpt-5-nano`
-- Query expansion: `gpt-5-nano`
+### 1.1 Realtime Two-way Message Streams
+The Realtime API connection is established over either *WebRTC* or *WebSockets*. Once connected, the API continuously streams events to the application. The application receives these events in real time and can respond immediately: either by adjusting its own behavior or by sending messages back to the API to influence the conversation state, behavior, or flow on the API side.
 
-All model role ids can be overridden by plugins and by app settings.
+FsVoice preserves 'mechanical sympathy' by authentically treating the API as a two-way message channel rather than trying to morph it into a chat-style interface. For this, it builds upon three prior-developed frameworks:
 
-## Repository Layout
+- [*RTOpenAI.Events*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTOpenAI.Events) which provides strongly-typed wrappers over realtime events for easier API discoverability and use. These are usable with both *WebRTC* and *WebSockets* connections.
+- [*RTOpenAI.Api*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTOpenAI.Api) provides *WebRTC* connectivity for mobile apps (iOS and Android). Other *WebRTC* libraries exist for non-mobile use.
+- [*RTFlow*](https://github.com/fwaris/RTOpenAI/tree/master/src/RTFlow) is a framework for constructing realtime, multi-agent orchestrations. As we will see later, this capability will prove quite useful for addressing some of the Realtime API's shortcomings.
 
-- `src/FsVoice.Platform`: public typed voice contracts: `VoiceConnection`, `IVoiceSession`, `IVoiceOrchestration`, host context, and host message codecs.
-- `src/FsVoice.RTFlow`: adapter from an RTFlow workflow to the `IVoiceSession<'ToHost, 'FromHost>` contract.
-- `src/FsVoice.Hosting.AspNetCore`: ASP.NET Core bridge session store and endpoints for browser/WebRTC-style hosts.
-- `src/FsVoice.Core`: shared text helpers and generic async queue utilities.
-- `src/FsResponses`: typed OpenAI Responses API and Responses WebSocket request/event models used by the Ctx runtime.
-- `src/FsVoice.Ctx.Contracts`: context-backed answer contracts for sources, chunks, retrieval modes, sessions, plugins, tools, context providers, memory, and model roles.
-- `src/FsVoice.Retrieval`: FsColbert retrieval, keyword enrichment, source loading, index preview, and hybrid PDF processing.
-- `src/FsVoice.Ctx.Runtime`: oracle/context answer runtime, tool loading, blackboard, durable memory, plugin profiles, and answer transport.
-- `src/FsVoice.Retrieval.PdfRasterization`: desktop, Android, iOS, and Mac Catalyst PDF rasterizers for hybrid PDF parsing.
-- `src/FsVoice.Ctx.Tools`: reusable context tool providers. It currently includes a current-time provider.
-- `src/FsVoice.Tools` and `src/FsVoice.PdfRasterization`: deprecated compatibility facades for older source names.
-- `src/FsVoice.Cli`: command-line asking, index-bundle creation, and InsuranceQA evaluation utilities.
-- `src/Speak2Docs.Orchestration`: platform-neutral Speak2Docs workflow, agents, runtime settings, plugin loading, and source model.
-- `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst.
-- `src/FsVoice.Tests`: tests for QA, retrieval, tools, hosting, orchestration, and app-adjacent behavior.
-- `src/FsResponsesTest`: tests for the OpenAI Responses request and stream-event helpers.
-- `data/qa-plug-ins`: sample QA plugin profiles, currently including `insuranceqa.json`.
-- `docs`: public support, settings, privacy, terms, third-party notices, release notes, and store metadata.
-- `build/release`: local release scripts and signing environment templates for Android, iOS, and Mac Catalyst.
+### 1.2 Managing the *Realtime* vs. *Instruction Following* Tradeoff
 
-## QA Plugins And Tools
+By necessity, gpt-realtime is optimized for low-latency response so that spoken conversations remain fluid and natural. The tradeoff is that it has more limited instruction-following and reasoning capabilities than slower, text-oriented models. Realtime may lose context in long, drawn-out conversations. It is certainly not as strong a reasoner as the gpt-5.x family. FsVoice manages this tradeoff in two distinct ways, discussed next.
 
-Ctx plugins implement `IQaPlugIn` from `FsVoice.Ctx.Contracts`. A plugin supplies a `PlugInDefinition` with:
+#### 1.2.1 Multi-Agent: Voice + Oracle
+FsVoice pairs the real-time voice model with a gpt-5.x model in a multi-agent setup implemented using RTFlow. The Voice agent owns the real-time connection and handles the live conversational flow, while collaborating with an Oracle agent for complex queries through real-time messages sent over the Agent Bus. This does introduce additional latency, but the overall experience remains acceptable because the real-time model can bridge the delay with natural conversational fillers such as “Let me check...” or “Give me a moment...”. This idea is inspired by [Kame](https://pub.sakana.ai/kame/) from *sakana.ai*. In my experiments, I found that gpt-realtime does not respond as well to injected suggestions from the *Oracle*. Instead, what works well is gpt-realtime using the *Oracle* as a *tool provider*. It then honors the responses much more.
 
-- behavior profile, voice replacements, query expansion rules, keyword hints, and answer instructions;
-- prompt templates for realtime, transcription, answers, keywords, and spoken oracle results;
-- model role defaults for realtime, transcription, answers, keywords, and query expansion;
-- runtime defaults such as retrieval mode, query expansion, keyword elaboration, lexical filtering, context limits, timeouts, and writeback behavior;
-- optional settings fields shown by hosts;
-- optional QA tool providers and context providers.
+#### 1.2.2 OpenAI *Responses* API over *WebSockets*
+To further reduce *Oracle* latency, I moved FsVoice to the new *WebSockets*-based version of the OpenAI *Responses* API. This gives FsVoice a persistent, low-overhead communication channel between the *Oracle* agent and the serving LLM.
 
-Speak2Docs loads plugins from bundled assemblies and, where supported, from `AppData/plug-ins/*.dll`. Folder-loaded plugins are disabled on iOS. If no selected plugin is available, the host falls back to the built-in Generic QA plugin.
+Key benefits include:
 
-The Ctx runtime always includes built-in tools for selected-source search, source inventory, durable-memory search, and session blackboard search. Additional tools can come from a plugin, from a configured tool-provider directory, or from packages such as `FsVoice.Ctx.Tools`.
+- **Lower per-call latency**: With traditional HTTP requests, each model call incurs request setup overhead. With *WebSockets*, the connection remains open, allowing FsVoice to send Oracle requests immediately over an already-established channel.
 
-## Source Indexes And Storage
+- **Server-side conversation state**: The *Responses* API allows FsVoice to send only the latest message while the prior conversation context is retained server-side. This reduces latency when compared to the common pattern in traditional chat APIs, where the full message history must be resent on every call.
 
-Speak2Docs stores its document library, copied sources, imported bundles, persisted FsColbert indexes, hidden built-in source list, settings, and keyword caches in app-owned storage.
+- **High cache hit rate**: Since *Responses* encourages append-only context, the chance of using cached tokens becomes much higher. The use of cached tokens significantly reduces not only latency but also cost. Cached tokens are about 1/10th the cost of regular tokens. A cache strategy should be a significant component of contemporary AI systems.
 
-FsColbert indexes are persisted as `.fsci` files with metadata fingerprints so source changes, parser changes, plugin profile changes, and keyword settings can trigger rebuilding when needed. Index bundles use an `index-bundle.json` manifest plus `documents/` and `indexes/` files. The app can import zipped bundles, and the CLI can create either a directory bundle or a `.zip`.
+To reduce context bloat and the potential dilution of recent information in long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
 
-Deleting a user source removes the app library entry and clears persisted FsColbert indexes. Deleting a built-in source hides it until the user restores built-in indexes.
+## 2. FsVoice Deployment Topologies
+The FsVoice platform affords several types of deployment topologies, from mobile and desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:
 
-## Build
+![topologies](imgs/topology.png)
 
-Install the .NET 10 SDK first. Building the MAUI app also requires the relevant MAUI workloads and platform toolchains.
+For enterprises, the interesting topologies are B and D.
 
-Restore packages:
+In topology B, the mobile app establishes a first WebRTC connection (*WebRTC-1*) to the Web API. The Web API then acts as the bridge, forwarding the app’s audio stream to OpenAI over a second WebRTC connection (*WebRTC-2*). The FsVoice orchestration runs inside the Web API and coordinates both sides of the interaction: it manages the OpenAI realtime message stream over *WebRTC-2* while also maintaining a separate application-level message stream with the mobile app over *WebRTC-1*. The main benefit here is that the audio conversation can be synced with on-screen updates in the app UI. For example, if the user says "show me product X," that will result in the UI getting updated accordingly.
 
-```bash
-dotnet restore FsVoice.slnx
-```
+In topology D, FsVoice sits directly on the [SIP](https://www.rfc-editor.org/rfc/rfc5411.html) side of a telephony flow. It receives audio from the phone network over SIP, runs the FsVoice orchestration server-side, and connects to the OpenAI backend over *WebRTC* (or optionally *WebSockets*). This topology is especially relevant for enterprise telephony, contact-center, and SIP trunk integration scenarios.
 
-Build the core/testable projects without requiring a full MAUI app build:
+## 3. FsVoice Architecture
+As a platform, FsVoice has an open, pluggable architecture. Applications can be constructed by implementing well-defined interfaces and assembling pre-built components à la carte. The top infographic depicts the platform artifacts and how they are used to construct the Speak2Docs sample application. The main interfaces and components are described in more detail next.
 
-```bash
-dotnet build src/FsVoice.Tests/FsVoice.Tests.fsproj --no-restore
-dotnet build src/FsResponsesTest/FsResponsesTest.fsproj --no-restore
-dotnet build src/FsVoice.Cli/FsVoice.Cli.fsproj --no-restore
-```
+- **Platform Components**: The core collection of components and interfaces to build FsVoice-based applications:
+    - Interfaces that abstract the orchestration functionality from the hosting environment so that multi-agent orchestrations are pluggable into mobile, web, or SIP-enabled hosts.
+    - *Oracle*-style question-answering enablers.
+    - Other supporting interfaces and components, e.g., for loading custom tools and plug-ins, which enable quick customization.
 
-Build the full solution when MAUI workloads are installed:
+- **Memory, Indexed Content, Search & Retrieval**: FsVoice applications can include pre-packaged, chunked indexed content. This content can be searched and retrieved from an orchestration using built-in tools. A hybrid *keyword plus semantic* search strategy is used. The semantic part is based on the *late interaction* approach described in [ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT](https://arxiv.org/abs/2004.12832) (Khattab and Zaharia, SIGIR 2020). Note that late interaction requires a multi-vector embedding model. For FsVoice, a small [ONNX](https://onnx.ai/) model, running locally, generates embedding vectors for user queries. It is fast enough for use on contemporary, higher-end smartphones. Search and indexing uses the externally referenced [FsColbert](https://github.com/fwaris/fscolbert) project/package.
 
-```bash
-dotnet build FsVoice.slnx --no-restore
-```
+- **FsResponses**: Supports the OpenAI *Responses* API over *WebSockets* with strongly-typed message wrappers for easier discoverability and use.
 
-Build Speak2Docs targets:
+## 4. Speak2Docs - FsVoice-based Sample Application
+*Speak2Docs* is a FsVoice-based mobile application for 'conversing with your documents'. It serves as a demo for FsVoice but should also be useful for people on the move who want to query content in a hands-free way. For example, mobile technicians, first responders, nurses, etc. Topologically, it conforms to pattern A above.
 
-```bash
-dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-android --no-restore --nologo
-dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-ios --no-restore --nologo
-dotnet build src/Speak2Docs/Speak2Docs.fsproj -f net10.0-maccatalyst -r maccatalyst-arm64 --no-restore --nologo
-```
+*Speak2Docs* is currently available for iOS in the US and Canada:
 
-Android requires minSdk 24 because ONNX Runtime's Android package declares that minimum.
+-  [![Download on the App Store](imgs/white.svg)](https://apps.apple.com/app/6771490875)
 
-## Test
+- Or use the QR code at the end of this post.
 
-Run the non-live test suites:
+> Note: *Speak2Docs* uses the cross-platform framework [*.NET MAUI*](https://dotnet.microsoft.com/en-us/apps/maui) so it's also an Android app. It's not in the store yet but can be built from source to test. See *References* for links.
 
-```bash
-dotnet test src/FsVoice.Tests/FsVoice.Tests.fsproj
-dotnet test src/FsResponsesTest/FsResponsesTest.fsproj
-```
+### 4.1 Operation and Use
+The app can be used to query indexed document content by voice in a natural, conversational way.
 
-Some `FsResponsesTest` tests are live OpenAI smoke tests and are skipped by default.
+> The app needs an OpenAI key to work. Users can generate a key at https://platform.openai.com. The key has to be funded for the app to work.
 
-## CLI
+The connection is established when the microphone icon is tapped (see screenshot below). ***A noise-cancelling headset works best; otherwise the voice model can pick up ambient noise (or its own audio from the speaker) and get interrupted***.
 
-The CLI reads `OPENAI_API_KEY` by default or accepts `--api-key`.
 
-Ask over one or more sources:
+#### Screenshot:
+![screenshot](imgs/speak2docs.png)
 
-```bash
-dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- ask \
-  --question "Summarize the abstract" \
-  --source path/to/paper.pdf
-```
 
-Create an index bundle from a folder of PDF, Markdown, or JSON sources:
+A pre-built document index is included for quick start. Users can index additional PDF and Markdown content using the '+' button. One or more available sources can be selected for a single question-answer session.
 
-```bash
-dotnet run --project src/FsVoice.Cli/FsVoice.Cli.fsproj -- index-folder \
-  --input docs \
-  --output bundle.zip \
-  --bundle-id my-docs \
-  --index-keywords
-```
+### 4.2 Question-Answering
+*Speak2Docs*'s orchestration is multi-agent. The agents collaborate via messages broadcast over the agent bus. The three agents used are:
 
-Useful CLI options include:
+- **Voice**: Manages the gpt-realtime API communication. Note that the user's audio conversation happens concurrently with the messaging between gpt-realtime and the app. The Realtime API sends a steady stream of messages informing the app of every detail. However, the app only needs to handle the messages it cares about. Tool calls still have to be handled. The voice model is configured to use the *Oracle* agent via a tool call if the voice model cannot easily answer the user query by itself. The voice model speaks fillers like "Let me check ..." when it makes a tool call due to the expected latency of the response. It then speaks the final answer when the results of the tool call become available.
 
-- `--retrieval internal|fscolbert`
-- `--answer-model`
-- `--small-model`
-- `--storage-root`
-- `--plug-in-profile`
-- `--json` for structured `ask` output
-- `--layout-model heron|pp-doclayout-m` for `index-folder`
-- `--layout-plugin` and `--layout-plugin-type` for trusted custom layout providers
+- **Oracle**: Maintains a *WebSocket*-based *Responses* API connection to the reasoning model (default `gpt-5.5`). Primarily, the *Oracle* listens for query requests from the *Voice* agent. It relays the query to the reasoning model, which then formulates the response. The reasoning model may invoke one or more of the available tools before the final response. Indexed content search is one of the available tools.
 
-The CLI also includes `insuranceqa-eval`, `insuranceqa-search-eval`, and `insuranceqa-elaborate-index` workflows for retrieval and answer-quality experiments.
+- **Host**: The *Host* agent is a bridge between the agent orchestration and the app. It listens to messages of interest and relays them to the app for UI updates, etc. It can also work the other way, where the app can control the orchestration by injecting messages into the bus via the *Host* agent.
 
-## Configuration
 
-Important Speak2Docs settings include:
+#### Agent Setup:
+![agent](imgs/Agent%20(1).png)
 
-- OpenAI API key;
-- active QA plugin;
-- model role overrides;
-- max answer output tokens;
-- retrieval mode;
-- lexical filtering;
-- keyword index elaboration;
-- hybrid PDF parsing;
-- layout analysis;
-- activity log verbosity;
-- plugin-specific settings.
+The multi-agent setup enables the app to answer complex queries that would be beyond the capabilities of the voice model alone. There is increased latency, but it's still acceptable because the reasoning model is accessed via the low-latency *WebSockets* connection and the voice model tries to maintain a natural conversational flow.
 
-The app persists settings with MAUI preferences and app-owned files. Avoid committing API keys, generated release packages, signing files, imported private documents, or local app data.
+### 4.3 Content Indexing and Search
+Additional Markdown and PDF content can be ingested and indexed locally in the app. For Markdown, the parsing and chunking process takes advantage of the Markdown structure - headings, subheadings, etc. - so that indexed chunks retain semantic context. For PDFs, something similar is done but with the help of a small ONNX model to 'understand' page layout from rendered page images.
 
-## Release
+Additionally, the keywords extracted from the text chunks can be optionally expanded via gpt-nano calls before building the final index.
 
-Release scripts live under `build/release`:
+At query time, gpt-nano is also used to extract keywords from the user query and optionally expand them with synonyms before performing keyword and semantic searches on the selected content. The search results are combined with RRF ([Reciprocal Rank Fusion](https://dl.acm.org/doi/10.1145/1571941.1572114?)) with adjustable weights.
 
-- `publish-android.sh` builds a signed Android App Bundle.
-- `publish-ios.sh` builds an iOS App Store package.
-- `publish-maccatalyst.sh` builds a Mac Catalyst app.
-- `release.env.example` documents required local environment variables.
-- `android-signing.properties.example` and `ios-export-options.template.plist` are templates only.
+## 5. Conclusion
 
-See `docs/release.md` for release checklist details. Do not commit keystores, provisioning profiles, certificates, App Store Connect keys, Google Play service-account JSON, OpenAI reviewer keys, or generated `.ipa`, `.aab`, and `.apk` files.
+FsVoice is a platform for treating voice applications as real-time, event-driven systems rather than chat applications with audio input bolted on. The main architectural move is to let the low-latency voice model do what it does best, which is to carry the conversation, while delegating source-grounded reasoning, tool use, and document retrieval to an Oracle agent backed by stronger reasoning models.
 
-## Public Docs
+*Speak2Docs* is a sample application of that pattern. It combines real-time speech, local indexing, retrieval, and model tool-calling into a mobile document assistant that can run on selected user content. The same platform pieces can also be reused for web, enterprise, and telephony scenarios where conversational AI needs to be coordinated with application state, domain tools, and private knowledge sources.
 
-- Support index: `docs/index.md`
-- Settings help: `docs/fsvoice/settings.md`
-- Terms: `docs/fsvoice/terms.md`
-- Privacy policy: `docs/fsvoice/privacy.md`
-- Third-party notices: `docs/fsvoice/third-party-notices.md`
-- Store listing draft: `docs/store-listing.md`
-- Store privacy notes: `docs/store-privacy.md`
+## References
 
-## Licensing
+- Speak2Docs on the App Store: <https://apps.apple.com/app/6771490875>
+- FsVoice / Speak2Docs project details: [projects.md](projects.md)
+- OpenAI Realtime API guide: <https://platform.openai.com/docs/guides/realtime/>
+- OpenAI Realtime API with WebRTC: <https://platform.openai.com/docs/guides/realtime-webrtc>
+- OpenAI Responses API reference: <https://platform.openai.com/docs/api-reference/responses>
+- RTOpenAI and RTFlow: <https://github.com/fwaris/RTOpenAI>
+- FsColbert: <https://github.com/fwaris/fscolbert>
+- ColBERT paper: <https://arxiv.org/abs/2004.12832>
+- Reciprocal Rank Fusion paper: <https://dl.acm.org/doi/10.1145/1571941.1572114>
+- Kame by Sakana AI: <https://pub.sakana.ai/kame/>
+- .NET MAUI documentation: <https://learn.microsoft.com/en-us/dotnet/maui/>
+- ONNX: <https://onnx.ai/>
+- SIP overview, RFC 5411: <https://www.rfc-editor.org/rfc/rfc5411.html>
 
-FsVoice source code is licensed under MIT.
+#### Speak2Docs QR Code
 
-`FsVoice.Retrieval` is packaged as `MIT AND Apache-2.0` because it embeds the `PP-DocLayout-M` ONNX model. See `src/FsVoice.Retrieval/PackageNotices/PP-DocLayout-M-NOTICE.md` for model attribution and checksum details.
-
-Speak2Docs also includes a built-in sample document and local FsColbert index for an arXiv paper licensed under Creative Commons Attribution 4.0. See `src/Speak2Docs/Resources/Raw/FsColbertIndexes/NOTICE.md`.
+![Speak2Docs App](imgs/qr-code.png)
