@@ -69,22 +69,15 @@ flowchart TD
         BBStart --> SourceTask["Retrieve selected source chunks<br/>context providers / FsColbert"]
         SourceTask --> SourceBB["Blackboard add source evidence"]
 
-        BBStart --> ToolPath{"Answer transport configured?"}
-        ToolPath -- "Responses WebSocket" --> NoPreTools["Skip deterministic/chat planner tools before answer"]
-        ToolPath -- "Chat client fallback" --> PlanTools["Deterministic + LLM tool planner<br/>invoke planned tools"]
-        PlanTools --> ToolBB["Blackboard add tool observations"]
-
         MemoryHits --> Prompt["Build answer prompt<br/>question + empty durable memory section<br/>source context + tool observations"]
         SourceBB --> Prompt
-        ToolBB --> Prompt
-        NoPreTools --> Prompt
 
         Prompt --> AnswerModel["Answer model"]
         AnswerModel --> ResponsesMode{"Responses WebSocket?"}
         ResponsesMode -- "Yes" --> ResponseTools["Model may call response tools<br/>selected_source_search, source_inventory,<br/>blackboard_search only after compaction/summary"]
         ResponseTools --> ToolOutputs["Invoke response tool calls<br/>record observations to blackboard"]
         ToolOutputs --> AnswerModel
-        ResponsesMode -- "No" --> ChatAnswer["Chat answerGenerator returns answer text"]
+        ResponsesMode -- "No" --> ChatAnswer["Chat answerGenerator returns answer text<br/>without response tools"]
 
         AnswerModel --> QaAnswer["QaAnswer<br/>answer + context + inventory + observations"]
         ChatAnswer --> QaAnswer

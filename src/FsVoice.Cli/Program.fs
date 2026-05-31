@@ -159,7 +159,6 @@ Index-folder options:
             let answer = createClient key answerModel
 
             { queryExpansion = Some small
-              toolPlanner = Some small
               answerGenerator = Some answer }
 
     let retrievalMode parsed =
@@ -207,18 +206,10 @@ Index-folder options:
 
         Directory.CreateDirectory storageRoot |> ignore
 
-        let clients =
-            let clients = clientsFromArgs parsed
-
-            if hasFlag "no-tool-planner" parsed then
-                { clients with toolPlanner = None }
-            else
-                clients
-
         let options =
             { QaSessionOptions.create storageRoot with
                 retrievalMode = retrievalMode parsed
-                clients = clients
+                clients = clientsFromArgs parsed
                 plugInProfile = plugInProfile parsed
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
                 keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed

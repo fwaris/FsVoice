@@ -76,7 +76,7 @@ For a Ctx-oriented web app, compose the Ctx runtime directly when the host needs
 - Tools: business actions exposed as `IQaToolProvider` or generic `IVoiceTool`.
 - Context: app data, packaged knowledge, database retrieval, API retrieval, or selected local sources.
 - Runtime policy: retrieval mode, lexical filter, keyword indexing, timeouts, memory/writeback behavior.
-- Model clients: realtime, transcription, answer, planner, keyword, and query-expansion models.
+- Model clients: realtime, transcription, answer, keyword, and query-expansion models.
 
 ## Assembly Checklist
 

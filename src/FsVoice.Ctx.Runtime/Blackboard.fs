@@ -10,18 +10,10 @@ type BlackboardEntryKind =
     | MemoryEvidence
     | SourceEvidence
     | ToolObservation
-    | PlannedTool
     | Conflict
     | AnswerCandidate
     | FinalAnswer
     | CompactedSummary
-
-type PlannedToolSummary =
-    { pluginName: string
-      toolName: string
-      query: string
-      maxResults: int
-      arguments: Map<string, string> }
 
 type BlackboardConflict =
     { description: string
@@ -44,7 +36,6 @@ type BlackboardEntry =
     | MemoryEvidenceEntry of MemoryRecallHit
     | SourceEvidenceEntry of SourceChunk
     | ToolObservationEntry of QaToolObservation
-    | PlannedToolEntry of PlannedToolSummary
     | ConflictEntry of BlackboardConflict
     | AnswerCandidateEntry of string
     | FinalAnswerEntry of QaAnswer
@@ -103,7 +94,6 @@ module BlackboardEntryKind =
         | MemoryEvidence -> "memory_evidence"
         | SourceEvidence -> "source_evidence"
         | ToolObservation -> "tool_observation"
-        | PlannedTool -> "planned_tool"
         | Conflict -> "conflict"
         | AnswerCandidate -> "answer_candidate"
         | FinalAnswer -> "final_answer"
@@ -237,7 +227,6 @@ module Blackboard =
         match record.kind with
         | RealtimeJudgement
         | RecallDecision
-        | PlannedTool
         | AnswerCandidate -> true
         | ToolObservation -> isBlackboardSearchObservation record
         | _ -> false
@@ -452,21 +441,6 @@ module BlackboardRecords =
             true
             (Some chunk.score)
             $"Source evidence score={chunk.score:F2} source={chunk.source.DisplayName} chunk={chunk.index}\n{chunk.text}"
-
-    let plannedTool turnId summary =
-        let args =
-            summary.arguments
-            |> Map.toList
-            |> List.map (fun (name, value) -> $"{name}={value}")
-            |> String.concat "; "
-
-        create
-            turnId
-            PlannedTool
-            (PlannedToolEntry summary)
-            false
-            None
-            $"Planned tool {summary.pluginName}.{summary.toolName} query={summary.query} max_results={summary.maxResults} args={args}"
 
     let toolObservation turnId (observation: QaToolObservation) =
         let isBlackboardSearch =

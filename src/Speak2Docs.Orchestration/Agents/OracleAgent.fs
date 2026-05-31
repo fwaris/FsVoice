@@ -50,11 +50,7 @@ module OracleAgent =
                 let queryExpansion =
                     createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
 
-                let planner =
-                    createClient st.apiKey (modelConfig FsVoice.Ctx.Planner st.plugIn).modelId
-
                 { queryExpansion = Some queryExpansion
-                  toolPlanner = Some planner
                   answerGenerator = None }
 
         let storageRoot = st.storageRoot
@@ -78,7 +74,6 @@ module OracleAgent =
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
-                enableToolPlanner = st.plugIn.runtime.enableToolPlanner
                 enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
                 maxContextChunks = st.plugIn.runtime.maxContextChunks

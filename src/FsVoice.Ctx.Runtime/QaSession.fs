@@ -4,7 +4,6 @@ open System
 open System.Collections.Generic
 open System.Diagnostics
 open System.Text.Json
-open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.AI
@@ -13,13 +12,11 @@ open FsVoice.Retrieval
 
 type QaModelClients =
     { queryExpansion: IChatClient option
-      toolPlanner: IChatClient option
       answerGenerator: IChatClient option }
 
 module QaModelClients =
     let none =
         { queryExpansion = None
-          toolPlanner = None
           answerGenerator = None }
 
 type QaAnswerTransport =
@@ -68,7 +65,6 @@ type QaSessionOptions =
       memoryService: IMemoryService option
       contextProviders: IQaContextProvider list
       toolProviders: IQaToolProvider list
-      enableToolPlanner: bool
       enableQueryExpansion: bool
       logTimings: bool
       logExpansions: bool
@@ -101,7 +97,6 @@ module QaSessionOptions =
           memoryService = None
           contextProviders = []
           toolProviders = []
-          enableToolPlanner = true
           enableQueryExpansion = false
           logTimings = false
           logExpansions = false
@@ -113,23 +108,6 @@ module QaSessionOptions =
           answerCompactionMaxOutputTokens = 1200
           blackboardPruning = BlackboardPruningOptions.defaults
           report = ignore }
-
-type private PlannedToolCall =
-    { tool: IQaTool
-      query: string
-      maxResults: int
-      arguments: IReadOnlyDictionary<string, string> }
-
-type private PlannedToolCallDto =
-    { plugin: string option
-      tool: string option
-      ``function``: string option
-      query: string option
-      max_results: int option
-      arguments: Map<string, string> option }
-
-type private ToolPlanDto =
-    { calls: PlannedToolCallDto list option }
 
 type private AnswerPrompt =
     { instructions: string
@@ -233,50 +211,7 @@ type QaSession(options: QaSessionOptions) =
     let blackboardHasSummary () =
         lock blackboardGate (fun () -> blackboardSummarized)
 
-    let findTool pluginName toolName (catalog: QaToolCatalog) =
-        catalog.tools
-        |> List.tryFind (fun tool ->
-            String.Equals(tool.PluginName, pluginName, StringComparison.OrdinalIgnoreCase)
-            && String.Equals(tool.Name, toolName, StringComparison.OrdinalIgnoreCase))
-
     let clamp (maxValue: int) (value: int) = Math.Max(1, Math.Min(maxValue, value))
-
-    let lower (value: string) =
-        (defaultArg (Option.ofObj value) "").ToLowerInvariant()
-
-    let containsAny (needles: string list) (haystack: string) =
-        let haystack = lower haystack
-        needles |> List.exists haystack.Contains
-
-    let makeArgs (values: (string * string) list) =
-        let dict = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-
-        for key, value in values do
-            dict[key] <- value
-
-        dict :> IReadOnlyDictionary<string, string>
-
-    let argsToMap (args: IReadOnlyDictionary<string, string>) =
-        args |> Seq.map (fun (KeyValue(name, value)) -> name, value) |> Map.ofSeq
-
-    let plannedToolSummary (call: PlannedToolCall) =
-        { pluginName = call.tool.PluginName
-          toolName = call.tool.Name
-          query = call.query
-          maxResults = call.maxResults
-          arguments = argsToMap call.arguments }
-
-    let renderToolInventory (catalog: QaToolCatalog) =
-        catalog.tools
-        |> List.sortBy (fun tool -> tool.PluginName, tool.Name)
-        |> List.map (fun tool ->
-            let parameters =
-                tool.Parameters
-                |> List.map (fun p -> if p.required then $"{p.name}*" else p.name)
-                |> String.concat ", "
-
-            $"{tool.PluginName}.{tool.Name}({parameters}): {tool.Description}")
-        |> String.concat "\n"
 
     let renderObservations (observations: QaToolObservation list) =
         if List.isEmpty observations then
@@ -682,9 +617,6 @@ type QaSession(options: QaSessionOptions) =
         String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
         && String.Equals(tool.Name, "durable_memory_search", StringComparison.OrdinalIgnoreCase)
 
-    let hasPlannerCandidateTools (catalog: QaToolCatalog) =
-        catalog.tools |> List.exists (isBuiltInContextTool >> not)
-
     let retrieveContext question maxResults cancellationToken =
         async {
             let request =
@@ -785,230 +717,6 @@ type QaSession(options: QaSessionOptions) =
           text = Text.normalizeWhitespace request.question
           isFinal = true
           receivedAt = DateTimeOffset.UtcNow }
-
-    let deterministicPlan (catalog: QaToolCatalog) question =
-        [ if
-              containsAny
-                  [ "what time"
-                    "current time"
-                    "time is it"
-                    "today"
-                    "current date"
-                    "what date" ]
-                  question
-          then
-              match catalog |> findTool "FsVoiceTools" "current_time" with
-              | Some tool ->
-                  yield
-                      { tool = tool
-                        query = question
-                        maxResults = 1
-                        arguments = makeArgs [ "query", question ] }
-              | None -> ()
-
-          if
-              containsAny
-                  [ "what documents"
-                    "which documents"
-                    "selected documents"
-                    "sources"
-                    "inventory"
-                    "files" ]
-                  question
-          then
-              match catalog |> findTool "FsVoiceTools" "source_inventory" with
-              | Some tool ->
-                  yield
-                      { tool = tool
-                        query = question
-                        maxResults = options.memoryCandidateChunks
-                        arguments = makeArgs [] }
-              | None -> ()
-
-          if
-              containsAny
-                  [ "last result"
-                    "previous result"
-                    "earlier result"
-                    "last tool"
-                    "previous tool"
-                    "tool result"
-                    "what did the tool"
-                    "what did you find"
-                    "found earlier"
-                    "that lookup"
-                    "previous lookup"
-                    "earlier lookup"
-                    "looked up"
-                    "searched earlier"
-                    "blackboard" ]
-                  question
-          then
-              match catalog |> findTool "FsVoiceTools" "blackboard_search" with
-              | Some tool ->
-                  yield
-                      { tool = tool
-                        query = question
-                        maxResults = options.memoryCandidateChunks
-                        arguments = makeArgs [ "query", question ] }
-              | None -> ()
-
-          if
-              containsAny
-                  [ "remember"
-                    "memory"
-                    "preference"
-                    "decided"
-                    "decision"
-                    "earlier"
-                    "previously" ]
-                  question
-          then
-              match catalog |> findTool "FsVoiceTools" "durable_memory_search" with
-              | Some tool ->
-                  yield
-                      { tool = tool
-                        query = question
-                        maxResults = options.memoryCandidateChunks
-                        arguments = makeArgs [ "query", question; "max_results", string options.memoryCandidateChunks ] }
-              | None -> () ]
-
-    let jsonOptions =
-        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-        options.NumberHandling <- JsonNumberHandling.AllowReadingFromString
-        options.Converters.Add(JsonFSharpConverter())
-        options
-
-    let tryDeserializeToolPlan (text: string) =
-        try
-            JsonSerializer.Deserialize<ToolPlanDto>(text, jsonOptions) |> Some
-        with _ ->
-            None
-
-    let toolPlanPrompt question (catalog: QaToolCatalog) =
-        let systemPrompt =
-            options.prompts.toolPlannerSystem
-            |> Option.defaultValue DefaultPlugInPrompts.toolPlannerSystem
-
-        let userPrompt =
-            options.prompts.toolPlannerUserTemplate
-            |> Option.defaultValue DefaultPlugInPrompts.toolPlannerUserTemplate
-            |> renderTemplate [ "toolInventory", renderToolInventory catalog; "question", question ]
-
-        [ ChatMessage(ChatRole.System, systemPrompt)
-          ChatMessage(ChatRole.User, userPrompt) ]
-
-    let parseToolPlan (catalog: QaToolCatalog) (text: string) : PlannedToolCall list =
-        try
-            let first = text.IndexOf('{')
-            let last = text.LastIndexOf('}')
-
-            let json =
-                if first >= 0 && last >= first then
-                    text.Substring(first, last - first + 1)
-                else
-                    text
-
-            match tryDeserializeToolPlan json |> Option.bind _.calls with
-            | Some calls ->
-                calls
-                |> Seq.choose (fun item ->
-                    let plugin = item.plugin
-                    let toolName = item.tool |> Option.orElse item.``function``
-
-                    match plugin, toolName with
-                    | Some plugin, Some toolName ->
-                        match
-                            catalog.tools
-                            |> List.tryFind (fun t -> t.PluginName = plugin && t.Name = toolName)
-                        with
-                        | None -> None
-                        | Some tool ->
-                            let query = item.query |> Option.defaultValue ""
-                            let maxResults = item.max_results |> Option.defaultValue 6 |> clamp 30
-                            let args = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-
-                            for KeyValue(name, value) in item.arguments |> Option.defaultValue Map.empty do
-                                args[name] <- value
-
-                            if not (args.ContainsKey "query") && not (String.IsNullOrWhiteSpace query) then
-                                args["query"] <- query
-
-                            if not (args.ContainsKey "question") && tool.Name = "selected_source_search" then
-                                args["question"] <- query
-
-                            if not (args.ContainsKey "max_results") then
-                                args["max_results"] <- string maxResults
-
-                            Some(
-                                { tool = tool
-                                  query = query
-                                  maxResults = maxResults
-                                  arguments = args :> IReadOnlyDictionary<string, string> }
-                                : PlannedToolCall
-                            )
-                    | _ -> None)
-                |> Seq.truncate 4
-                |> Seq.toList
-            | None -> []
-        with _ ->
-            []
-
-    let runToolPlanner (catalog: QaToolCatalog) question cancellationToken : Async<PlannedToolCall list> =
-        async {
-            match options.enableToolPlanner, hasPlannerCandidateTools catalog, options.clients.toolPlanner with
-            | false, _, _
-            | _, false, _
-            | _, _, None -> return []
-            | true, true, Some client ->
-                try
-                    let opts = ChatOptions()
-                    opts.MaxOutputTokens <- Nullable(roleMaxTokens Planner 500)
-
-                    let! response =
-                        client.GetResponseAsync(toolPlanPrompt question catalog, opts, cancellationToken)
-                        |> Async.AwaitTask
-
-                    return parseToolPlan catalog response.Text
-                with ex ->
-                    report $"Tool planning failed: {ex.Message}"
-                    return []
-        }
-
-    let invokeTool (call: PlannedToolCall) cancellationToken =
-        task {
-            let! result = call.tool.InvokeAsync(call.arguments, cancellationToken)
-
-            return
-                { pluginName = call.tool.PluginName
-                  toolName = call.tool.Name
-                  query = call.query
-                  content = result.content
-                  createdAt = DateTimeOffset.UtcNow }
-        }
-
-    let invokeTools (calls: PlannedToolCall list) cancellationToken =
-        async {
-            let deduped =
-                calls
-                |> List.distinctBy (fun call -> call.tool.PluginName, call.tool.Name, call.query)
-                |> List.truncate 6
-
-            let! observations =
-                deduped
-                |> List.map (fun call ->
-                    async {
-                        try
-                            let! observation = invokeTool call cancellationToken |> Async.AwaitTask
-                            return Some observation
-                        with ex ->
-                            report $"Tool {call.tool.PluginName}.{call.tool.Name} failed: {ex.Message}"
-                            return None
-                    })
-                |> Async.Parallel
-
-            return observations |> Array.choose id |> Array.toList
-        }
 
     let host =
         { new IQaToolHost with
@@ -2124,7 +1832,6 @@ type QaSession(options: QaSessionOptions) =
                             runtime =
                                 { PlugInRuntimeOptions.defaults with
                                     retrievalMode = mode
-                                    enableToolPlanner = options.enableToolPlanner
                                     enableQueryExpansion = options.enableQueryExpansion
                                     elaborateIndexKeywords = options.elaborateIndexKeywords
                                     useLexicalFilter = options.useLexicalFilter
@@ -2186,39 +1893,9 @@ type QaSession(options: QaSessionOptions) =
                     return chunks, sw.Elapsed.TotalMilliseconds
                 }
 
-            let plannerSw = Stopwatch.StartNew()
-
-            let! plannedTools, llmTools =
-                task {
-                    match options.answerTransport with
-                    | Some _ -> return [], []
-                    | None ->
-                        let plannedTools = deterministicPlan catalog snapshot.text
-                        let! llmTools = runToolPlanner catalog snapshot.text cancellationToken |> Async.StartAsTask
-                        return plannedTools, llmTools
-                }
-
-            plannerSw.Stop()
-
-            let allPlannedTools = plannedTools @ llmTools
-
-            addBlackboardRecords (
-                allPlannedTools
-                |> List.map (plannedToolSummary >> BlackboardRecords.plannedTool snapshot.turnId)
-            )
-
-            let toolSw = Stopwatch.StartNew()
-
-            let! observations =
-                match options.answerTransport with
-                | Some _ -> Task.FromResult []
-                | None -> invokeTools allPlannedTools cancellationToken |> Async.StartAsTask
-
-            toolSw.Stop()
-
             let! memoryHits, memoryElapsedMs = memoryTask
             let! chunks, sourceRetrievalElapsedMs = sourceTask
-            let toolObservations = forgetObservations @ observations
+            let toolObservations = forgetObservations
 
             addBlackboardRecords (
                 (memoryHits |> List.map (BlackboardRecords.memoryEvidence snapshot.turnId))
@@ -2247,7 +1924,7 @@ type QaSession(options: QaSessionOptions) =
 
             if options.logTimings then
                 report
-                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; planner={plannerSw.Elapsed.TotalMilliseconds:F0}ms; tools={toolSw.Elapsed.TotalMilliseconds:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}."
+                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}."
 
             let qaAnswer =
                 { turnId = request.turnId
@@ -2277,9 +1954,7 @@ type QaSession(options: QaSessionOptions) =
                 provider.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
             for client in
-                [ options.clients.queryExpansion
-                  options.clients.toolPlanner
-                  options.clients.answerGenerator ]
+                [ options.clients.queryExpansion; options.clients.answerGenerator ]
                 |> List.choose id do
                 client.Dispose()
 

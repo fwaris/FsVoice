@@ -62,7 +62,6 @@ type ModelRole =
     | Realtime
     | Transcriber
     | Answer
-    | Planner
     | Keyword
     | QueryExpansion
 
@@ -81,15 +80,12 @@ type PromptSet =
       transcriberPrompt: string option
       answerSystem: string option
       answerUserTemplate: string option
-      toolPlannerSystem: string option
-      toolPlannerUserTemplate: string option
       keywordInstruction: string option
       speechResultInstruction: string option }
 
 [<CLIMutable>]
 type PlugInRuntimeOptions =
     { retrievalMode: RetrievalMode
-      enableToolPlanner: bool
       enableQueryExpansion: bool
       elaborateIndexKeywords: bool
       useLexicalFilter: bool
@@ -138,11 +134,10 @@ module ModelRole =
         | Realtime -> "Realtime"
         | Transcriber -> "Transcriber"
         | Answer -> "Answer"
-        | Planner -> "Planner"
         | Keyword -> "Keyword"
         | QueryExpansion -> "QueryExpansion"
 
-    let all = [ Realtime; Transcriber; Answer; Planner; Keyword; QueryExpansion ]
+    let all = [ Realtime; Transcriber; Answer; Keyword; QueryExpansion ]
 
     let tryParse value =
         let normalized =
@@ -194,8 +189,6 @@ module PromptSet =
           transcriberPrompt = None
           answerSystem = None
           answerUserTemplate = None
-          toolPlannerSystem = None
-          toolPlannerUserTemplate = None
           keywordInstruction = None
           speechResultInstruction = None }
 
@@ -208,15 +201,12 @@ module PromptSet =
           transcriberPrompt = clean prompts.transcriberPrompt
           answerSystem = clean prompts.answerSystem
           answerUserTemplate = clean prompts.answerUserTemplate
-          toolPlannerSystem = clean prompts.toolPlannerSystem
-          toolPlannerUserTemplate = clean prompts.toolPlannerUserTemplate
           keywordInstruction = clean prompts.keywordInstruction
           speechResultInstruction = clean prompts.speechResultInstruction }
 
 module PlugInRuntimeOptions =
     let defaults =
         { retrievalMode = FsColbertWithFallback
-          enableToolPlanner = true
           enableQueryExpansion = false
           elaborateIndexKeywords = true
           useLexicalFilter = true
@@ -448,26 +438,11 @@ After QUERY_ORACLE returns:
     let answerUserTemplate =
         "User question:\n{{question}}\n\nTyped durable memory:\n{{typedMemory}}\n\nTool observations:\n{{toolObservations}}\n\nSelected source inventory:\n{{sourceInventory}}\n\nMatched source context:\n{{sourceContext}}\n\nReturn only the answer."
 
-    let toolPlannerSystem =
-        "You are a conservative tool planner. Return compact JSON only. Select a tool only when it is clearly useful for the user question."
-
-    let toolPlannerUserTemplate =
-        """Available tools:
-{{toolInventory}}
-
-Question:
-{{question}}
-
-Return JSON:
-{"calls":[{"plugin":"FsVoiceTools","tool":"source_inventory","query":"...","max_results":3,"arguments":{"query":"..."}}]}
-
-Use an empty calls array when no tool is needed."""
-
     let speechResultInstruction =
         "Start directly with the provided oracle answer. Speak it naturally and briefly. Do not add a preface such as 'I found', 'It says', 'Let me check', or 'Based on the context'. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
 
 module PlugInDefinition =
-    let currentContractVersion = 1
+    let currentContractVersion = 2
 
     let defaultModels =
         [ Realtime,
@@ -477,9 +452,6 @@ module PlugInDefinition =
           Answer,
           { ModelRoleConfig.create "gpt-5.5" with
               maxOutputTokens = Some 2500 }
-          Planner,
-          { ModelRoleConfig.create "gpt-5-nano" with
-              maxOutputTokens = Some 500 }
           Keyword,
           { ModelRoleConfig.create "gpt-5-nano" with
               maxOutputTokens = Some 25000 }
@@ -492,8 +464,6 @@ module PlugInDefinition =
             transcriberPrompt = Some DefaultPlugInPrompts.transcriberPrompt
             answerSystem = Some DefaultPlugInPrompts.answerSystem
             answerUserTemplate = Some DefaultPlugInPrompts.answerUserTemplate
-            toolPlannerSystem = Some DefaultPlugInPrompts.toolPlannerSystem
-            toolPlannerUserTemplate = Some DefaultPlugInPrompts.toolPlannerUserTemplate
             speechResultInstruction = Some DefaultPlugInPrompts.speechResultInstruction }
 
     let generic =
@@ -615,7 +585,6 @@ module PlugInDefinition =
         let canonical =
             let runtime =
                 {| retrievalMode = RetrievalModes.toStorageValue definition.runtime.retrievalMode
-                   enableToolPlanner = definition.runtime.enableToolPlanner
                    enableQueryExpansion = definition.runtime.enableQueryExpansion
                    elaborateIndexKeywords = definition.runtime.elaborateIndexKeywords
                    useLexicalFilter = definition.runtime.useLexicalFilter

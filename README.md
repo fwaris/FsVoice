@@ -24,7 +24,6 @@ The default model roles in source are:
 - Realtime: `gpt-realtime-2`
 - Transcriber: `gpt-4o-mini-transcribe`
 - Answer: `gpt-5.5`
-- Planner: `gpt-5-nano`
 - Keyword generation: `gpt-5-nano`
 - Query expansion: `gpt-5-nano`
 
@@ -57,9 +56,9 @@ All model role ids can be overridden by plugins and by app settings.
 Ctx plugins implement `IQaPlugIn` from `FsVoice.Ctx.Contracts`. A plugin supplies a `PlugInDefinition` with:
 
 - behavior profile, voice replacements, query expansion rules, keyword hints, and answer instructions;
-- prompt templates for realtime, transcription, answers, tool planning, keywords, and spoken oracle results;
-- model role defaults for realtime, transcription, answers, planning, keywords, and query expansion;
-- runtime defaults such as retrieval mode, tool planning, query expansion, keyword elaboration, lexical filtering, context limits, timeouts, and writeback behavior;
+- prompt templates for realtime, transcription, answers, keywords, and spoken oracle results;
+- model role defaults for realtime, transcription, answers, keywords, and query expansion;
+- runtime defaults such as retrieval mode, query expansion, keyword elaboration, lexical filtering, context limits, timeouts, and writeback behavior;
 - optional settings fields shown by hosts;
 - optional QA tool providers and context providers.
 

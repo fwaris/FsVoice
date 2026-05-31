@@ -459,6 +459,23 @@ let private boardFromRecords records =
     records
     |> List.fold (fun board record -> Blackboard.add record board) (Blackboard.empty 200)
 
+let private invokeSessionTool (session: QaSession) toolName args =
+    task {
+        let tool =
+            session.ToolCatalog.tools
+            |> List.find (fun tool ->
+                tool.PluginName = "FsVoiceTools"
+                && String.Equals(tool.Name, toolName, StringComparison.OrdinalIgnoreCase))
+
+        let dict = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+
+        for name, value in args do
+            dict[name] <- value
+
+        let! result = tool.InvokeAsync(dict, CancellationToken.None)
+        return result.content
+    }
+
 let private seedDurableMemory path (snapshot: TranscriptSnapshot) answer =
     let store, updates, logs =
         DurableMemory.commitProposals
@@ -715,7 +732,6 @@ let ``generic PlugIn supplies model roles and runtime defaults`` () =
     Assert.Equal("gpt-realtime-2", (PlugInDefinition.model Realtime definition).modelId)
     Assert.Equal("gpt-5.5", (PlugInDefinition.model Answer definition).modelId)
     Assert.Equal("gpt-5-nano", (PlugInDefinition.model Keyword definition).modelId)
-    Assert.True(definition.runtime.enableToolPlanner)
     Assert.False(definition.runtime.enableQueryExpansion)
 
 [<Fact>]
@@ -2307,41 +2323,6 @@ let ``qa session composes injected context providers`` () =
     }
 
 [<Fact>]
-let ``qa session skips llm tool planner when only built-in context tools are available`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "fake://source"
-              enabled = true }
-
-        let planner = new CountingChatClient("""{"calls":[]}""")
-        let provider = FakeContextProvider source :> IQaContextProvider
-        let storageRoot = tempStorageRoot ()
-
-        let options =
-            { QaSessionOptions.create storageRoot with
-                autoWriteback = false
-                clients =
-                    { QaModelClients.none with
-                        toolPlanner = Some planner } }
-
-        let session = new QaSession(options)
-        let! _ = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
-
-        let request =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "composition"
-              realtimeJudgement = None
-              deadline = None }
-
-        let! _ = session.AnswerAsync(request, CancellationToken.None)
-
-        Assert.Equal(0, planner.Count)
-
-        do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
-    }
-
-[<Fact>]
 let ``qa session does not call llm query expansion by default`` () =
     task {
         let path =
@@ -3134,15 +3115,6 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
               confidence = 0.9
               riskFlags = RiskFlags.none }
 
-    let oldPlanned =
-        BlackboardRecords.plannedTool
-            oldTurn
-            { pluginName = "FsVoiceTools"
-              toolName = "source_inventory"
-              query = "old query"
-              maxResults = 4
-              arguments = Map.empty }
-
     let oldCandidate =
         BlackboardRecords.answerCandidate oldTurn "Draft answer that should be dropped."
 
@@ -3162,12 +3134,7 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
 
     let board =
         boardFromRecords (
-            [ oldTranscript
-              oldSource
-              oldJudgement
-              oldPlanned
-              oldCandidate
-              oldBlackboardSearch ]
+            [ oldTranscript; oldSource; oldJudgement; oldCandidate; oldBlackboardSearch ]
             @ recentRecords
         )
 
@@ -3185,68 +3152,11 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
     Assert.Contains(oldTranscript.id, summarizedIds)
     Assert.Contains(oldSource.id, summarizedIds)
     Assert.DoesNotContain(oldJudgement.id, summarizedIds)
-    Assert.DoesNotContain(oldPlanned.id, summarizedIds)
     Assert.DoesNotContain(oldCandidate.id, summarizedIds)
     Assert.DoesNotContain(oldBlackboardSearch.id, summarizedIds)
     Assert.Contains(oldJudgement.id, droppedIds)
-    Assert.Contains(oldPlanned.id, droppedIds)
     Assert.Contains(oldCandidate.id, droppedIds)
     Assert.Contains(oldBlackboardSearch.id, droppedIds)
-
-[<Fact>]
-let ``qa session uses blackboard search for previous result followups`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "fake://blackboard-source"
-              enabled = true }
-
-        let provider = FakeContextProvider source :> IQaContextProvider
-        let answerClient = new RecordingChatClient("ok")
-        let storageRoot = tempStorageRoot ()
-
-        let options =
-            { QaSessionOptions.create storageRoot with
-                autoWriteback = false
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some answerClient } }
-
-        let session = new QaSession(options)
-        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
-
-        let firstRequest =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "what documents are selected?"
-              realtimeJudgement = None
-              deadline = None }
-
-        let! firstAnswer = session.AnswerAsync(firstRequest, CancellationToken.None)
-
-        Assert.Empty errors
-
-        Assert.True(
-            firstAnswer.toolObservations
-            |> List.exists (fun obs -> obs.toolName = "source_inventory")
-        )
-
-        let followup =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "what did the previous result say about fake context inventory?"
-              realtimeJudgement = None
-              deadline = None }
-
-        let! followupAnswer = session.AnswerAsync(followup, CancellationToken.None)
-
-        let blackboardObservation =
-            followupAnswer.toolObservations
-            |> List.find (fun obs -> obs.toolName = "blackboard_search")
-
-        Assert.Contains("source_inventory", blackboardObservation.content, StringComparison.OrdinalIgnoreCase)
-        Assert.Contains("Fake Context inventory", blackboardObservation.content, StringComparison.OrdinalIgnoreCase)
-
-        do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
-    }
 
 [<Fact>]
 let ``qa session prunes old blackboard records into model summary and keeps recent turns`` () =
@@ -3301,35 +3211,15 @@ let ``qa session prunes old blackboard records into model summary and keeps rece
                 |> Seq.exists (fun log ->
                     log.Contains("Blackboard pruning applied", StringComparison.OrdinalIgnoreCase)))
 
-        let! oldFollowup =
-            session.AnswerAsync(
-                request "what did the blackboard say about alpha older source topic?",
-                CancellationToken.None
-            )
+        let! oldObservation = invokeSessionTool session "blackboard_search" [ "query", "alpha older source topic" ]
 
-        let oldObservation =
-            oldFollowup.toolObservations
-            |> List.find (fun observation -> observation.toolName = "blackboard_search")
+        Assert.Contains("Compacted alpha older source summary", oldObservation, StringComparison.OrdinalIgnoreCase)
 
-        Assert.Contains(
-            "Compacted alpha older source summary",
-            oldObservation.content,
-            StringComparison.OrdinalIgnoreCase
-        )
-
-        let! recentFollowup =
-            session.AnswerAsync(
-                request "what did the blackboard say about gamma recent source topic?",
-                CancellationToken.None
-            )
-
-        let recentObservation =
-            recentFollowup.toolObservations
-            |> List.find (fun observation -> observation.toolName = "blackboard_search")
+        let! recentObservation = invokeSessionTool session "blackboard_search" [ "query", "gamma recent source topic" ]
 
         Assert.Contains(
             "Fake context for gamma recent source topic",
-            recentObservation.content,
+            recentObservation,
             StringComparison.OrdinalIgnoreCase
         )
     }
@@ -3374,14 +3264,10 @@ let ``qa session blackboard pruning without model summarizer falls back to hard 
             fun log -> log.Contains("no model summarizer is configured", StringComparison.OrdinalIgnoreCase)
         )
 
-        let! followup = session.AnswerAsync(request "blackboard alpha no summarizer old topic", CancellationToken.None)
+        let! observation = invokeSessionTool session "blackboard_search" [ "query", "alpha no summarizer old topic" ]
 
-        let observation =
-            followup.toolObservations
-            |> List.find (fun observation -> observation.toolName = "blackboard_search")
-
-        Assert.Contains("alpha no summarizer old topic", observation.content, StringComparison.OrdinalIgnoreCase)
-        Assert.DoesNotContain("Compacted blackboard summary", observation.content, StringComparison.OrdinalIgnoreCase)
+        Assert.Contains("alpha no summarizer old topic", observation, StringComparison.OrdinalIgnoreCase)
+        Assert.DoesNotContain("Compacted blackboard summary", observation, StringComparison.OrdinalIgnoreCase)
     }
 
 [<Fact>]
