@@ -5,33 +5,33 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="Fabulous.MauiControls" Version="9.0.0-pre9" />
-    <PackageVersion Include="FsAICore" Version="0.9.3.3" />
+    <PackageVersion Include="FsAICore" Version="0.9.3.4" />
     <PackageVersion Include="FSharp.Control.AsyncSeq" Version="4.15.0" />
     <PackageVersion Include="FSharp.Core" Version="11.0.100" />
     <PackageVersion Include="FSharp.DI" Version="1.0.0" />
     <PackageVersion Include="FSharp.Maui.WinUICompat" Version="1.1.0" />
     <PackageVersion Include="FSharp.SystemTextJson" Version="1.4.36" />
-    <PackageVersion Include="FsColbert" Version="0.9.3.16" />
+    <PackageVersion Include="FsColbert" Version="0.9.3.17" />
     <PackageVersion Include="FsWebRTC.Bindings.Maui.Android" Version="0.9.3.7" />
-    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.5.1" />
-    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.1" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
-    <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.51" />
-    <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.51" />
+    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.70" />
+    <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.70" />
     <PackageVersion Include="PDFtoImage" Version="5.2.1" />
     <PackageVersion Include="RapidOCR.Net" Version="0.0.2" />
     <PackageVersion Include="RTOpenAI.Api" Version="0.9.3.7" />
     <PackageVersion Include="RTOpenAI.Events" Version="0.9.3.7" />
-    <PackageVersion Include="RTFlow" Version="0.9.3.3" />
-    <PackageVersion Include="SIPSorcery" Version="8.0.22" />
-    <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
+    <PackageVersion Include="RTFlow" Version="0.9.3.4" />
+    <PackageVersion Include="SIPSorcery" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.Extensions" Version="0.15.2-dev-20251214-1129-7387a4eb" />
-    <PackageVersion Include="SkiaSharp" Version="3.119.2" />
-    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
-    <PackageVersion Include="System.Text.Json" Version="10.0.7" />
+    <PackageVersion Include="SkiaSharp" Version="3.119.4" />
+    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
+    <PackageVersion Include="System.Text.Json" Version="10.0.8" />
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageVersion Include="OpenAI" Version="2.10.0" />
   </ItemGroup>
 </Project>
