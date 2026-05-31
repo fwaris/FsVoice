@@ -44,22 +44,9 @@ To reduce context bloat and the potential dilution of recent information in long
 ## 2. FsVoice Deployment Topologies
 The FsVoice platform affords several types of deployment topologies, from mobile and desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:
 
-<ol type = "A">
-<li style="margin-bottom: 0.75rem;">{▣ Mobile app + <strong><code>[FsVoice Orch.]</code></strong>} <br/> &rarr;[WebRTC] {⌬ OpenAI backend}
-</li>
+![topologies](../imgs/topology.png)
 
-<li style="margin-bottom: 0.75rem;">▣ Mobile app <br /> &rarr; [WebRTC-1] {🔌 Web API + <strong><code>[FsVoice Orch.]</code></strong>} <br/> &rarr; [WebRTC-2] {⌬ OpenAI backend}
-</li>
-
-<li style="margin-bottom: 0.75rem;">▣ SPA Web Page <br /> &rarr; [WebRTC-1] {🔌 Web API + <strong><code>[FsVoice Orch.]</code></strong>} <br/> &rarr; [WebRTC-2] {⌬ OpenAI backend}
-</li>
-
-<li style="margin-bottom: 0.75rem;">[SIP] <strong><code>[FsVoice Orch.]</code></strong>} <br /> &rarr; [WebRTC] ⌬ OpenAI backend
-</li>
-
-</ol>
-
-The leg containing <strong><code>[FsVoice Orch.]</code></strong> is where the FsVoice core logic runs. For enterprises, the interesting topologies are B and D.
+For enterprises, the interesting topologies are B and D.
 
 In topology B, the mobile app establishes a first WebRTC connection (*WebRTC-1*) to the Web API. The Web API then acts as the bridge, forwarding the app’s audio stream to OpenAI over a second WebRTC connection (*WebRTC-2*). The FsVoice orchestration runs inside the Web API and coordinates both sides of the interaction: it manages the OpenAI realtime message stream over *WebRTC-2* while also maintaining a separate application-level message stream with the mobile app over *WebRTC-1*. The main benefit here is that the audio conversation can be synced with on-screen updates in the app UI. For example, if the user says "show me product X," that will result in the UI getting updated accordingly.
 
