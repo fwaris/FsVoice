@@ -20,6 +20,7 @@ type WebSocketCreateRequest =
       parallel_tool_calls: bool option
       previous_response_id: string option
       prompt_cache_key: string option
+      prompt_cache_retention: string option
       reasoning: Reasoning option
       service_tier: string option
       store: bool option
@@ -42,6 +43,7 @@ type WebSocketCreateRequest =
           parallel_tool_calls = None
           previous_response_id = None
           prompt_cache_key = None
+          prompt_cache_retention = None
           reasoning = None
           service_tier = None
           store = Some false
@@ -190,6 +192,26 @@ module ResponseStreamEvent =
         else
             None
 
+    let private tryStringProperty name element =
+        element
+        |> tryGetProperty name
+        |> Option.bind (fun property ->
+            if property.ValueKind = JsonValueKind.String then
+                property.GetString() |> Option.ofObj
+            else
+                None)
+
+    let private tryIntProperty name element =
+        element
+        |> tryGetProperty name
+        |> Option.bind (fun property ->
+            if property.ValueKind = JsonValueKind.Number then
+                match property.TryGetInt32() with
+                | true, value -> Some value
+                | _ -> None
+            else
+                None)
+
     let private eventType (element: JsonElement) =
         element
         |> tryGetProperty "type"
@@ -213,6 +235,37 @@ module ResponseStreamEvent =
         with _ ->
             unknown root
 
+    let private deserializeError (root: JsonElement) =
+        try
+            root.GetRawText()
+            |> fun text -> JsonSerializer.Deserialize<ResponseErrorEvent>(text, Api.serOpts)
+            |> Error
+        with _ ->
+            match tryGetProperty "error" root with
+            | Some error when error.ValueKind = JsonValueKind.Object ->
+                let errorType = tryStringProperty "type" error
+
+                let message =
+                    tryStringProperty "message" error
+                    |> Option.defaultValue (error.GetRawText())
+
+                let code =
+                    tryStringProperty "code" error
+                    |> Option.orElse errorType
+                    |> Option.defaultValue "error"
+
+                Error
+                    { event_id = tryStringProperty "event_id" root
+                      sequence_number = tryIntProperty "sequence_number" root
+                      status = tryIntProperty "status" root
+                      response_id = tryStringProperty "response_id" root
+                      error =
+                        { code = code
+                          message = message
+                          ``type`` = errorType
+                          param = tryStringProperty "param" error } }
+            | _ -> unknown root
+
     let fromJsonElement (root: JsonElement) =
         match eventType root with
         | "response.created" -> deserializeKnown<ResponseLifecycleEvent> ResponseCreated root
@@ -230,7 +283,7 @@ module ResponseStreamEvent =
             deserializeKnown<ResponseFunctionCallArgumentsDeltaEvent> FunctionCallArgumentsDelta root
         | "response.function_call_arguments.done" ->
             deserializeKnown<ResponseFunctionCallArgumentsDoneEvent> FunctionCallArgumentsDone root
-        | "error" -> deserializeKnown<ResponseErrorEvent> Error root
+        | "error" -> deserializeError root
         | _ -> unknown root
 
     let deserialize (text: string) =

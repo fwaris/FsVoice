@@ -823,6 +823,9 @@ let ``qa session answers through responses websocket transport`` () =
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
                 answerTransport = Some transport
+                answerRequireToolCall = true
+                answerPromptCacheKey = Some "test-cache-key"
+                answerPromptCacheRetention = Some "24h"
                 answerModelId = answerConfig.modelId
                 modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 prompts =
@@ -848,18 +851,24 @@ let ``qa session answers through responses websocket transport`` () =
         Assert.Equal(Some 0.1f, captured[0].temperature)
         Assert.Equal(Some false, captured[0].store)
         Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some "test-cache-key", captured[0].prompt_cache_key)
+        Assert.Equal(Some "24h", captured[0].prompt_cache_retention)
         Assert.Equal(Some "CUSTOM SYSTEM", captured[0].instructions)
         Assert.Contains("selected_source_search", responseToolNames captured[0])
         Assert.Contains("source_inventory", responseToolNames captured[0])
-        Assert.Empty(captured[0].input)
+        Assert.Contains("Warm up the answer conversation", inputTextFromResponseRequest captured[0])
 
         Assert.Equal("gpt-4.1-mini", captured[1].model)
         Assert.Equal(Some 123, captured[1].max_output_tokens)
         Assert.Equal(Some true, captured[1].generate)
         Assert.Equal(Some 0.1f, captured[1].temperature)
         Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
+        Assert.Equal(Some FsResponses.ToolChoice.Required, captured[1].tool_choice)
+        Assert.Equal(Some "test-cache-key", captured[1].prompt_cache_key)
+        Assert.Equal(Some "24h", captured[1].prompt_cache_retention)
         Assert.Equal(None, captured[1].instructions)
-        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("selected_source_search", responseToolNames captured[1])
+        Assert.Contains("source_inventory", responseToolNames captured[1])
         Assert.Contains("Q=What does the fake context say?", inputTextFromResponseRequest captured[1])
         Assert.Contains("Fake context for What does the fake context say?", inputTextFromResponseRequest captured[1])
     }
@@ -909,7 +918,8 @@ let ``qa session prepares responses websocket before first answer`` () =
         Assert.Equal(Some "resp_prepared", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
         Assert.Equal(None, captured[1].instructions)
-        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("selected_source_search", responseToolNames captured[1])
+        Assert.Contains("source_inventory", responseToolNames captured[1])
     }
 
 [<Fact>]
@@ -1021,16 +1031,18 @@ let ``qa session websocket answer uses previous response id after first turn`` (
         Assert.Equal(None, captured[0].previous_response_id)
         Assert.Equal(Some false, captured[0].generate)
         Assert.Contains("source_inventory", responseToolNames captured[0])
-        Assert.Empty(captured[0].input)
+        Assert.Contains("Warm up the answer conversation", inputTextFromResponseRequest captured[0])
         Assert.Equal(Some "resp_bootstrap", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
         Assert.Single(captured[1].input) |> ignore
-        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("selected_source_search", responseToolNames captured[1])
+        Assert.Contains("source_inventory", responseToolNames captured[1])
         Assert.Contains("first question", inputTextFromResponseRequest captured[1])
         Assert.Equal(Some "resp_1", captured[2].previous_response_id)
         Assert.Equal(Some true, captured[2].generate)
         Assert.Single(captured[2].input) |> ignore
-        Assert.Equal(None, captured[2].tools)
+        Assert.Contains("selected_source_search", responseToolNames captured[2])
+        Assert.Contains("source_inventory", responseToolNames captured[2])
         Assert.Contains("second question", inputTextFromResponseRequest captured[2])
     }
 
@@ -1054,13 +1066,16 @@ let ``qa session websocket compacts answer history and enables blackboard search
             websocketAnswerTransport (fun request _ ->
                 lock capturedGate (fun () -> captured.Add request)
 
-                match request.generate, List.isEmpty request.input, request.instructions with
-                | Some false, true, _ -> [ responsesCreatedEvent "resp_bootstrap" ]
+                match request.generate, inputTextFromResponseRequest request, request.instructions with
+                | Some false, inputText, _ when
+                    inputText.Contains("Warm up the answer conversation", StringComparison.OrdinalIgnoreCase)
+                    ->
+                    [ responsesCreatedEvent "resp_bootstrap" ]
                 | Some true, _, Some instructions when
                     instructions.Contains("Compact Speak2Docs", StringComparison.OrdinalIgnoreCase)
                     ->
                     [ responsesCompletedEvent "resp_compaction" "Compacted facts from the first answer." ]
-                | Some false, false, _ -> [ responsesCreatedEvent "resp_compacted_root" ]
+                | Some false, _, _ -> [ responsesCreatedEvent "resp_compacted_root" ]
                 | _ ->
                     answerNumber <- answerNumber + 1
                     [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ])
@@ -1115,7 +1130,9 @@ let ``qa session websocket compacts answer history and enables blackboard search
                    |> fun text -> text.Contains("second question", StringComparison.OrdinalIgnoreCase))
 
         Assert.Equal(Some "resp_compacted_root", secondRequest.previous_response_id)
-        Assert.Equal(None, secondRequest.tools)
+        Assert.Contains("selected_source_search", responseToolNames secondRequest)
+        Assert.Contains("source_inventory", responseToolNames secondRequest)
+        Assert.Contains("blackboard_search", responseToolNames secondRequest)
     }
 
 [<Fact>]
@@ -1234,12 +1251,14 @@ let ``qa session websocket dispatches model requested tools`` () =
 
         Assert.Equal(Some "resp_bootstrap_tools", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(None, captured[1].tools)
+        Assert.Contains("source_inventory", responseToolNames captured[1])
+        Assert.Contains("selected_source_search", responseToolNames captured[1])
         Assert.Single(captured[1].input) |> ignore
 
         Assert.Equal(Some "resp_tool_call", captured[2].previous_response_id)
         Assert.Equal(Some true, captured[2].generate)
-        Assert.Equal(None, captured[2].tools)
+        Assert.Contains("source_inventory", responseToolNames captured[2])
+        Assert.Contains("selected_source_search", responseToolNames captured[2])
 
         let output = Assert.Single(functionOutputsFromResponseRequest captured[2])
         Assert.Equal("call_inventory", output.call_id)
@@ -3304,7 +3323,10 @@ let ``qa session delayed blackboard pruning keeps newer turns`` () =
                         summaryStarted.TrySetResult() |> ignore
                         do! releaseSummary.Task.WaitAsync(cancellationToken)
                         return [ responsesCompletedEvent "resp_blackboard_summary" "Delayed alpha summary." ]
-                    elif request.generate = Some false && List.isEmpty request.input then
+                    elif
+                        request.generate = Some false
+                        && inputText.Contains("Warm up the answer conversation", StringComparison.OrdinalIgnoreCase)
+                    then
                         return [ responsesCreatedEvent "resp_bootstrap" ]
                     elif
                         request.input

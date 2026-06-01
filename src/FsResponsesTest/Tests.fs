@@ -76,6 +76,18 @@ let ``websocket continuation request includes previous response and function out
     Assert.Equal("call_123", firstInput.GetProperty("call_id").GetString())
 
 [<Fact>]
+let ``websocket request includes prompt cache controls when configured`` () =
+    let request =
+        { WebSocketCreateRequest.ofText Models.gpt_5 "Say hello from WebSocket mode." with
+            prompt_cache_key = Some "core611-oracle:test"
+            prompt_cache_retention = Some "24h" }
+
+    let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
+
+    Assert.Equal("core611-oracle:test", root.GetProperty("prompt_cache_key").GetString())
+    Assert.Equal("24h", root.GetProperty("prompt_cache_retention").GetString())
+
+[<Fact>]
 let ``warmup request sets generate false`` () =
     let request =
         WebSocketCreateRequest.warmup
@@ -144,6 +156,19 @@ let ``error event deserializes to typed error`` () =
         Assert.Equal(404, event.status.Value)
         Assert.Equal("previous_response_not_found", event.error.code)
         Assert.Equal(Some "previous_response_id", event.error.param)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``error event without code still deserializes to typed error`` () =
+    let json =
+        @"{""type"":""error"",""status"":400,""error"":{""type"":""invalid_request_error"",""message"":""Missing required parameter: input.""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.Error event ->
+        Assert.Equal(400, event.status.Value)
+        Assert.Equal("invalid_request_error", event.error.code)
+        Assert.Equal("Missing required parameter: input.", event.error.message)
+        Assert.Equal(Some "invalid_request_error", event.error.``type``)
     | other -> failwith $"Unexpected event: {other}"
 
 [<Fact>]

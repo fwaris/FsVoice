@@ -53,6 +53,9 @@ type QaSessionOptions =
       retrievalMode: RetrievalMode
       clients: QaModelClients
       answerTransport: QaAnswerTransport option
+      answerRequireToolCall: bool
+      answerPromptCacheKey: string option
+      answerPromptCacheRetention: string option
       plugInProfile: QaPlugInProfile
       prompts: PromptSet
       modelRoles: Map<ModelRole, ModelRoleConfig>
@@ -85,6 +88,9 @@ module QaSessionOptions =
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
           answerTransport = None
+          answerRequireToolCall = false
+          answerPromptCacheKey = None
+          answerPromptCacheRetention = None
           plugInProfile = QaPlugInProfile.generic
           prompts = PromptSet.empty
           modelRoles = PlugInDefinition.defaultModels
@@ -269,10 +275,34 @@ type QaSession(options: QaSessionOptions) =
 
         $"finish={finishReason}; {usage}; messages={messageCount}"
 
+    let cachedTokensText (details: JsonElement option) =
+        let tryNumber (element: JsonElement) =
+            match element.ValueKind with
+            | JsonValueKind.Number ->
+                let mutable parsed = 0
+
+                if element.TryGetInt32(&parsed) then Some parsed else None
+            | JsonValueKind.String ->
+                match Int32.TryParse(element.GetString() |> Option.ofObj |> Option.defaultValue "") with
+                | true, parsed -> Some parsed
+                | false, _ -> None
+            | _ -> None
+
+        details
+        |> Option.bind (fun element ->
+            if element.ValueKind <> JsonValueKind.Object then
+                None
+            else
+                match element.TryGetProperty "cached_tokens" with
+                | true, value -> tryNumber value
+                | false, _ -> None)
+        |> Option.map string
+        |> Option.defaultValue "n/a"
+
     let responseUsageDiagnostics (usage: FsResponses.Usage option) =
         usage
         |> Option.map (fun usage ->
-            $"usage=input:{usage.input_tokens} output:{usage.output_tokens} total:{usage.total_tokens}")
+            $"usage=input:{usage.input_tokens} output:{usage.output_tokens} total:{usage.total_tokens} cached:{cachedTokensText usage.input_tokens_details}")
         |> Option.defaultValue "usage=n/a"
 
     let responseEventName event =
@@ -333,6 +363,12 @@ type QaSession(options: QaSessionOptions) =
 
         let status = response |> Option.map _.status |> Option.defaultValue "n/a"
         let responseId = response |> Option.map _.id |> Option.defaultValue "n/a"
+
+        let previousResponseId =
+            response
+            |> Option.bind (fun value -> value.previous_response_id)
+            |> Option.defaultValue "n/a"
+
         let usage = response |> Option.bind _.usage |> responseUsageDiagnostics
 
         let errorCode =
@@ -344,7 +380,7 @@ type QaSession(options: QaSessionOptions) =
             |> Option.map (Text.truncate 240)
             |> Option.defaultValue "n/a"
 
-        $"responseId={responseId}; status={status}; {usage}; error={errorCode}; errorMessage={errorMessage}; events={eventNames}"
+        $"responseId={responseId}; previousResponseId={previousResponseId}; status={status}; {usage}; error={errorCode}; errorMessage={errorMessage}; events={eventNames}"
 
     let isResponsesTokenLimit events =
         let reason =
@@ -531,9 +567,18 @@ type QaSession(options: QaSessionOptions) =
                 { description = description
                   enum = None }
 
+    let withAnswerPromptCache (request: FsResponses.WebSocketCreateRequest) =
+        { request with
+            prompt_cache_key = options.answerPromptCacheKey
+            prompt_cache_retention = options.answerPromptCacheRetention }
+
     let responseWarmupRequest (answerConfig: ModelRoleConfig) (prompt: AnswerPrompt) responseTools =
         { FsResponses.WebSocketCreateRequest.Default with
             model = answerConfig.modelId
+            input =
+                [ FsResponses.IOitem.Message(
+                      FsResponses.Message.OfText "Warm up the answer conversation with stable instructions and tools."
+                  ) ]
             instructions = Some prompt.instructions
             generate = Some false
             reasoning = answerReasoning answerConfig
@@ -541,6 +586,7 @@ type QaSession(options: QaSessionOptions) =
             temperature = answerTemperature answerConfig
             tools = Some responseTools
             tool_choice = Some FsResponses.ToolChoice.Auto }
+        |> withAnswerPromptCache
 
     let responseCreateRequest
         (answerConfig: ModelRoleConfig)
@@ -549,6 +595,7 @@ type QaSession(options: QaSessionOptions) =
         previousResponseId
         input
         includeStableContext
+        requireToolCall
         responseTools
         =
         { FsResponses.WebSocketCreateRequest.Default with
@@ -565,12 +612,13 @@ type QaSession(options: QaSessionOptions) =
             reasoning = answerReasoning answerConfig
             store = Some false
             temperature = answerTemperature answerConfig
-            tools = if includeStableContext then Some responseTools else None
+            tools = Some responseTools
             tool_choice =
-                if includeStableContext then
-                    Some FsResponses.ToolChoice.Auto
+                if requireToolCall && not (List.isEmpty responseTools) then
+                    Some FsResponses.ToolChoice.Required
                 else
-                    None }
+                    Some FsResponses.ToolChoice.Auto }
+        |> withAnswerPromptCache
 
     let responseCompactionRequest (answerConfig: ModelRoleConfig) items =
         { FsResponses.WebSocketCreateRequest.Default with
@@ -584,6 +632,7 @@ type QaSession(options: QaSessionOptions) =
             temperature = answerTemperature answerConfig
             tools = Some []
             tool_choice = None }
+        |> withAnswerPromptCache
 
     let responseConversationRefreshRequest answerConfig (prompt: AnswerPrompt) responseTools items =
         { FsResponses.WebSocketCreateRequest.Default with
@@ -596,6 +645,7 @@ type QaSession(options: QaSessionOptions) =
             temperature = answerTemperature answerConfig
             tools = Some responseTools
             tool_choice = Some FsResponses.ToolChoice.Auto }
+        |> withAnswerPromptCache
 
     let renderTemplate replacements (template: string) =
         replacements
@@ -1466,6 +1516,7 @@ type QaSession(options: QaSessionOptions) =
         previousResponseId
         input
         includeStableContext
+        requireInitialToolCall
         cancellationToken
         =
         async {
@@ -1477,6 +1528,7 @@ type QaSession(options: QaSessionOptions) =
                     previousResponseId
                     input
                     includeStableContext
+                    requireInitialToolCall
                     responseTools.tools
 
             let! initialEvents = runResponsesRequest request cancellationToken |> Async.AwaitTask
@@ -1521,6 +1573,7 @@ type QaSession(options: QaSessionOptions) =
                                     (Some responseId)
                                     outputs
                                     false
+                                    false
                                     responseTools.tools
 
                             let! nextEvents = runResponsesRequest followUpRequest cancellationToken |> Async.AwaitTask
@@ -1560,6 +1613,7 @@ type QaSession(options: QaSessionOptions) =
                             previousResponseId
                             (responsesInputItems userItem replayHistory)
                             previousResponseId.IsNone
+                            options.answerRequireToolCall
                             cancellationToken
 
                     if isPreviousResponseNotFound events && previousResponseId.IsSome then
@@ -1585,6 +1639,7 @@ type QaSession(options: QaSessionOptions) =
                                 replayPreviousResponseId
                                 (responsesInputItems userItem true)
                                 replayPreviousResponseId.IsNone
+                                options.answerRequireToolCall
                                 cancellationToken
                     else
                         return events, answer, toolObservations
