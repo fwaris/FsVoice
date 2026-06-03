@@ -94,6 +94,18 @@ module WebSocketCreateRequest =
             previous_response_id = Some previousResponseId
             input = input }
 
+type ResponsesClientEvent = ResponseCreate of WebSocketCreateRequest
+
+module ResponsesClientEvent =
+    let create request = ResponseCreate request
+
+    let ofText model text =
+        WebSocketCreateRequest.ofText model text |> ResponseCreate
+
+    let serialize event =
+        match event with
+        | ResponseCreate request -> JsonSerializer.Serialize(request, Api.serOpts)
+
 [<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
 type ResponseLifecycleEvent =
     { event_id: string option
@@ -157,6 +169,182 @@ type ResponseFunctionCallArgumentsDoneEvent =
       arguments: string }
 
 [<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseSequenceEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseAudioDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseAudioTranscriptDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseIndexedItemEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseRefusalDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      content_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseRefusalDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      content_index: int
+      refusal: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningTextDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      content_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningTextDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      content_index: int
+      text: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningSummaryPart = { ``type``: string; text: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningSummaryPartEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      summary_index: int
+      part: ResponseReasoningSummaryPart }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningSummaryTextDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      summary_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseReasoningSummaryTextDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      summary_index: int
+      text: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseOutputTextAnnotationAddedEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      content_index: int
+      annotation_index: int
+      annotation: JsonElement }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseMcpCallArgumentsDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseMcpCallArgumentsDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      arguments: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseCodeInterpreterCallCodeDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseCodeInterpreterCallCodeDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      code: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseImageGenerationCallPartialImageEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      partial_image_index: int
+      partial_image_b64: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseCustomToolCallInputDeltaEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      delta: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type ResponseCustomToolCallInputDoneEvent =
+    { event_id: string option
+      sequence_number: int option
+      response_id: string option
+      item_id: string
+      output_index: int
+      input: string }
+
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
 type ResponseErrorEvent =
     { event_id: string option
       sequence_number: int option
@@ -168,6 +356,7 @@ type UnknownResponseStreamEvent = { eventType: string; raw: JsonElement }
 
 type ResponseStreamEvent =
     | ResponseCreated of ResponseLifecycleEvent
+    | ResponseQueued of ResponseLifecycleEvent
     | ResponseInProgress of ResponseLifecycleEvent
     | ResponseCompleted of ResponseLifecycleEvent
     | ResponseFailed of ResponseLifecycleEvent
@@ -178,10 +367,50 @@ type ResponseStreamEvent =
     | ContentPartDone of ResponseContentPartEvent
     | OutputTextDelta of ResponseOutputTextDeltaEvent
     | OutputTextDone of ResponseOutputTextDoneEvent
+    | OutputTextAnnotationAdded of ResponseOutputTextAnnotationAddedEvent
+    | RefusalDelta of ResponseRefusalDeltaEvent
+    | RefusalDone of ResponseRefusalDoneEvent
     | FunctionCallArgumentsDelta of ResponseFunctionCallArgumentsDeltaEvent
     | FunctionCallArgumentsDone of ResponseFunctionCallArgumentsDoneEvent
+    | FileSearchCallInProgress of ResponseIndexedItemEvent
+    | FileSearchCallSearching of ResponseIndexedItemEvent
+    | FileSearchCallCompleted of ResponseIndexedItemEvent
+    | WebSearchCallInProgress of ResponseIndexedItemEvent
+    | WebSearchCallSearching of ResponseIndexedItemEvent
+    | WebSearchCallCompleted of ResponseIndexedItemEvent
+    | CodeInterpreterCallInProgress of ResponseIndexedItemEvent
+    | CodeInterpreterCallInterpreting of ResponseIndexedItemEvent
+    | CodeInterpreterCallCompleted of ResponseIndexedItemEvent
+    | CodeInterpreterCallCodeDelta of ResponseCodeInterpreterCallCodeDeltaEvent
+    | CodeInterpreterCallCodeDone of ResponseCodeInterpreterCallCodeDoneEvent
+    | ImageGenerationCallInProgress of ResponseIndexedItemEvent
+    | ImageGenerationCallGenerating of ResponseIndexedItemEvent
+    | ImageGenerationCallCompleted of ResponseIndexedItemEvent
+    | ImageGenerationCallPartialImage of ResponseImageGenerationCallPartialImageEvent
+    | McpCallArgumentsDelta of ResponseMcpCallArgumentsDeltaEvent
+    | McpCallArgumentsDone of ResponseMcpCallArgumentsDoneEvent
+    | McpCallInProgress of ResponseIndexedItemEvent
+    | McpCallCompleted of ResponseIndexedItemEvent
+    | McpCallFailed of ResponseIndexedItemEvent
+    | McpListToolsInProgress of ResponseIndexedItemEvent
+    | McpListToolsCompleted of ResponseIndexedItemEvent
+    | McpListToolsFailed of ResponseIndexedItemEvent
+    | AudioDelta of ResponseAudioDeltaEvent
+    | AudioDone of ResponseSequenceEvent
+    | AudioTranscriptDelta of ResponseAudioTranscriptDeltaEvent
+    | AudioTranscriptDone of ResponseSequenceEvent
+    | ReasoningTextDelta of ResponseReasoningTextDeltaEvent
+    | ReasoningTextDone of ResponseReasoningTextDoneEvent
+    | ReasoningSummaryPartAdded of ResponseReasoningSummaryPartEvent
+    | ReasoningSummaryPartDone of ResponseReasoningSummaryPartEvent
+    | ReasoningSummaryTextDelta of ResponseReasoningSummaryTextDeltaEvent
+    | ReasoningSummaryTextDone of ResponseReasoningSummaryTextDoneEvent
+    | CustomToolCallInputDelta of ResponseCustomToolCallInputDeltaEvent
+    | CustomToolCallInputDone of ResponseCustomToolCallInputDoneEvent
     | Error of ResponseErrorEvent
     | Unknown of UnknownResponseStreamEvent
+
+type ResponsesServerEvent = ResponseStreamEvent
 
 module ResponseStreamEvent =
     let private tryGetProperty (name: string) (element: JsonElement) =
@@ -246,8 +475,7 @@ module ResponseStreamEvent =
                 let errorType = tryStringProperty "type" error
 
                 let message =
-                    tryStringProperty "message" error
-                    |> Option.defaultValue (error.GetRawText())
+                    tryStringProperty "message" error |> Option.defaultValue (error.GetRawText())
 
                 let code =
                     tryStringProperty "code" error
@@ -269,6 +497,7 @@ module ResponseStreamEvent =
     let fromJsonElement (root: JsonElement) =
         match eventType root with
         | "response.created" -> deserializeKnown<ResponseLifecycleEvent> ResponseCreated root
+        | "response.queued" -> deserializeKnown<ResponseLifecycleEvent> ResponseQueued root
         | "response.in_progress" -> deserializeKnown<ResponseLifecycleEvent> ResponseInProgress root
         | "response.completed" -> deserializeKnown<ResponseLifecycleEvent> ResponseCompleted root
         | "response.failed" -> deserializeKnown<ResponseLifecycleEvent> ResponseFailed root
@@ -279,10 +508,72 @@ module ResponseStreamEvent =
         | "response.content_part.done" -> deserializeKnown<ResponseContentPartEvent> ContentPartDone root
         | "response.output_text.delta" -> deserializeKnown<ResponseOutputTextDeltaEvent> OutputTextDelta root
         | "response.output_text.done" -> deserializeKnown<ResponseOutputTextDoneEvent> OutputTextDone root
+        | "response.output_text.annotation.added" ->
+            deserializeKnown<ResponseOutputTextAnnotationAddedEvent> OutputTextAnnotationAdded root
+        | "response.refusal.delta" -> deserializeKnown<ResponseRefusalDeltaEvent> RefusalDelta root
+        | "response.refusal.done" -> deserializeKnown<ResponseRefusalDoneEvent> RefusalDone root
         | "response.function_call_arguments.delta" ->
             deserializeKnown<ResponseFunctionCallArgumentsDeltaEvent> FunctionCallArgumentsDelta root
         | "response.function_call_arguments.done" ->
             deserializeKnown<ResponseFunctionCallArgumentsDoneEvent> FunctionCallArgumentsDone root
+        | "response.file_search_call.in_progress" ->
+            deserializeKnown<ResponseIndexedItemEvent> FileSearchCallInProgress root
+        | "response.file_search_call.searching" ->
+            deserializeKnown<ResponseIndexedItemEvent> FileSearchCallSearching root
+        | "response.file_search_call.completed" ->
+            deserializeKnown<ResponseIndexedItemEvent> FileSearchCallCompleted root
+        | "response.web_search_call.in_progress" ->
+            deserializeKnown<ResponseIndexedItemEvent> WebSearchCallInProgress root
+        | "response.web_search_call.searching" -> deserializeKnown<ResponseIndexedItemEvent> WebSearchCallSearching root
+        | "response.web_search_call.completed" -> deserializeKnown<ResponseIndexedItemEvent> WebSearchCallCompleted root
+        | "response.code_interpreter_call.in_progress" ->
+            deserializeKnown<ResponseIndexedItemEvent> CodeInterpreterCallInProgress root
+        | "response.code_interpreter_call.interpreting" ->
+            deserializeKnown<ResponseIndexedItemEvent> CodeInterpreterCallInterpreting root
+        | "response.code_interpreter_call.completed" ->
+            deserializeKnown<ResponseIndexedItemEvent> CodeInterpreterCallCompleted root
+        | "response.code_interpreter_call_code.delta" ->
+            deserializeKnown<ResponseCodeInterpreterCallCodeDeltaEvent> CodeInterpreterCallCodeDelta root
+        | "response.code_interpreter_call_code.done" ->
+            deserializeKnown<ResponseCodeInterpreterCallCodeDoneEvent> CodeInterpreterCallCodeDone root
+        | "response.image_generation_call.in_progress" ->
+            deserializeKnown<ResponseIndexedItemEvent> ImageGenerationCallInProgress root
+        | "response.image_generation_call.generating" ->
+            deserializeKnown<ResponseIndexedItemEvent> ImageGenerationCallGenerating root
+        | "response.image_generation_call.completed" ->
+            deserializeKnown<ResponseIndexedItemEvent> ImageGenerationCallCompleted root
+        | "response.image_generation_call.partial_image" ->
+            deserializeKnown<ResponseImageGenerationCallPartialImageEvent> ImageGenerationCallPartialImage root
+        | "response.mcp_call_arguments.delta" ->
+            deserializeKnown<ResponseMcpCallArgumentsDeltaEvent> McpCallArgumentsDelta root
+        | "response.mcp_call_arguments.done" ->
+            deserializeKnown<ResponseMcpCallArgumentsDoneEvent> McpCallArgumentsDone root
+        | "response.mcp_call.in_progress" -> deserializeKnown<ResponseIndexedItemEvent> McpCallInProgress root
+        | "response.mcp_call.completed" -> deserializeKnown<ResponseIndexedItemEvent> McpCallCompleted root
+        | "response.mcp_call.failed" -> deserializeKnown<ResponseIndexedItemEvent> McpCallFailed root
+        | "response.mcp_list_tools.in_progress" ->
+            deserializeKnown<ResponseIndexedItemEvent> McpListToolsInProgress root
+        | "response.mcp_list_tools.completed" -> deserializeKnown<ResponseIndexedItemEvent> McpListToolsCompleted root
+        | "response.mcp_list_tools.failed" -> deserializeKnown<ResponseIndexedItemEvent> McpListToolsFailed root
+        | "response.audio.delta" -> deserializeKnown<ResponseAudioDeltaEvent> AudioDelta root
+        | "response.audio.done" -> deserializeKnown<ResponseSequenceEvent> AudioDone root
+        | "response.audio.transcript.delta" ->
+            deserializeKnown<ResponseAudioTranscriptDeltaEvent> AudioTranscriptDelta root
+        | "response.audio.transcript.done" -> deserializeKnown<ResponseSequenceEvent> AudioTranscriptDone root
+        | "response.reasoning_text.delta" -> deserializeKnown<ResponseReasoningTextDeltaEvent> ReasoningTextDelta root
+        | "response.reasoning_text.done" -> deserializeKnown<ResponseReasoningTextDoneEvent> ReasoningTextDone root
+        | "response.reasoning_summary_part.added" ->
+            deserializeKnown<ResponseReasoningSummaryPartEvent> ReasoningSummaryPartAdded root
+        | "response.reasoning_summary_part.done" ->
+            deserializeKnown<ResponseReasoningSummaryPartEvent> ReasoningSummaryPartDone root
+        | "response.reasoning_summary_text.delta" ->
+            deserializeKnown<ResponseReasoningSummaryTextDeltaEvent> ReasoningSummaryTextDelta root
+        | "response.reasoning_summary_text.done" ->
+            deserializeKnown<ResponseReasoningSummaryTextDoneEvent> ReasoningSummaryTextDone root
+        | "response.custom_tool_call_input.delta" ->
+            deserializeKnown<ResponseCustomToolCallInputDeltaEvent> CustomToolCallInputDelta root
+        | "response.custom_tool_call_input.done" ->
+            deserializeKnown<ResponseCustomToolCallInputDoneEvent> CustomToolCallInputDone root
         | "error" -> deserializeError root
         | _ -> unknown root
 
@@ -303,6 +594,63 @@ module ResponseStreamEvent =
         | ResponseIncomplete _
         | Error _ -> true
         | _ -> false
+
+    let typeName event =
+        match event with
+        | ResponseCreated _ -> "response.created"
+        | ResponseQueued _ -> "response.queued"
+        | ResponseInProgress _ -> "response.in_progress"
+        | ResponseCompleted _ -> "response.completed"
+        | ResponseFailed _ -> "response.failed"
+        | ResponseIncomplete _ -> "response.incomplete"
+        | OutputItemAdded _ -> "response.output_item.added"
+        | OutputItemDone _ -> "response.output_item.done"
+        | ContentPartAdded _ -> "response.content_part.added"
+        | ContentPartDone _ -> "response.content_part.done"
+        | OutputTextDelta _ -> "response.output_text.delta"
+        | OutputTextDone _ -> "response.output_text.done"
+        | OutputTextAnnotationAdded _ -> "response.output_text.annotation.added"
+        | RefusalDelta _ -> "response.refusal.delta"
+        | RefusalDone _ -> "response.refusal.done"
+        | FunctionCallArgumentsDelta _ -> "response.function_call_arguments.delta"
+        | FunctionCallArgumentsDone _ -> "response.function_call_arguments.done"
+        | FileSearchCallInProgress _ -> "response.file_search_call.in_progress"
+        | FileSearchCallSearching _ -> "response.file_search_call.searching"
+        | FileSearchCallCompleted _ -> "response.file_search_call.completed"
+        | WebSearchCallInProgress _ -> "response.web_search_call.in_progress"
+        | WebSearchCallSearching _ -> "response.web_search_call.searching"
+        | WebSearchCallCompleted _ -> "response.web_search_call.completed"
+        | CodeInterpreterCallInProgress _ -> "response.code_interpreter_call.in_progress"
+        | CodeInterpreterCallInterpreting _ -> "response.code_interpreter_call.interpreting"
+        | CodeInterpreterCallCompleted _ -> "response.code_interpreter_call.completed"
+        | CodeInterpreterCallCodeDelta _ -> "response.code_interpreter_call_code.delta"
+        | CodeInterpreterCallCodeDone _ -> "response.code_interpreter_call_code.done"
+        | ImageGenerationCallInProgress _ -> "response.image_generation_call.in_progress"
+        | ImageGenerationCallGenerating _ -> "response.image_generation_call.generating"
+        | ImageGenerationCallCompleted _ -> "response.image_generation_call.completed"
+        | ImageGenerationCallPartialImage _ -> "response.image_generation_call.partial_image"
+        | McpCallArgumentsDelta _ -> "response.mcp_call_arguments.delta"
+        | McpCallArgumentsDone _ -> "response.mcp_call_arguments.done"
+        | McpCallInProgress _ -> "response.mcp_call.in_progress"
+        | McpCallCompleted _ -> "response.mcp_call.completed"
+        | McpCallFailed _ -> "response.mcp_call.failed"
+        | McpListToolsInProgress _ -> "response.mcp_list_tools.in_progress"
+        | McpListToolsCompleted _ -> "response.mcp_list_tools.completed"
+        | McpListToolsFailed _ -> "response.mcp_list_tools.failed"
+        | AudioDelta _ -> "response.audio.delta"
+        | AudioDone _ -> "response.audio.done"
+        | AudioTranscriptDelta _ -> "response.audio.transcript.delta"
+        | AudioTranscriptDone _ -> "response.audio.transcript.done"
+        | ReasoningTextDelta _ -> "response.reasoning_text.delta"
+        | ReasoningTextDone _ -> "response.reasoning_text.done"
+        | ReasoningSummaryPartAdded _ -> "response.reasoning_summary_part.added"
+        | ReasoningSummaryPartDone _ -> "response.reasoning_summary_part.done"
+        | ReasoningSummaryTextDelta _ -> "response.reasoning_summary_text.delta"
+        | ReasoningSummaryTextDone _ -> "response.reasoning_summary_text.done"
+        | CustomToolCallInputDelta _ -> "response.custom_tool_call_input.delta"
+        | CustomToolCallInputDone _ -> "response.custom_tool_call_input.done"
+        | Error _ -> "error"
+        | Unknown event -> event.eventType
 
     let outputTextDelta event =
         match event with
@@ -419,14 +767,19 @@ module ResponsesWebSocket =
         }
 
     let serializeCreate request =
-        JsonSerializer.Serialize(request, Api.serOpts)
+        request |> ResponsesClientEvent.create |> ResponsesClientEvent.serialize
 
-    let sendCreate connection request (cancellationToken: CancellationToken) =
+    let serializeEvent event = ResponsesClientEvent.serialize event
+
+    let sendEvent connection event (cancellationToken: CancellationToken) =
         task {
-            let json = serializeCreate request
+            let json = serializeEvent event
             let bytes = Encoding.UTF8.GetBytes json
             do! connection.socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, cancellationToken)
         }
+
+    let sendCreate connection request (cancellationToken: CancellationToken) =
+        task { do! sendEvent connection (ResponsesClientEvent.create request) cancellationToken }
 
     let readText connection (cancellationToken: CancellationToken) =
         task {

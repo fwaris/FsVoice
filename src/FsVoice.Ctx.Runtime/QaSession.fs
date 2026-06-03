@@ -306,22 +306,7 @@ type QaSession(options: QaSessionOptions) =
         |> Option.defaultValue "usage=n/a"
 
     let responseEventName event =
-        match event with
-        | FsResponses.ResponseStreamEvent.ResponseCreated _ -> "response.created"
-        | FsResponses.ResponseStreamEvent.ResponseInProgress _ -> "response.in_progress"
-        | FsResponses.ResponseStreamEvent.ResponseCompleted _ -> "response.completed"
-        | FsResponses.ResponseStreamEvent.ResponseFailed _ -> "response.failed"
-        | FsResponses.ResponseStreamEvent.ResponseIncomplete _ -> "response.incomplete"
-        | FsResponses.ResponseStreamEvent.OutputItemAdded _ -> "response.output_item.added"
-        | FsResponses.ResponseStreamEvent.OutputItemDone _ -> "response.output_item.done"
-        | FsResponses.ResponseStreamEvent.ContentPartAdded _ -> "response.content_part.added"
-        | FsResponses.ResponseStreamEvent.ContentPartDone _ -> "response.content_part.done"
-        | FsResponses.ResponseStreamEvent.OutputTextDelta _ -> "response.output_text.delta"
-        | FsResponses.ResponseStreamEvent.OutputTextDone _ -> "response.output_text.done"
-        | FsResponses.ResponseStreamEvent.FunctionCallArgumentsDelta _ -> "response.function_call_arguments.delta"
-        | FsResponses.ResponseStreamEvent.FunctionCallArgumentsDone _ -> "response.function_call_arguments.done"
-        | FsResponses.ResponseStreamEvent.Error _ -> "error"
-        | FsResponses.ResponseStreamEvent.Unknown event -> event.eventType
+        FsResponses.ResponseStreamEvent.typeName event
 
     let responseTerminalResponse events =
         events
@@ -334,6 +319,7 @@ type QaSession(options: QaSessionOptions) =
     let responseLifecycleResponse event =
         match event with
         | FsResponses.ResponseStreamEvent.ResponseCreated lifecycle
+        | FsResponses.ResponseStreamEvent.ResponseQueued lifecycle
         | FsResponses.ResponseStreamEvent.ResponseInProgress lifecycle
         | FsResponses.ResponseStreamEvent.ResponseCompleted lifecycle
         | FsResponses.ResponseStreamEvent.ResponseFailed lifecycle
@@ -447,6 +433,7 @@ type QaSession(options: QaSessionOptions) =
         | FsResponses.Content.Input_text text -> text.text
         | FsResponses.Content.Output_text output -> output.text
         | FsResponses.Content.Refusal refusal -> refusal.refusal
+        | FsResponses.Content.Reasoning_text reasoning -> reasoning.text
         | FsResponses.Content.Input_image image -> $"[image: {image.image_url}]"
 
     let itemText =

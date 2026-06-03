@@ -5,6 +5,8 @@ obj/
 .DS_Store
 .idea/
 .fake
+.vs
+*.user
 temp/
 artifacts/
 # Release signing material and store upload credentials.

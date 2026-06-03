@@ -183,6 +183,7 @@ type Content =
     | [<JsonName "output_text">] Output_text of OutputText // {|text : string; annotations : JsonElement option|}
     | [<JsonName "input_text">] Input_text of {| text: string |}
     | [<JsonName "refusal">] Refusal of {| refusal: string |}
+    | [<JsonName "reasoning_text">] Reasoning_text of {| text: string |}
     | [<JsonName "input_image">] Input_image of {| image_url: string |}
 
 type Message =

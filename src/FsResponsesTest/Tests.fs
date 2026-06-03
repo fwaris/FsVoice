@@ -108,6 +108,25 @@ let ``warmup request sets generate false`` () =
     Assert.Equal("lookup", firstTool.GetProperty("name").GetString())
 
 [<Fact>]
+let ``client event wrapper serializes response create`` () =
+    let event =
+        WebSocketCreateRequest.ofText Models.gpt_5 "Say hello from typed client event."
+        |> ResponsesClientEvent.create
+
+    let root: JsonElement = event |> ResponsesWebSocket.serializeEvent |> parseObject
+
+    Assert.Equal("response.create", root.GetProperty("type").GetString())
+    Assert.Equal(Models.gpt_5, root.GetProperty("model").GetString())
+
+    let firstContent =
+        root.GetProperty("input")
+        |> firstArrayItem
+        |> fun input -> input.GetProperty("content") |> firstArrayItem
+
+    Assert.Equal("input_text", firstContent.GetProperty("type").GetString())
+    Assert.Equal("Say hello from typed client event.", firstContent.GetProperty("text").GetString())
+
+[<Fact>]
 let ``text delta event deserializes to typed event`` () =
     let json =
         @"{""type"":""response.output_text.delta"",""sequence_number"":7,""response_id"":""resp_123"",""item_id"":""msg_123"",""output_index"":0,""content_index"":0,""delta"":""hel""}"
@@ -132,6 +151,76 @@ let ``function call output item event deserializes to typed function call`` () =
             Assert.Equal("call_123", call.call_id)
             Assert.Equal("lookup", call.name)
         | other -> failwith $"Unexpected item: {other}"
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``reasoning content part event deserializes to typed content`` () =
+    let json =
+        @"{""type"":""response.content_part.added"",""sequence_number"":3,""response_id"":""resp_123"",""item_id"":""rs_123"",""output_index"":0,""content_index"":0,""part"":{""type"":""reasoning_text"",""text"":""thinking""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.ContentPartAdded event ->
+        match event.part with
+        | Content.Reasoning_text part -> Assert.Equal("thinking", part.text)
+        | other -> failwith $"Unexpected content part: {other}"
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``file search searching event deserializes to typed indexed event`` () =
+    let json =
+        @"{""type"":""response.file_search_call.searching"",""sequence_number"":4,""item_id"":""fs_123"",""output_index"":1}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.FileSearchCallSearching event ->
+        Assert.Equal("fs_123", event.item_id)
+        Assert.Equal(1, event.output_index)
+        Assert.Equal(4, event.sequence_number.Value)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``code interpreter code delta event deserializes to typed event`` () =
+    let json =
+        @"{""type"":""response.code_interpreter_call_code.delta"",""sequence_number"":5,""item_id"":""ci_123"",""output_index"":0,""delta"":""print(1)""}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.CodeInterpreterCallCodeDelta event ->
+        Assert.Equal("ci_123", event.item_id)
+        Assert.Equal("print(1)", event.delta)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``refusal done event deserializes to typed event`` () =
+    let json =
+        @"{""type"":""response.refusal.done"",""sequence_number"":6,""item_id"":""msg_123"",""output_index"":0,""content_index"":0,""refusal"":""I cannot help with that.""}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.RefusalDone event ->
+        Assert.Equal("msg_123", event.item_id)
+        Assert.Equal("I cannot help with that.", event.refusal)
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``output text annotation event preserves typed annotation payload`` () =
+    let json =
+        @"{""type"":""response.output_text.annotation.added"",""sequence_number"":7,""item_id"":""msg_123"",""output_index"":0,""content_index"":0,""annotation_index"":0,""annotation"":{""type"":""url_citation"",""url"":""https://example.com""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.OutputTextAnnotationAdded event ->
+        Assert.Equal(0, event.annotation_index)
+        Assert.Equal("url_citation", event.annotation.GetProperty("type").GetString())
+        Assert.Equal("https://example.com", event.annotation.GetProperty("url").GetString())
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``image generation partial image event deserializes to typed event`` () =
+    let json =
+        @"{""type"":""response.image_generation_call.partial_image"",""sequence_number"":8,""item_id"":""ig_123"",""output_index"":0,""partial_image_index"":2,""partial_image_b64"":""abc123""}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.ImageGenerationCallPartialImage event ->
+        Assert.Equal("ig_123", event.item_id)
+        Assert.Equal(2, event.partial_image_index)
+        Assert.Equal("abc123", event.partial_image_b64)
     | other -> failwith $"Unexpected event: {other}"
 
 [<Fact>]
