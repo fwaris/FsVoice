@@ -368,9 +368,21 @@ module Settings =
     let normalizeAnswerMaxOutputTokens value =
         value |> clamp C.MIN_ANSWER_MAX_OUTPUT_TOKENS C.MAX_ANSWER_MAX_OUTPUT_TOKENS
 
+    let normalizeAnswerToolCallLoopLimit value =
+        value
+        |> clamp C.MIN_ANSWER_TOOL_CALL_LOOP_LIMIT C.MAX_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+    let normalizeAnswerReasoningEffort value =
+        RuntimeSettings.normalizeAnswerReasoningEffort value
+
     let private parseAnswerMaxOutputTokens fallback value =
         match Int32.TryParse(defaultArg (Option.ofObj value) "") with
         | true, parsed -> normalizeAnswerMaxOutputTokens parsed
+        | false, _ -> fallback
+
+    let private parseAnswerToolCallLoopLimit fallback value =
+        match Int32.TryParse(defaultArg (Option.ofObj value) "") with
+        | true, parsed -> normalizeAnswerToolCallLoopLimit parsed
         | false, _ -> fallback
 
     let private getScopedString (plugInId: string) (suffix: string) (fallback: string) =
@@ -453,6 +465,25 @@ module Settings =
     let setAnswerMaxOutputTokens value =
         let tokens = value |> parseAnswerMaxOutputTokens C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
         Preferences.Default.Set(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, tokens)
+
+    let answerReasoningEffort () =
+        Preferences.Default.Get(C.SETTINGS_ANSWER_REASONING_EFFORT, C.DEFAULT_ANSWER_REASONING_EFFORT)
+        |> normalizeAnswerReasoningEffort
+
+    let setAnswerReasoningEffort value =
+        Preferences.Default.Set(C.SETTINGS_ANSWER_REASONING_EFFORT, normalizeAnswerReasoningEffort value)
+
+    let answerToolCallLoopLimit () =
+        let fallback = C.DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+        Preferences.Default.Get(C.SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT, fallback)
+        |> normalizeAnswerToolCallLoopLimit
+
+    let setAnswerToolCallLoopLimit value =
+        let rounds =
+            value |> parseAnswerToolCallLoopLimit C.DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+        Preferences.Default.Set(C.SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT, rounds)
 
     let useLexicalFilter () =
         Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)

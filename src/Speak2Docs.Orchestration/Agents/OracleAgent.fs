@@ -43,29 +43,24 @@ module OracleAgent =
         FsVoice.Ctx.PlugInDefinition.model role plugIn
 
     let private createSession (st: State) flags : FsVoice.Ctx.IQaOrchestrator =
-        let clients: FsVoice.Ctx.QaModelClients =
-            if String.IsNullOrWhiteSpace st.apiKey then
-                FsVoice.Ctx.QaModelClients.none
-            else
-                let queryExpansion =
-                    createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
+        if String.IsNullOrWhiteSpace st.apiKey then
+            invalidOp "OpenAI API key is required for oracle QA Responses WebSocket answering."
 
-                { queryExpansion = Some queryExpansion
-                  answerGenerator = None }
+        let clients: FsVoice.Ctx.QaModelClients =
+            let queryExpansion =
+                createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
+
+            { queryExpansion = Some queryExpansion }
 
         let storageRoot = st.storageRoot
         let answerModel = modelConfig FsVoice.Ctx.Answer st.plugIn
         let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
+        let answerWebSocketConfig = FsResponses.ResponseWebSocketConfig.create st.apiKey
 
         let options =
-            { FsVoice.Ctx.QaSessionOptions.create storageRoot with
+            { FsVoice.Ctx.QaSessionOptions.create storageRoot answerWebSocketConfig with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
-                answerTransport =
-                    if String.IsNullOrWhiteSpace st.apiKey then
-                        None
-                    else
-                        Some(FsVoice.Ctx.QaAnswerTransport.openAIResponsesWebSocket st.apiKey)
                 toolProviders = st.qaPlugIn.GetToolProviders()
                 plugInProfile = st.plugIn.profile
                 prompts = st.plugIn.prompts
@@ -79,6 +74,7 @@ module OracleAgent =
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
                 autoWriteback = st.plugIn.runtime.autoWriteback
                 enableDurableMemory = false
+                answerToolCallLoopLimit = flags.answerToolCallLoopLimit
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -127,12 +123,25 @@ module OracleAgent =
         match session with
         | :? FsVoice.Ctx.IQaAnswerTransportPreparer as preparer ->
             async {
+                use preparationTimeout = new CancellationTokenSource()
+                preparationTimeout.CancelAfter(TimeSpan.FromMilliseconds(float st.plugIn.runtime.functionCallTimeoutMs))
+
                 try
-                    do! preparer.PrepareAnswerTransportAsync(CancellationToken.None) |> Async.AwaitTask
+                    do!
+                        preparer.PrepareAnswerTransportAsync(preparationTimeout.Token)
+                        |> Async.AwaitTask
+
                     st.bus.PostToAgent(Ag_Log "Answer Responses WebSocket prepared.")
                 with
-                | :? OperationCanceledException -> ()
-                | ex -> st.bus.PostToAgent(Ag_Log $"Answer Responses WebSocket preparation failed: {ex.Message}")
+                | :? OperationCanceledException ->
+                    st.bus.PostToAgent(
+                        Ag_Log
+                            $"Answer Responses WebSocket preparation timed out after {st.plugIn.runtime.functionCallTimeoutMs} ms; the next oracle request will connect on demand."
+                    )
+                | ex ->
+                    st.bus.PostToAgent(
+                        Ag_Log $"Answer Responses WebSocket preparation failed: {ex.GetType().Name}: {ex.Message}"
+                    )
             }
             |> Async.Start
         | _ -> ()
@@ -241,10 +250,11 @@ module OracleAgent =
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, Some candidate))
             with
             | :? OperationCanceledException ->
+                st.bus.PostToAgent(Ag_Log $"QA request canceled for turn {request.snapshot.turnId}.")
                 request.completion.TrySetCanceled request.cancellationToken |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
             | ex ->
-                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.Message}")
+                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.GetType().Name}: {ex.Message}")
                 request.completion.TrySetException ex |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
         }

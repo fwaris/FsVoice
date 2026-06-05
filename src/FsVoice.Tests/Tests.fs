@@ -151,40 +151,6 @@ type RecordingChatClient(responseText: string) =
         member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
-type RoutingChatClient(answerText: string, summaryText: string) =
-    let gate = obj ()
-    let mutable answerCalls = 0
-    let mutable summaryCalls = 0
-    let mutable messages: ChatMessage list = []
-
-    member _.AnswerCalls = lock gate (fun () -> answerCalls)
-    member _.SummaryCalls = lock gate (fun () -> summaryCalls)
-    member _.Messages = lock gate (fun () -> messages)
-
-    interface IChatClient with
-        member _.Dispose() = ()
-        member _.GetService(serviceType: Type, serviceKey: obj) = null
-
-        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
-            let captured = chatMessages |> Seq.toList
-            let promptText = captured |> List.map _.Text |> String.concat "\n"
-
-            let responseText =
-                lock gate (fun () ->
-                    messages <- captured
-
-                    if promptText.Contains("Summarize pruned QA blackboard", StringComparison.OrdinalIgnoreCase) then
-                        summaryCalls <- summaryCalls + 1
-                        summaryText
-                    else
-                        answerCalls <- answerCalls + 1
-                        answerText)
-
-            ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
-
-        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
-            asyncSeq { yield ChatResponseUpdate() }
-
 type SequencedChatClient(responseTexts: string list) =
     let mutable calls: Nullable<int> list = []
 
@@ -311,7 +277,58 @@ let private responsesCompletedEvent id text =
                   role = "assistant"
                   content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] } ]
 
+let private responsesCompletedEventWithCompaction id text compactionId encryptedContent =
+    responsesCompletedEventWithOutput
+        id
+        [ FsResponses.IOitem.Message
+              { FsResponses.Message.Default with
+                  id = Some $"msg_{id}"
+                  status = Some "completed"
+                  role = "assistant"
+                  content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] }
+          FsResponses.IOitem.Compaction
+              { id = Some compactionId
+                encrypted_content = encryptedContent } ]
+
+let private responseUsage inputTokens outputTokens : FsResponses.Usage =
+    { input_tokens = inputTokens
+      output_tokens = outputTokens
+      total_tokens = inputTokens + outputTokens
+      input_tokens_details = None
+      output_tokens_details = None }
+
+let private withResponseUsage inputTokens event =
+    match event with
+    | FsResponses.ResponseStreamEvent.ResponseCompleted lifecycle ->
+        FsResponses.ResponseStreamEvent.ResponseCompleted
+            { lifecycle with
+                response =
+                    { lifecycle.response with
+                        usage = Some(responseUsage inputTokens 10) } }
+    | _ -> event
+
+let private responsesCompletedEventWithUsage id text inputTokens =
+    responsesCompletedEvent id text |> withResponseUsage inputTokens
+
 let private responsesCompletedEmptyEvent id = responsesCompletedEventWithOutput id []
+
+let private responsesTokenLimitEvent id text =
+    let response =
+        { (responsesResponse
+              id
+              "incomplete"
+              [ FsResponses.IOitem.Message
+                    { FsResponses.Message.Default with
+                        id = Some $"msg_{id}"
+                        status = Some "incomplete"
+                        role = "assistant"
+                        content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] } ]) with
+            incomplete_details = Some { reason = "max_output_tokens" } }
+
+    FsResponses.ResponseStreamEvent.ResponseIncomplete
+        { event_id = None
+          sequence_number = None
+          response = response }
 
 let private responsesFunctionCallEvent id callId name arguments =
     responsesCompletedEventWithOutput
@@ -321,6 +338,17 @@ let private responsesFunctionCallEvent id callId name arguments =
                 call_id = callId
                 name = name
                 arguments = arguments } ]
+
+let private responsesFunctionCallEvents id calls =
+    responsesCompletedEventWithOutput
+        id
+        (calls
+         |> List.map (fun (callId, name, arguments) ->
+             FsResponses.IOitem.Function_call
+                 { id = $"fc_{callId}"
+                   call_id = callId
+                   name = name
+                   arguments = arguments }))
 
 let private previousResponseNotFoundEvent =
     FsResponses.ResponseStreamEvent.Error
@@ -334,9 +362,32 @@ let private previousResponseNotFoundEvent =
               ``type`` = Some "invalid_request_error"
               param = Some "previous_response_id" } }
 
+type private ResponseRequestPath =
+    | PersistentAnswer
+    | StatelessMaintenance
+
+let private testResponseWebSocketConfig =
+    FsResponses.ResponseWebSocketConfig.create "test-api-key"
+
+let private testQaSessionOptions storageRoot =
+    QaSessionOptions.create storageRoot testResponseWebSocketConfig
+
+let private responsesTransportOverrideAsync handler =
+    { prepareAnswerConnection = None
+      runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
+      runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
+
+let private responsesTransportOverrideWithPrepareAsync prepare handler =
+    { prepareAnswerConnection = Some prepare
+      runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
+      runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
+
+let private responsesTransportOverride handler =
+    responsesTransportOverrideAsync (fun path request cancellationToken ->
+        handler path request cancellationToken |> Task.FromResult)
+
 let private websocketAnswerTransport handler =
-    QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
-        handler request cancellationToken |> Task.FromResult)
+    responsesTransportOverride (fun _ request cancellationToken -> handler request cancellationToken)
 
 let private inputTextFromResponseRequest (request: FsResponses.WebSocketCreateRequest) =
     request.input
@@ -356,6 +407,13 @@ let private responseToolNames (request: FsResponses.WebSocketCreateRequest) =
     |> Option.defaultValue []
     |> List.choose (function
         | FsResponses.Tool.Function fn -> Some fn.name
+        | _ -> None)
+
+let private responseContextManagementThresholds (request: FsResponses.WebSocketCreateRequest) =
+    request.context_management
+    |> Option.defaultValue []
+    |> List.choose (function
+        | FsResponses.ResponseContextManagement.Compaction value -> Some value.compact_threshold
         | _ -> None)
 
 let private responseFunctionTools (request: FsResponses.WebSocketCreateRequest) =
@@ -754,7 +812,13 @@ let ``qa session applies custom prompts and answer role options`` () =
               location = "memory://fake"
               enabled = true }
 
-        let recorder = new RecordingChatClient("custom response")
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                [ responsesCompletedEvent "resp_custom_answer" "custom response" ])
 
         let answerConfig =
             { ModelRoleConfig.create "gpt-4.1-mini" with
@@ -762,12 +826,9 @@ let ``qa session applies custom prompts and answer role options`` () =
                 temperature = Some 0.1f }
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some recorder }
                 answerModelId = answerConfig.modelId
                 modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 prompts =
@@ -775,7 +836,7 @@ let ``qa session applies custom prompts and answer role options`` () =
                         answerSystem = Some "CUSTOM SYSTEM"
                         answerUserTemplate = Some "Q={{question}}\nCTX={{sourceContext}}\nINV={{sourceInventory}}" } }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -786,11 +847,12 @@ let ``qa session applies custom prompts and answer role options`` () =
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("custom response", answer.answer)
-        Assert.Equal(123, recorder.MaxOutputTokens.Value)
-        Assert.Equal(0.1f, recorder.Temperature.Value)
-        Assert.Equal("CUSTOM SYSTEM", recorder.Messages[0].Text)
-        Assert.Contains("Q=What does the fake context say?", recorder.Messages[1].Text)
-        Assert.Contains("Fake context for What does the fake context say?", recorder.Messages[1].Text)
+        Assert.Single(captured) |> ignore
+        Assert.Equal(Some "CUSTOM SYSTEM", captured[0].instructions)
+        Assert.Equal(Some 123, captured[0].max_output_tokens)
+        Assert.Equal(Some 0.1f, captured[0].temperature)
+        Assert.Contains("Q=What does the fake context say?", inputTextFromResponseRequest captured[0])
+        Assert.Contains("Fake context for What does the fake context say?", inputTextFromResponseRequest captured[0])
     }
 
 [<Fact>]
@@ -802,16 +864,12 @@ let ``qa session answers through responses websocket transport`` () =
               enabled = true }
 
         let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
-        let mutable callNumber = 0
 
         let transport =
             websocketAnswerTransport (fun request _ ->
                 captured.Add request
-                callNumber <- callNumber + 1
 
-                match callNumber with
-                | 1 -> [ responsesCreatedEvent "resp_bootstrap_1" ]
-                | _ -> [ responsesCompletedEvent "resp_socket_1" "socket response" ])
+                [ responsesCompletedEvent "resp_socket_1" "socket response" ])
 
         let answerConfig =
             { ModelRoleConfig.create "gpt-4.1-mini" with
@@ -819,10 +877,9 @@ let ``qa session answers through responses websocket transport`` () =
                 temperature = Some 0.1f }
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport
                 answerRequireToolCall = true
                 answerPromptCacheKey = Some "test-cache-key"
                 answerPromptCacheRetention = Some "24h"
@@ -833,7 +890,7 @@ let ``qa session answers through responses websocket transport`` () =
                         answerSystem = Some "CUSTOM SYSTEM"
                         answerUserTemplate = Some "Q={{question}}\nCTX={{sourceContext}}\nINV={{sourceInventory}}" } }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -844,33 +901,21 @@ let ``qa session answers through responses websocket transport`` () =
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("socket response", answer.answer)
-        Assert.Equal(2, captured.Count)
+        Assert.Single(captured) |> ignore
         Assert.Equal("gpt-4.1-mini", captured[0].model)
-        Assert.Equal(Some false, captured[0].generate)
-        Assert.Equal(None, captured[0].max_output_tokens)
+        Assert.Equal(Some 123, captured[0].max_output_tokens)
+        Assert.Equal(Some true, captured[0].generate)
         Assert.Equal(Some 0.1f, captured[0].temperature)
-        Assert.Equal(Some false, captured[0].store)
+        Assert.Equal(Some true, captured[0].store)
         Assert.Equal(None, captured[0].previous_response_id)
         Assert.Equal(Some "test-cache-key", captured[0].prompt_cache_key)
         Assert.Equal(Some "24h", captured[0].prompt_cache_retention)
         Assert.Equal(Some "CUSTOM SYSTEM", captured[0].instructions)
+        Assert.Equal(Some FsResponses.ToolChoice.Required, captured[0].tool_choice)
         Assert.Contains("selected_source_search", responseToolNames captured[0])
         Assert.Contains("source_inventory", responseToolNames captured[0])
-        Assert.Contains("Warm up the answer conversation", inputTextFromResponseRequest captured[0])
-
-        Assert.Equal("gpt-4.1-mini", captured[1].model)
-        Assert.Equal(Some 123, captured[1].max_output_tokens)
-        Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(Some 0.1f, captured[1].temperature)
-        Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
-        Assert.Equal(Some FsResponses.ToolChoice.Required, captured[1].tool_choice)
-        Assert.Equal(Some "test-cache-key", captured[1].prompt_cache_key)
-        Assert.Equal(Some "24h", captured[1].prompt_cache_retention)
-        Assert.Equal(None, captured[1].instructions)
-        Assert.Contains("selected_source_search", responseToolNames captured[1])
-        Assert.Contains("source_inventory", responseToolNames captured[1])
-        Assert.Contains("Q=What does the fake context say?", inputTextFromResponseRequest captured[1])
-        Assert.Contains("Fake context for What does the fake context say?", inputTextFromResponseRequest captured[1])
+        Assert.Contains("Q=What does the fake context say?", inputTextFromResponseRequest captured[0])
+        Assert.Contains("Fake context for What does the fake context say?", inputTextFromResponseRequest captured[0])
     }
 
 [<Fact>]
@@ -882,28 +927,34 @@ let ``qa session prepares responses websocket before first answer`` () =
               enabled = true }
 
         let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable prepareCount = 0
 
         let transport =
-            websocketAnswerTransport (fun request _ ->
-                captured.Add request
+            responsesTransportOverrideWithPrepareAsync
+                (fun _ ->
+                    task {
+                        prepareCount <- prepareCount + 1
+                        return ()
+                    })
+                (fun _ request _ ->
+                    task {
+                        captured.Add request
 
-                match request.generate with
-                | Some false -> [ responsesCreatedEvent "resp_prepared" ]
-                | _ -> [ responsesCompletedEvent "resp_answer" "prepared socket response" ])
+                        return [ responsesCompletedEvent "resp_answer" "prepared socket response" ]
+                    })
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport }
+                contextProviders = [ FakeContextProvider(source) ] }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let preparer = session :> IQaAnswerTransportPreparer
         do! preparer.PrepareAnswerTransportAsync(CancellationToken.None)
 
-        Assert.Equal(1, captured.Count)
-        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(1, prepareCount)
+        Assert.Empty(captured)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -914,12 +965,12 @@ let ``qa session prepares responses websocket before first answer`` () =
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("prepared socket response", answer.answer)
-        Assert.Equal(2, captured.Count)
-        Assert.Equal(Some "resp_prepared", captured[1].previous_response_id)
-        Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(None, captured[1].instructions)
-        Assert.Contains("selected_source_search", responseToolNames captured[1])
-        Assert.Contains("source_inventory", responseToolNames captured[1])
+        Assert.Single(captured) |> ignore
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some true, captured[0].generate)
+        Assert.True(Option.isSome captured[0].instructions)
+        Assert.Contains("selected_source_search", responseToolNames captured[0])
+        Assert.Contains("source_inventory", responseToolNames captured[0])
     }
 
 [<Fact>]
@@ -933,37 +984,38 @@ let ``qa session shares in flight response websocket preparation`` () =
         let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
         let capturedGate = obj ()
 
-        let bootstrapStarted =
+        let prepareStarted =
             TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        let releaseBootstrap =
+        let releasePrepare =
             TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let transport =
-            QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
-                task {
-                    lock capturedGate (fun () -> captured.Add request)
-
-                    match request.generate with
-                    | Some false ->
-                        bootstrapStarted.TrySetResult() |> ignore
-                        do! releaseBootstrap.Task.WaitAsync(cancellationToken)
-                        return [ responsesCreatedEvent "resp_shared_bootstrap" ]
-                    | _ -> return [ responsesCompletedEvent "resp_shared_answer" "shared prepared answer" ]
-                })
+            responsesTransportOverrideWithPrepareAsync
+                (fun cancellationToken ->
+                    task {
+                        prepareStarted.TrySetResult() |> ignore
+                        do! releasePrepare.Task.WaitAsync(cancellationToken)
+                    })
+                (fun _ request cancellationToken ->
+                    task {
+                        do! prepareStarted.Task.WaitAsync(cancellationToken)
+                        do! releasePrepare.Task.WaitAsync(cancellationToken)
+                        lock capturedGate (fun () -> captured.Add request)
+                        return [ responsesCompletedEvent "resp_shared_answer" "shared prepared answer" ]
+                    })
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport }
+                contextProviders = [ FakeContextProvider(source) ] }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let preparer = session :> IQaAnswerTransportPreparer
         let prepareTask = preparer.PrepareAnswerTransportAsync(CancellationToken.None)
 
-        do! bootstrapStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+        do! prepareStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -973,7 +1025,8 @@ let ``qa session shares in flight response websocket preparation`` () =
 
         let answerTask = session.AnswerAsync(request, CancellationToken.None)
         do! Task.Delay 50
-        releaseBootstrap.TrySetResult() |> ignore
+        Assert.Empty(lock capturedGate (fun () -> captured |> Seq.toList))
+        releasePrepare.TrySetResult() |> ignore
 
         do! prepareTask
         let! answer = answerTask
@@ -981,10 +1034,9 @@ let ``qa session shares in flight response websocket preparation`` () =
         let capturedRequests = lock capturedGate (fun () -> captured |> Seq.toList)
 
         Assert.Equal("shared prepared answer", answer.answer)
-        Assert.Equal(2, capturedRequests.Length)
-        Assert.Equal(Some false, capturedRequests[0].generate)
-        Assert.Equal(Some "resp_shared_bootstrap", capturedRequests[1].previous_response_id)
-        Assert.Equal(Some true, capturedRequests[1].generate)
+        Assert.Single(capturedRequests) |> ignore
+        Assert.Equal(None, capturedRequests[0].previous_response_id)
+        Assert.Equal(Some true, capturedRequests[0].generate)
     }
 
 [<Fact>]
@@ -1002,19 +1054,15 @@ let ``qa session websocket answer uses previous response id after first turn`` (
             websocketAnswerTransport (fun request _ ->
                 captured.Add request
 
-                match request.generate with
-                | Some false -> [ responsesCreatedEvent "resp_bootstrap" ]
-                | _ ->
-                    answerNumber <- answerNumber + 1
-                    [ responsesCompletedEvent $"resp_{answerNumber}" $"socket answer {answerNumber}" ])
+                answerNumber <- answerNumber + 1
+                [ responsesCompletedEvent $"resp_{answerNumber}" $"socket answer {answerNumber}" ])
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport }
+                contextProviders = [ FakeContextProvider(source) ] }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request question =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1027,34 +1075,31 @@ let ``qa session websocket answer uses previous response id after first turn`` (
 
         Assert.Equal("socket answer 1", first.answer)
         Assert.Equal("socket answer 2", second.answer)
-        Assert.Equal(3, captured.Count)
+        Assert.Equal(2, captured.Count)
         Assert.Equal(None, captured[0].previous_response_id)
-        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(Some true, captured[0].generate)
+        Assert.Single(captured[0].input) |> ignore
         Assert.Contains("source_inventory", responseToolNames captured[0])
-        Assert.Contains("Warm up the answer conversation", inputTextFromResponseRequest captured[0])
-        Assert.Equal(Some "resp_bootstrap", captured[1].previous_response_id)
+        Assert.Contains("first question", inputTextFromResponseRequest captured[0])
+        Assert.Equal(Some "resp_1", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
         Assert.Single(captured[1].input) |> ignore
         Assert.Contains("selected_source_search", responseToolNames captured[1])
         Assert.Contains("source_inventory", responseToolNames captured[1])
-        Assert.Contains("first question", inputTextFromResponseRequest captured[1])
-        Assert.Equal(Some "resp_1", captured[2].previous_response_id)
-        Assert.Equal(Some true, captured[2].generate)
-        Assert.Single(captured[2].input) |> ignore
-        Assert.Contains("selected_source_search", responseToolNames captured[2])
-        Assert.Contains("source_inventory", responseToolNames captured[2])
-        Assert.Contains("second question", inputTextFromResponseRequest captured[2])
+        Assert.Contains("second question", inputTextFromResponseRequest captured[1])
     }
 
 [<Fact>]
-let ``qa session websocket compacts answer history and enables blackboard search`` () =
+let ``qa session websocket sends OpenAI compaction config without internal maintenance`` () =
     task {
         let source =
             { kind = Json
               location = "memory://fake-websocket-compact"
               enabled = true }
 
-        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let captured =
+            ResizeArray<ResponseRequestPath * FsResponses.WebSocketCreateRequest>()
+
         let capturedGate = obj ()
 
         let capturedSnapshot () =
@@ -1063,31 +1108,18 @@ let ``qa session websocket compacts answer history and enables blackboard search
         let mutable answerNumber = 0
 
         let transport =
-            websocketAnswerTransport (fun request _ ->
-                lock capturedGate (fun () -> captured.Add request)
+            responsesTransportOverride (fun path request _ ->
+                lock capturedGate (fun () -> captured.Add((path, request)))
 
-                match request.generate, inputTextFromResponseRequest request, request.instructions with
-                | Some false, inputText, _ when
-                    inputText.Contains("Warm up the answer conversation", StringComparison.OrdinalIgnoreCase)
-                    ->
-                    [ responsesCreatedEvent "resp_bootstrap" ]
-                | Some true, _, Some instructions when
-                    instructions.Contains("Compact Speak2Docs", StringComparison.OrdinalIgnoreCase)
-                    ->
-                    [ responsesCompletedEvent "resp_compaction" "Compacted facts from the first answer." ]
-                | Some false, _, _ -> [ responsesCreatedEvent "resp_compacted_root" ]
-                | _ ->
-                    answerNumber <- answerNumber + 1
-                    [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ])
+                answerNumber <- answerNumber + 1
+                [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ])
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport
-                answerCompactionThresholdChars = Some 1 }
+                contextProviders = [ FakeContextProvider(source) ] }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request question =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1096,43 +1128,65 @@ let ``qa session websocket compacts answer history and enables blackboard search
               deadline = None }
 
         let! first = session.AnswerAsync(request "first question", CancellationToken.None)
-
-        Assert.Equal("socket answer 1", first.answer)
-        Assert.DoesNotContain("blackboard_search", responseToolNames (capturedSnapshot ()).Head)
-
-        do!
-            waitForAsync "Compaction should create a refreshed response root." (fun () ->
-                capturedSnapshot ()
-                |> Seq.exists (fun request ->
-                    request.generate = Some false
-                    && not (List.isEmpty request.input)
-                    && responseToolNames request |> List.contains "blackboard_search"))
-
-        let refreshRequest =
-            capturedSnapshot ()
-            |> Seq.find (fun request ->
-                request.generate = Some false
-                && not (List.isEmpty request.input)
-                && responseToolNames request |> List.contains "blackboard_search")
-
-        Assert.Contains("Compacted conversation checkpoint", inputTextFromResponseRequest refreshRequest)
-        Assert.Contains("Compacted facts from the first answer", inputTextFromResponseRequest refreshRequest)
-
         let! second = session.AnswerAsync(request "second question", CancellationToken.None)
 
+        Assert.Equal("socket answer 1", first.answer)
         Assert.Equal("socket answer 2", second.answer)
 
-        let secondRequest =
-            capturedSnapshot ()
-            |> Seq.find (fun request ->
-                request.generate = Some true
-                && inputTextFromResponseRequest request
-                   |> fun text -> text.Contains("second question", StringComparison.OrdinalIgnoreCase))
+        let requests = capturedSnapshot ()
 
-        Assert.Equal(Some "resp_compacted_root", secondRequest.previous_response_id)
+        Assert.Equal(2, requests.Length)
+
+        for path, request in requests do
+            Assert.Equal(PersistentAnswer, path)
+            Assert.True([ 200000 ] = responseContextManagementThresholds request)
+            Assert.Equal(Some true, request.generate)
+            Assert.DoesNotContain("Compact Speak2Docs", inputTextFromResponseRequest request)
+
+        let _, firstRequest = requests[0]
+        let _, secondRequest = requests[1]
+
+        Assert.Equal(None, firstRequest.previous_response_id)
+        Assert.Equal(Some "resp_answer_1", secondRequest.previous_response_id)
+        Assert.DoesNotContain("blackboard_search", responseToolNames firstRequest)
         Assert.Contains("selected_source_search", responseToolNames secondRequest)
         Assert.Contains("source_inventory", responseToolNames secondRequest)
-        Assert.Contains("blackboard_search", responseToolNames secondRequest)
+    }
+
+[<Fact>]
+let ``qa session websocket omits OpenAI compaction config when disabled`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-no-compact"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                [ responsesCompletedEvent "resp_answer" "socket answer" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerOpenAiCompactionThresholdTokens = None }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "first question"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("socket answer", answer.answer)
+        let capturedRequest = Assert.Single(captured)
+        Assert.Empty(responseContextManagementThresholds capturedRequest)
     }
 
 [<Fact>]
@@ -1152,22 +1206,19 @@ let ``qa session websocket answer replays append only history when previous resp
                 callNumber <- callNumber + 1
 
                 match callNumber with
-                | 1 -> [ responsesCreatedEvent "resp_bootstrap_1" ]
-                | 2 -> [ responsesCompletedEvent "resp_1" "first socket answer" ]
-                | 3 -> [ previousResponseNotFoundEvent ]
-                | 4 -> [ responsesCreatedEvent "resp_bootstrap_2" ]
+                | 1 -> [ responsesCompletedEvent "resp_1" "first socket answer" ]
+                | 2 -> [ previousResponseNotFoundEvent ]
                 | _ -> [ responsesCompletedEvent "resp_replayed" "replayed socket answer" ])
 
         let logs = ResizeArray<string>()
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport
                 report = fun msg -> logs.Add msg }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request question =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1180,23 +1231,22 @@ let ``qa session websocket answer replays append only history when previous resp
 
         Assert.Equal("first socket answer", first.answer)
         Assert.Equal("replayed socket answer", second.answer)
-        Assert.Equal(5, captured.Count)
-        Assert.Equal(Some false, captured[0].generate)
-        Assert.Equal(Some "resp_bootstrap_1", captured[1].previous_response_id)
+        Assert.Equal(3, captured.Count)
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some true, captured[0].generate)
+        Assert.Equal(Some "resp_1", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(Some "resp_1", captured[2].previous_response_id)
+        Assert.Equal(None, captured[2].previous_response_id)
         Assert.Equal(Some true, captured[2].generate)
-        Assert.Equal(Some false, captured[3].generate)
-        Assert.Equal(Some "resp_bootstrap_2", captured[4].previous_response_id)
-        Assert.Equal(Some true, captured[4].generate)
+        Assert.Equal(Some true, captured[2].store)
 
         Assert.True(
-            captured[4].input.Length >= 3,
+            captured[2].input.Length >= 3,
             "Replay should include prior user, prior assistant, and current user items."
         )
 
-        Assert.Contains("first question", inputTextFromResponseRequest captured[4])
-        Assert.Contains("second question", inputTextFromResponseRequest captured[4])
+        Assert.Contains("first question", inputTextFromResponseRequest captured[2])
+        Assert.Contains("second question", inputTextFromResponseRequest captured[2])
         Assert.Contains(logs, fun log -> log.Contains("previous_response_id was not found"))
     }
 
@@ -1215,17 +1265,15 @@ let ``qa session websocket dispatches model requested tools`` () =
                 captured.Add request
 
                 match captured.Count with
-                | 1 -> [ responsesCreatedEvent "resp_bootstrap_tools" ]
-                | 2 -> [ responsesFunctionCallEvent "resp_tool_call" "call_inventory" "source_inventory" "{}" ]
+                | 1 -> [ responsesFunctionCallEvent "resp_tool_call" "call_inventory" "source_inventory" "{}" ]
                 | _ -> [ responsesCompletedEvent "resp_tool_final" "final answer from tool" ])
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport }
+                contextProviders = [ FakeContextProvider(source) ] }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1236,8 +1284,9 @@ let ``qa session websocket dispatches model requested tools`` () =
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("final answer from tool", answer.answer)
-        Assert.Equal(3, captured.Count)
-        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(Some true, captured[0].generate)
         Assert.Contains("source_inventory", responseToolNames captured[0])
         Assert.Contains("selected_source_search", responseToolNames captured[0])
 
@@ -1249,24 +1298,243 @@ let ``qa session websocket dispatches model requested tools`` () =
 
             Assert.True((expectedRequired = (tool.parameters.required |> List.sort)))
 
-        Assert.Equal(Some "resp_bootstrap_tools", captured[1].previous_response_id)
+        Assert.Equal(Some "resp_tool_call", captured[1].previous_response_id)
         Assert.Equal(Some true, captured[1].generate)
         Assert.Contains("source_inventory", responseToolNames captured[1])
         Assert.Contains("selected_source_search", responseToolNames captured[1])
-        Assert.Single(captured[1].input) |> ignore
 
-        Assert.Equal(Some "resp_tool_call", captured[2].previous_response_id)
-        Assert.Equal(Some true, captured[2].generate)
-        Assert.Contains("source_inventory", responseToolNames captured[2])
-        Assert.Contains("selected_source_search", responseToolNames captured[2])
-
-        let output = Assert.Single(functionOutputsFromResponseRequest captured[2])
+        let output = Assert.Single(functionOutputsFromResponseRequest captured[1])
         Assert.Equal("call_inventory", output.call_id)
         Assert.Contains("Fake Context inventory.", output.output)
 
         let observation = Assert.Single(answer.toolObservations)
         Assert.Equal("source_inventory", observation.toolName)
         Assert.Contains("Fake Context inventory.", observation.content)
+    }
+
+[<Fact>]
+let ``qa session websocket sends outputs for overflow tool calls`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-many-tools"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match captured.Count with
+                | 1 ->
+                    [ responsesFunctionCallEvents
+                          "resp_many_tools_call"
+                          [ for index in 1..10 -> $"call_inventory_{index}", "source_inventory", "{}" ] ]
+                | _ -> [ responsesCompletedEvent "resp_many_tools_final" "final answer after many tools" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Use many tools."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("final answer after many tools", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(8, answer.toolObservations.Length)
+
+        let outputs = functionOutputsFromResponseRequest captured[1]
+        Assert.Equal(10, outputs.Length)
+        Assert.Equal<string list>([ for index in 1..10 -> $"call_inventory_{index}" ], outputs |> List.map _.call_id)
+
+        let skippedOutputs = outputs |> List.skip 8
+        Assert.All(skippedOutputs, fun output -> Assert.Contains("more than 8 tool calls", output.output))
+        Assert.Contains(logs, fun log -> log.Contains("more than 8 tool calls"))
+    }
+
+[<Fact>]
+let ``qa session websocket forces no-tool final answer after tool round budget`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-tool-budget"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                let inputText = inputTextFromResponseRequest request
+
+                if inputText.Contains("second question", StringComparison.OrdinalIgnoreCase) then
+                    [ responsesCompletedEvent "resp_after_budget" "second answer after tool budget" ]
+                elif request.tool_choice = Some FsResponses.ToolChoice.None then
+                    [ responsesCompletedEvent "resp_tool_budget_final" "final answer after tool budget" ]
+                else
+                    [ responsesFunctionCallEvent
+                          $"resp_tool_budget_{captured.Count}"
+                          $"call_inventory_{captured.Count}"
+                          "source_inventory"
+                          "{}" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Keep checking tools forever?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("final answer after tool budget", answer.answer)
+        Assert.DoesNotContain("stopping extra searches", answer.answer)
+        Assert.Equal(4, captured.Count)
+        Assert.Equal(3, answer.toolObservations.Length)
+
+        Assert.Equal(Some "resp_tool_budget_2", captured[2].previous_response_id)
+        Assert.Equal(Some true, captured[2].generate)
+
+        Assert.Equal(Some "resp_tool_budget_3", captured[3].previous_response_id)
+        Assert.Equal(Some true, captured[3].generate)
+        Assert.Equal(Some FsResponses.ToolChoice.None, captured[3].tool_choice)
+        Assert.Empty(responseToolNames captured[3])
+
+        let finalOutput = Assert.Single(functionOutputsFromResponseRequest captured[3])
+        Assert.Equal("call_inventory_3", finalOutput.call_id)
+        Assert.Contains("Fake Context inventory.", finalOutput.output)
+        Assert.Contains(logs, fun log -> log.Contains("no-tool answer synthesis"))
+
+        let secondRequest =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "second question"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! secondAnswer = session.AnswerAsync(secondRequest, CancellationToken.None)
+
+        Assert.Equal("second answer after tool budget", secondAnswer.answer)
+        Assert.Equal(5, captured.Count)
+        Assert.Equal(Some "resp_tool_budget_final", captured[4].previous_response_id)
+        Assert.DoesNotContain("Keep checking tools forever?", inputTextFromResponseRequest captured[4])
+        Assert.Contains("second question", inputTextFromResponseRequest captured[4])
+    }
+
+[<Fact>]
+let ``qa session websocket uses configured tool call loop limit`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-tool-loop-limit"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                if request.tool_choice = Some FsResponses.ToolChoice.None then
+                    [ responsesCompletedEvent "resp_tool_loop_final" "final answer after one tool round" ]
+                else
+                    [ responsesFunctionCallEvent "resp_tool_loop_call" "call_inventory" "source_inventory" "{}" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerToolCallLoopLimit = 1 }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Use the tool once."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("final answer after one tool round", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(Some true, captured[0].generate)
+        Assert.Equal(Some "resp_tool_loop_call", captured[1].previous_response_id)
+        Assert.Equal(Some FsResponses.ToolChoice.None, captured[1].tool_choice)
+        Assert.Empty(responseToolNames captured[1])
+
+        let finalOutput = Assert.Single(functionOutputsFromResponseRequest captured[1])
+        Assert.Equal("call_inventory", finalOutput.call_id)
+        Assert.Contains("Fake Context inventory.", finalOutput.output)
+    }
+
+[<Fact>]
+let ``qa session websocket logs OpenAI compaction output items`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-heavy-chain"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                [ responsesCompletedEventWithCompaction
+                      "resp_heavy_answer"
+                      "short socket answer"
+                      "cmp_123"
+                      "encrypted-compaction" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("short socket answer", answer.answer)
+
+        let answerRequest = Assert.Single(captured)
+        Assert.Equal(Some true, answerRequest.generate)
+        Assert.True([ 200000 ] = responseContextManagementThresholds answerRequest)
+
+        Assert.Contains(
+            logs,
+            fun log ->
+                log.Contains("OpenAI server-side answer compaction applied", StringComparison.OrdinalIgnoreCase)
+                && log.Contains("cmp_123", StringComparison.OrdinalIgnoreCase)
+        )
     }
 
 [<Fact>]
@@ -1286,20 +1554,18 @@ let ``qa session websocket hides transient empty response diagnostics when retry
                 callNumber <- callNumber + 1
 
                 match callNumber with
-                | 1 -> [ responsesCreatedEvent "resp_bootstrap_empty" ]
-                | 2 -> [ responsesCompletedEmptyEvent "resp_empty" ]
+                | 1 -> [ responsesCompletedEmptyEvent "resp_empty" ]
                 | _ -> [ responsesCompletedEvent "resp_retry" "retry socket answer" ])
 
         let logs = ResizeArray<string>()
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                answerTransport = Some transport
                 report = fun msg -> logs.Add msg }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1310,12 +1576,11 @@ let ``qa session websocket hides transient empty response diagnostics when retry
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("retry socket answer", answer.answer)
-        Assert.Equal(3, captured.Count)
-        Assert.Equal(Some false, captured[0].generate)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(Some true, captured[0].generate)
         Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(Some true, captured[2].generate)
-        Assert.Equal(Some 2500, captured[1].max_output_tokens)
-        Assert.Equal(Some 5000, captured[2].max_output_tokens)
+        Assert.Equal(Some 2500, captured[0].max_output_tokens)
+        Assert.Equal(Some 5000, captured[1].max_output_tokens)
 
         Assert.False(logs |> Seq.exists (fun log -> log.Contains("returned empty text")))
         Assert.False(logs |> Seq.exists (fun log -> log.Contains("retry succeeded")))
@@ -1329,7 +1594,18 @@ let ``qa session retries empty answer response with larger output budget`` () =
               location = "memory://fake"
               enabled = true }
 
-        let client = new SequencedChatClient([ ""; "retry answer" ])
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable callNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                callNumber <- callNumber + 1
+
+                match callNumber with
+                | 1 -> [ responsesCompletedEmptyEvent "resp_retry_empty" ]
+                | _ -> [ responsesCompletedEvent "resp_retry_answer" "retry answer" ])
+
         let logs = ResizeArray<string>()
 
         let answerConfig =
@@ -1337,17 +1613,14 @@ let ``qa session retries empty answer response with larger output budget`` () =
                 maxOutputTokens = Some 50 }
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some client }
                 answerModelId = answerConfig.modelId
                 modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 report = fun msg -> logs.Add msg }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1358,11 +1631,10 @@ let ``qa session retries empty answer response with larger output budget`` () =
         let! answer = session.AnswerAsync(request, CancellationToken.None)
 
         Assert.Equal("retry answer", answer.answer)
-        Assert.Equal(2, client.Calls.Length)
-        Assert.Equal(50, client.Calls.Head.Value)
-        Assert.True(client.Calls[1].Value >= 1200)
-        Assert.Contains(logs, fun log -> log.Contains("Answer model returned empty text"))
-        Assert.Contains(logs, fun log -> log.Contains("Answer model retry succeeded"))
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(Some 50, captured[0].max_output_tokens)
+        Assert.True(captured[1].max_output_tokens.Value >= 1200)
+        Assert.False(logs |> Seq.exists (fun log -> log.Contains("returned empty text")))
     }
 
 [<Fact>]
@@ -1373,7 +1645,17 @@ let ``qa session reports token limit when answer response is length finished`` (
               location = "memory://fake"
               enabled = true }
 
-        let client = new LengthFinishChatClient("partial answer")
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let mutable callNumber = 0
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                callNumber <- callNumber + 1
+
+                match callNumber with
+                | _ -> [ responsesTokenLimitEvent "resp_token_limit" "partial answer" ])
+
         let logs = ResizeArray<string>()
 
         let answerConfig =
@@ -1381,17 +1663,14 @@ let ``qa session reports token limit when answer response is length finished`` (
                 maxOutputTokens = Some 321 }
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 contextProviders = [ FakeContextProvider(source) ]
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some client }
                 answerModelId = answerConfig.modelId
                 modelRoles = PlugInDefinition.defaultModels |> Map.add Answer answerConfig
                 report = fun msg -> logs.Add msg }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1403,8 +1682,8 @@ let ``qa session reports token limit when answer response is length finished`` (
 
         Assert.Contains("max answer token limit of 321", answer.answer)
         Assert.Contains("Disconnect, open Settings, increase Max Answer Tokens", answer.answer)
-        Assert.Equal(321, client.MaxOutputTokens.Value)
-        Assert.Contains(logs, fun log -> log.Contains("Answer model hit output token limit"))
+        Assert.Equal(Some 321, captured[0].max_output_tokens)
+        Assert.Contains(logs, fun log -> log.Contains("hit output token limit"))
     }
 
 [<Fact>]
@@ -2319,10 +2598,14 @@ let ``qa session composes injected context providers`` () =
         let storageRoot = tempStorageRoot ()
 
         let options =
-            { QaSessionOptions.create storageRoot with
+            { testQaSessionOptions storageRoot with
                 autoWriteback = false }
 
-        let session = new QaSession(options)
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                [ responsesCompletedEvent "resp_compose_answer" "composed answer" ])
+
+        let session = new QaSession(options, transport)
         let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
 
         let request =
@@ -2364,13 +2647,16 @@ let ``qa session does not call llm query expansion by default`` () =
             )
 
         let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
+            { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
                 clients =
                     { QaModelClients.none with
                         queryExpansion = Some expansion } }
 
-        use session = new QaSession(options)
+        let transport =
+            websocketAnswerTransport (fun request _ -> [ responsesCompletedEvent "resp_no_expansion_answer" "BLUE-42" ])
+
+        use session = new QaSession(options, transport)
 
         let source =
             { kind = Json
@@ -2389,6 +2675,81 @@ let ``qa session does not call llm query expansion by default`` () =
 
         Assert.Equal(0, expansion.Count)
         Assert.Contains("BLUE-42", answer.context.Head.text)
+    }
+
+[<Fact>]
+let ``qa session sends internal document index context to responses answer prompt`` () =
+    task {
+        let storageRoot = tempStorageRoot ()
+        Directory.CreateDirectory storageRoot |> ignore
+
+        let sourcePath = Path.Combine(storageRoot, "indexed-policy.json")
+
+        File.WriteAllText(
+            sourcePath,
+            JsonSerializer.Serialize(
+                {| documents =
+                    [ {| id = "warranty"
+                         title = "Cobalt Sensor Warranty"
+                         text =
+                          "The indexed guide says the cobalt sensor warranty lasts ninety days and requires a serial number for replacement claims."
+                         keywords = [] |}
+                      {| id = "snacks"
+                         title = "Office Snacks"
+                         text = "The office snack policy lists apples, tea, and weekly cleaning."
+                         keywords = [] |} ] |}
+            )
+        )
+
+        let source =
+            { kind = Json
+              location = sourcePath
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                [ responsesCompletedEvent "resp_index_answer" "The warranty lasts ninety days." ])
+
+        let options =
+            { testQaSessionOptions storageRoot with
+                autoWriteback = false }
+
+        use session = new QaSession(options, transport)
+
+        let! errors = session.LoadSourcesAsync(InternalDocumentIndex, [ source ], CancellationToken.None)
+        Assert.Empty errors
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "How long is the cobalt sensor warranty?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("The warranty lasts ninety days.", answer.answer)
+        Assert.NotEmpty answer.context
+        Assert.Contains("cobalt sensor warranty lasts ninety days", answer.context.Head.text)
+        Assert.DoesNotContain(answer.context, fun chunk -> chunk.text.Contains("office snack policy"))
+        Assert.Equal<KnowledgeSource list>([ source ], answer.inventory)
+
+        Assert.Single(captured) |> ignore
+        Assert.Equal(Some true, captured[0].generate)
+        Assert.Equal(Some true, captured[0].store)
+        Assert.Equal(None, captured[0].previous_response_id)
+
+        let answerPrompt = inputTextFromResponseRequest captured[0]
+        Assert.Contains("User question:", answerPrompt)
+        Assert.Contains("How long is the cobalt sensor warranty?", answerPrompt)
+        Assert.Contains("Selected source inventory:", answerPrompt)
+        Assert.Contains("Matched source context:", answerPrompt)
+        Assert.Contains("Cobalt Sensor Warranty", answerPrompt)
+        Assert.Contains("cobalt sensor warranty lasts ninety days", answerPrompt)
+        Assert.DoesNotContain("office snack policy", answerPrompt)
     }
 
 [<Fact>]
@@ -2949,16 +3310,14 @@ let ``qa session forget turn retracts durable memory and skips writeback`` () =
                 4
                 "This acknowledgement is intentionally long enough to become an episode if forget turns were allowed to write back. "
 
-        let answerClient = new RecordingChatClient(longAnswer)
+        let transport =
+            websocketAnswerTransport (fun request _ -> [ responsesCompletedEvent "resp_forget_answer" longAnswer ])
 
         let options =
-            { QaSessionOptions.create storageRoot with
-                memoryStorePath = Some memoryPath
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some answerClient } }
+            { testQaSessionOptions storageRoot with
+                memoryStorePath = Some memoryPath }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         let request text =
             { turnId = Guid.NewGuid().ToString("N")
@@ -3005,17 +3364,20 @@ let ``qa session durable memory disabled skips recall writeback and memory tool`
 
         seedDurableMemory memoryPath remember "Noted." |> ignore
 
-        let answerClient = new RecordingChatClient("No memory used.")
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                [ responsesCompletedEvent $"resp_disabled_answer_{captured.Count}" "No memory used." ])
 
         let options =
-            { QaSessionOptions.create storageRoot with
+            { testQaSessionOptions storageRoot with
                 memoryStorePath = Some memoryPath
-                enableDurableMemory = false
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some answerClient } }
+                enableDurableMemory = false }
 
-        use session = new QaSession(options)
+        use session = new QaSession(options, transport)
 
         Assert.DoesNotContain(session.ToolCatalog.tools, fun tool -> tool.Name = "durable_memory_search")
 
@@ -3027,7 +3389,12 @@ let ``qa session durable memory disabled skips recall writeback and memory tool`
 
         let! _ = session.AnswerAsync(request, CancellationToken.None)
 
-        let promptText = answerClient.Messages |> List.map _.Text |> String.concat "\n"
+        let promptText =
+            captured
+            |> Seq.filter (fun request -> request.generate = Some true)
+            |> Seq.map inputTextFromResponseRequest
+            |> String.concat "\n"
+
         Assert.DoesNotContain("cobalt", promptText, StringComparison.OrdinalIgnoreCase)
 
         let rememberWhileDisabled =
@@ -3176,226 +3543,6 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
     Assert.Contains(oldJudgement.id, droppedIds)
     Assert.Contains(oldCandidate.id, droppedIds)
     Assert.Contains(oldBlackboardSearch.id, droppedIds)
-
-[<Fact>]
-let ``qa session prunes old blackboard records into model summary and keeps recent turns`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "fake://blackboard-prune-session"
-              enabled = true }
-
-        let provider = FakeContextProvider source :> IQaContextProvider
-
-        let answerClient =
-            new RoutingChatClient(
-                "ok",
-                "Compacted alpha older source summary with alpha older source topic and retained source finding."
-            )
-
-        let logs = ResizeArray<string>()
-        let storageRoot = tempStorageRoot ()
-
-        let options =
-            { QaSessionOptions.create storageRoot with
-                autoWriteback = false
-                report = logs.Add
-                clients =
-                    { QaModelClients.none with
-                        answerGenerator = Some answerClient }
-                blackboardPruning =
-                    { BlackboardPruningOptions.defaults with
-                        triggerChars = 1
-                        targetChars = 1
-                        preserveRecentTurns = 2
-                        summaryMaxOutputTokens = 200 } }
-
-        use session = new QaSession(options)
-        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
-        Assert.Empty errors
-
-        let request question =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = question
-              realtimeJudgement = None
-              deadline = None }
-
-        let! _ = session.AnswerAsync(request "alpha older source topic", CancellationToken.None)
-        let! _ = session.AnswerAsync(request "bravo middle source topic", CancellationToken.None)
-        let! _ = session.AnswerAsync(request "gamma recent source topic", CancellationToken.None)
-
-        do!
-            waitForAsync "Expected blackboard pruning to apply." (fun () ->
-                logs
-                |> Seq.exists (fun log ->
-                    log.Contains("Blackboard pruning applied", StringComparison.OrdinalIgnoreCase)))
-
-        let! oldObservation = invokeSessionTool session "blackboard_search" [ "query", "alpha older source topic" ]
-
-        Assert.Contains("Compacted alpha older source summary", oldObservation, StringComparison.OrdinalIgnoreCase)
-
-        let! recentObservation = invokeSessionTool session "blackboard_search" [ "query", "gamma recent source topic" ]
-
-        Assert.Contains(
-            "Fake context for gamma recent source topic",
-            recentObservation,
-            StringComparison.OrdinalIgnoreCase
-        )
-    }
-
-[<Fact>]
-let ``qa session blackboard pruning without model summarizer falls back to hard cap`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "fake://blackboard-no-summarizer"
-              enabled = true }
-
-        let provider = FakeContextProvider source :> IQaContextProvider
-        let logs = ResizeArray<string>()
-        let storageRoot = tempStorageRoot ()
-
-        let options =
-            { QaSessionOptions.create storageRoot with
-                autoWriteback = false
-                report = logs.Add
-                blackboardPruning =
-                    { BlackboardPruningOptions.defaults with
-                        triggerChars = 1
-                        targetChars = 1
-                        preserveRecentTurns = 1 } }
-
-        use session = new QaSession(options)
-        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
-        Assert.Empty errors
-
-        let request question =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = question
-              realtimeJudgement = None
-              deadline = None }
-
-        let! _ = session.AnswerAsync(request "alpha no summarizer old topic", CancellationToken.None)
-        let! _ = session.AnswerAsync(request "bravo no summarizer newer topic", CancellationToken.None)
-
-        Assert.Contains(
-            logs,
-            fun log -> log.Contains("no model summarizer is configured", StringComparison.OrdinalIgnoreCase)
-        )
-
-        let! observation = invokeSessionTool session "blackboard_search" [ "query", "alpha no summarizer old topic" ]
-
-        Assert.Contains("alpha no summarizer old topic", observation, StringComparison.OrdinalIgnoreCase)
-        Assert.DoesNotContain("Compacted blackboard summary", observation, StringComparison.OrdinalIgnoreCase)
-    }
-
-[<Fact>]
-let ``qa session delayed blackboard pruning keeps newer turns`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "fake://blackboard-delayed-prune"
-              enabled = true }
-
-        let provider = FakeContextProvider source :> IQaContextProvider
-
-        let summaryStarted =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        let releaseSummary =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        let outputGate = obj ()
-        let mutable blackboardOutput = ""
-        let mutable answerNumber = 0
-        let logs = ResizeArray<string>()
-
-        let transport =
-            QaAnswerTransport.customResponsesWebSocket (fun request cancellationToken ->
-                task {
-                    let inputText = inputTextFromResponseRequest request
-
-                    if
-                        request.instructions
-                        |> Option.exists (fun text ->
-                            text.Contains("Summarize pruned QA blackboard", StringComparison.OrdinalIgnoreCase))
-                    then
-                        summaryStarted.TrySetResult() |> ignore
-                        do! releaseSummary.Task.WaitAsync(cancellationToken)
-                        return [ responsesCompletedEvent "resp_blackboard_summary" "Delayed alpha summary." ]
-                    elif
-                        request.generate = Some false
-                        && inputText.Contains("Warm up the answer conversation", StringComparison.OrdinalIgnoreCase)
-                    then
-                        return [ responsesCreatedEvent "resp_bootstrap" ]
-                    elif
-                        request.input
-                        |> List.exists (function
-                            | FsResponses.IOitem.Function_call_output _ -> true
-                            | _ -> false)
-                    then
-                        let output =
-                            functionOutputsFromResponseRequest request
-                            |> List.map _.output
-                            |> String.concat "\n"
-
-                        lock outputGate (fun () -> blackboardOutput <- output)
-                        return [ responsesCompletedEvent "resp_tool_answer" "tool answer" ]
-                    elif inputText.Contains("lookup gamma newest topic", StringComparison.OrdinalIgnoreCase) then
-                        return
-                            [ responsesFunctionCallEvent
-                                  "resp_tool_call"
-                                  "call_blackboard"
-                                  "blackboard_search"
-                                  """{"query":"gamma newest topic","max_results":"8"}""" ]
-                    else
-                        answerNumber <- answerNumber + 1
-
-                        return
-                            [ responsesCompletedEvent $"resp_answer_{answerNumber}" $"socket answer {answerNumber}" ]
-                })
-
-        let options =
-            { QaSessionOptions.create (tempStorageRoot ()) with
-                autoWriteback = false
-                contextProviders = [ provider ]
-                answerTransport = Some transport
-                report = logs.Add
-                blackboardPruning =
-                    { BlackboardPruningOptions.defaults with
-                        triggerChars = 1
-                        targetChars = 1
-                        preserveRecentTurns = 1
-                        summaryMaxOutputTokens = 200 } }
-
-        use session = new QaSession(options)
-
-        let request question =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = question
-              realtimeJudgement = None
-              deadline = None }
-
-        let! _ = session.AnswerAsync(request "alpha delayed old topic", CancellationToken.None)
-        let! _ = session.AnswerAsync(request "beta delayed middle topic", CancellationToken.None)
-
-        do! waitForAsync "Expected delayed blackboard pruning to start." (fun () -> summaryStarted.Task.IsCompleted)
-
-        let! _ = session.AnswerAsync(request "gamma newest topic", CancellationToken.None)
-        releaseSummary.TrySetResult() |> ignore
-
-        do!
-            waitForAsync "Expected delayed blackboard pruning to apply." (fun () ->
-                logs
-                |> Seq.exists (fun log ->
-                    log.Contains("Blackboard pruning applied", StringComparison.OrdinalIgnoreCase)))
-
-        let! _ = session.AnswerAsync(request "lookup gamma newest topic with blackboard", CancellationToken.None)
-
-        let output = lock outputGate (fun () -> blackboardOutput)
-        Assert.Contains("gamma newest topic", output, StringComparison.OrdinalIgnoreCase)
-        Assert.Contains("Fake context for gamma newest topic", output, StringComparison.OrdinalIgnoreCase)
-    }
 
 type TestToHost =
     | ShowThing of string
@@ -4089,7 +4236,8 @@ let private demoVoiceContextForStorage storageRoot : VoiceOrchestrationContext =
 
 let private demoRuntimeSettings values =
     let settings = Speak2Docs.RuntimeSettings.empty ()
-    Speak2Docs.RuntimeSettings.replace settings (Map.ofList values)
+    let defaults = [ Speak2Docs.RuntimeSettings.OpenAiKey, "test-api-key" ]
+    Speak2Docs.RuntimeSettings.replace settings (Map.ofList (defaults @ values))
     settings
 
 let private demoOrchestration settings =
@@ -4341,9 +4489,12 @@ let ``demo orchestration sees replaced runtime settings snapshots`` () =
     Assert.True second.useLexicalFilter
 
 [<Fact>]
-let ``runtime settings apply answer max output tokens to answer model`` () =
+let ``runtime settings apply answer model and loop settings`` () =
     let settings =
-        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AnswerMaxOutputTokens, "2500" ]
+        demoRuntimeSettings
+            [ Speak2Docs.RuntimeSettings.AnswerMaxOutputTokens, "2500"
+              Speak2Docs.RuntimeSettings.AnswerReasoningEffort, "high"
+              Speak2Docs.RuntimeSettings.AnswerToolCallLoopLimit, "5" ]
 
     let plugIn =
         FsVoice.Ctx.PlugInDefinition.generic
@@ -4353,4 +4504,24 @@ let ``runtime settings apply answer max output tokens to answer model`` () =
 
     let answer = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer plugIn
 
+    let flags =
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
+
     Assert.Equal(2500, answer.maxOutputTokens |> Option.defaultValue 0)
+    Assert.Equal(Some "high", answer.reasoningEffort)
+    Assert.Equal(5, flags.answerToolCallLoopLimit)
+
+[<Fact>]
+let ``runtime settings default answer reasoning effort is low`` () =
+    let settings = demoRuntimeSettings []
+
+    let plugIn =
+        FsVoice.Ctx.PlugInDefinition.generic
+        |> Speak2Docs.RuntimeSettings.composePlugIn
+            Speak2Docs.InternalDocumentIndex
+            (Speak2Docs.RuntimeSettings.snapshot settings)
+
+    let answer = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer plugIn
+
+    Assert.Equal(Some "low", answer.reasoningEffort)

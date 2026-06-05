@@ -1,19 +1,20 @@
 namespace FsResponses
 
 open System
-open System.IO
 open System.Net.WebSockets
-open System.Text
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Threading
+open System.Threading.Tasks.Dataflow
 open System.Threading.Tasks
+open FSharp.Control.Websockets.TPL
 
 [<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
 type WebSocketCreateRequest =
     { ``type``: string
       model: string
       input: IOitem list
+      context_management: ResponseContextManagement list option
       instructions: string option
       max_output_tokens: int option
       metadata: Map<string, string> option
@@ -37,6 +38,7 @@ type WebSocketCreateRequest =
         { ``type`` = "response.create"
           model = Models.gpt_5
           input = []
+          context_management = None
           instructions = None
           max_output_tokens = None
           metadata = None
@@ -46,7 +48,7 @@ type WebSocketCreateRequest =
           prompt_cache_retention = None
           reasoning = None
           service_tier = None
-          store = Some false
+          store = Some true
           temperature = None
           text = None
           tool_choice = Some ToolChoice.Auto
@@ -60,6 +62,7 @@ type WebSocketCreateRequest =
         { WebSocketCreateRequest.Default with
             model = req.model
             input = req.input
+            context_management = req.context_management
             instructions = req.instructions
             max_output_tokens = req.max_output_tokens
             metadata = req.metadata
@@ -725,6 +728,8 @@ module ResponseWebSocketConfig =
 
 type ResponseWebSocket =
     { socket: ClientWebSocket
+      threadSafeSocket: ThreadSafeWebSocket.ThreadSafeWebSocket
+      transactionGate: SemaphoreSlim
       config: ResponseWebSocketConfig }
 
 type WebSocketClosed =
@@ -750,20 +755,42 @@ module ResponsesWebSocket =
             let socket = new ClientWebSocket()
             applyHeaders config socket
             do! socket.ConnectAsync(config.endpoint, cancellationToken)
-            return { socket = socket; config = config }
+
+            let threadSafeSocket =
+                ThreadSafeWebSocket.createFromWebSocket (DataflowBlockOptions()) socket
+
+            return
+                { socket = socket
+                  threadSafeSocket = threadSafeSocket
+                  transactionGate = new SemaphoreSlim(1, 1)
+                  config = config }
         }
 
-    let dispose connection = connection.socket.Dispose()
+    let dispose connection =
+        (connection.threadSafeSocket :> IDisposable).Dispose()
+        connection.transactionGate.Dispose()
 
     let close connection (cancellationToken: CancellationToken) =
         task {
-            if connection.socket.State = WebSocketState.Open then
-                do!
-                    connection.socket.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure,
-                        "closed by client",
+            if
+                connection.socket.State = WebSocketState.Open
+                || connection.socket.State = WebSocketState.CloseReceived
+            then
+                let! result =
+                    ThreadSafeWebSocket.close
+                        connection.threadSafeSocket
+                        WebSocketCloseStatus.NormalClosure
+                        "closed by client"
                         cancellationToken
-                    )
+
+                match result with
+                | Ok() -> ()
+                | Result.Error error ->
+                    if
+                        connection.socket.State = WebSocketState.Open
+                        || connection.socket.State = WebSocketState.CloseReceived
+                    then
+                        error.Throw()
         }
 
     let serializeCreate request =
@@ -774,8 +801,11 @@ module ResponsesWebSocket =
     let sendEvent connection event (cancellationToken: CancellationToken) =
         task {
             let json = serializeEvent event
-            let bytes = Encoding.UTF8.GetBytes json
-            do! connection.socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, cancellationToken)
+            let! result = ThreadSafeWebSocket.sendMessageAsUTF8 connection.threadSafeSocket cancellationToken json
+
+            match result with
+            | Ok() -> ()
+            | Result.Error error -> error.Throw()
         }
 
     let sendCreate connection request (cancellationToken: CancellationToken) =
@@ -783,28 +813,18 @@ module ResponsesWebSocket =
 
     let readText connection (cancellationToken: CancellationToken) =
         task {
-            let buffer = Array.zeroCreate<byte> connection.config.receiveBufferSize
-            use stream = new MemoryStream()
-            let mutable finished = false
-            let mutable closed = None
+            let! result = ThreadSafeWebSocket.receiveMessageAsUTF8 connection.threadSafeSocket cancellationToken
 
-            while not finished do
-                let! result = connection.socket.ReceiveAsync(ArraySegment<byte> buffer, cancellationToken)
-
-                if result.MessageType = WebSocketMessageType.Close then
-                    closed <-
-                        Some
-                            { status = result.CloseStatus |> Option.ofNullable
-                              description = result.CloseStatusDescription |> Option.ofObj }
-
-                    finished <- true
-                else
-                    stream.Write(buffer, 0, result.Count)
-                    finished <- result.EndOfMessage
-
-            match closed with
-            | Some close -> return Closed close
-            | None -> return TextMessage(Encoding.UTF8.GetString(stream.ToArray()))
+            match result with
+            | Ok(WebSocket.ReceiveUTF8Result.String text) -> return TextMessage text
+            | Ok(WebSocket.ReceiveUTF8Result.Closed(status, description)) ->
+                return
+                    Closed
+                        { status = Some status
+                          description = description |> Option.ofObj }
+            | Result.Error error ->
+                error.Throw()
+                return Unchecked.defaultof<WebSocketRead>
         }
 
     let readEvent connection cancellationToken =
@@ -833,10 +853,15 @@ module ResponsesWebSocket =
             return events |> Seq.toList
         }
 
-    let createAndCollect connection request cancellationToken =
+    let createAndCollect connection request (cancellationToken: CancellationToken) =
         task {
-            do! sendCreate connection request cancellationToken
-            return! readUntilTerminal connection cancellationToken
+            do! connection.transactionGate.WaitAsync(cancellationToken)
+
+            try
+                do! sendCreate connection request cancellationToken
+                return! readUntilTerminal connection cancellationToken
+            finally
+                connection.transactionGate.Release() |> ignore
         }
 
     let createWithNewConnection config request cancellationToken =

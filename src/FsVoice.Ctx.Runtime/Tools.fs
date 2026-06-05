@@ -102,36 +102,13 @@ type private DurableMemorySearchTool(host: IQaToolHost) =
                 return QaToolResult.text content
             }
 
-type private BlackboardSearchTool(host: IQaToolHost) =
-    interface IQaTool with
-        member _.PluginName = "FsVoiceTools"
-        member _.Name = "blackboard_search"
-
-        member _.Description =
-            "Searches the recent QA blackboard for short-lived turn context, including previous tool observations, source evidence, memory evidence, and final answers. "
-            + "Use it for follow-ups like 'that result', 'the previous lookup', or 'what did you find earlier' within the current session."
-
-        member _.Parameters =
-            [ { name = "query"
-                description =
-                  "Word, phrase, or standalone follow-up query to search for in recent session observations."
-                required = true } ]
-
-        member _.InvokeAsync(args, cancellationToken) =
-            task {
-                let query = ToolArguments.tryString "query" args |> Option.defaultValue ""
-                let! content = host.SearchBlackboardAsync(query, cancellationToken)
-                return QaToolResult.text content
-            }
-
 module QaToolLoader =
     let contractVersion = 1
 
     let builtInTools host =
         [ SourceSearchTool(host) :> IQaTool
           SourceInventoryTool(host)
-          DurableMemorySearchTool(host)
-          BlackboardSearchTool(host) ]
+          DurableMemorySearchTool(host) ]
 
     let private providerTypes (assembly: Assembly) =
         try

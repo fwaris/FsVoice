@@ -42,6 +42,23 @@ module SettingsView =
         |> Map.tryFind role
         |> Option.defaultValue (FsVoice.Ctx.PlugInDefinition.model role model.activePlugIn).modelId
 
+    let private reasoningEffortOptions = [ "Low"; "Medium"; "High" ]
+
+    let private reasoningEffortValues = [ "low"; "medium"; "high" ]
+
+    let private reasoningEffortIndex value =
+        let normalized = Settings.normalizeAnswerReasoningEffort value
+
+        reasoningEffortValues
+        |> List.tryFindIndex ((=) normalized)
+        |> Option.defaultValue 0
+
+    let private reasoningEffortChanged index =
+        reasoningEffortValues
+        |> List.tryItem index
+        |> Option.defaultValue ""
+        |> AnswerReasoningEffortChanged
+
     let private facetValue model (field: FsVoice.Ctx.PlugInSettingsField) =
         model.plugInSettings
         |> Map.tryFind field.key
@@ -134,11 +151,13 @@ module SettingsView =
 
     let private modelsSection model canEdit =
         let roles = FsVoice.Ctx.ModelRole.all
-        let tokenRow = roles.Length + 1
+        let reasoningRow = roles.Length + 1
+        let tokenRow = roles.Length + 2
+        let toolLoopRow = roles.Length + 3
 
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows tokenRow) {
+            ((Grid(columns, sectionRows toolLoopRow) {
                 sectionTitle "Models"
 
                 for row, role in roles |> List.indexed do
@@ -154,12 +173,32 @@ module SettingsView =
                         .gridColumnSpan(2)
                         .margin (2.)
 
+                ViewControls.formLabel "Reasoning Level" reasoningRow
+
+                Picker(reasoningEffortOptions, reasoningEffortIndex model.answerReasoningEffort, reasoningEffortChanged)
+                    .title("Reasoning level")
+                    .isEnabled(canEdit)
+                    .gridRow(reasoningRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
                 ViewControls.formLabel "Max Answer Tokens" tokenRow
 
                 Entry(model.answerMaxOutputTokens, AnswerMaxOutputTokensChanged)
                     .placeholder("2500")
                     .isEnabled(canEdit)
                     .gridRow(tokenRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Tool Rounds" toolLoopRow
+
+                Entry(model.answerToolCallLoopLimit, AnswerToolCallLoopLimitChanged)
+                    .placeholder("3")
+                    .isEnabled(canEdit)
+                    .gridRow(toolLoopRow)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)

@@ -39,7 +39,7 @@ Key benefits include:
 
 - **High cache hit rate**: Since *Responses* encourages append-only context, the chance of using cached tokens becomes much higher. The use of cached tokens significantly reduces not only latency but also cost. Cached tokens are about 1/10th the cost of regular tokens. A cache strategy should be a significant component of contemporary AI systems.
 
-To reduce context bloat and the potential dilution of recent information in long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
+To reduce context bloat and the potential dilution of recent information in long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. If the model needs more detail after compaction, it calls the available retrieval or memory tools again for the latest turn.
 
 ## 2. FsVoice Deployment Topologies
 The FsVoice platform affords several types of deployment topologies, from mobile and desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:

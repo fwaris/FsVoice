@@ -81,6 +81,8 @@ and Model =
       logExpansions: bool
       logChunks: bool
       answerMaxOutputTokens: string
+      answerReasoningEffort: string
+      answerToolCallLoopLimit: string
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
@@ -137,6 +139,8 @@ and Msg =
     | ThemeChanged of AppTheme
     | EventError of exn
     | AnswerMaxOutputTokensChanged of string
+    | AnswerReasoningEffortChanged of string
+    | AnswerToolCallLoopLimitChanged of string
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool

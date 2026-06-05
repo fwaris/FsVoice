@@ -288,6 +288,11 @@ type McpCall =
       output: string option
       error: string option }
 
+[<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
+type CompactionItem =
+    { id: string option
+      encrypted_content: string }
+
 [<RequireQualifiedAccess>]
 type IOitem =
     | [<JsonName "message">] Message of Message
@@ -317,6 +322,7 @@ type IOitem =
     | [<JsonName "reasoning">] Reasoning of ReasoningOutput
     | [<JsonName "computer_call">] Computer_call of ComputerCall
     | [<JsonName "computer_call_output">] Computer_call_output of ComputerCallOutput
+    | [<JsonName "compaction">] Compaction of CompactionItem
 
 type Usage =
     { input_tokens: int
@@ -332,10 +338,17 @@ type ToolChoice =
     | [<JsonName "auto">] Auto
     | [<JsonName "required">] Required
 
+[<RequireQualifiedAccess>]
+type ResponseContextManagement =
+    | [<JsonName "compaction">] Compaction of {| compact_threshold: int |}
+    // Prevents FSharp.SystemTextJson from unwrapping this tagged request union as a single-case DU.
+    | [<JsonName "unknown">] Unknown of JsonElement
+
 [<JsonFSharpConverter(SkippableOptionFields = SkippableOptionFields.Always)>]
 type Request =
     { model: string
       input: IOitem list
+      context_management: ResponseContextManagement list option
       instructions: string option
       max_output_tokens: int option
       metadata: Map<string, string> option
@@ -356,6 +369,7 @@ type Request =
     static member Default =
         { model = "gpt-4.1"
           input = []
+          context_management = None
           instructions = None
           max_output_tokens = None
           metadata = None
