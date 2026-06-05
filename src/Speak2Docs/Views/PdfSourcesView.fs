@@ -8,6 +8,13 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module PdfSourcesView =
+    type private PdfSourceRow =
+        { document: PdfDocumentSource
+          appTheme: Microsoft.Maui.ApplicationModel.AppTheme
+          processingActive: bool
+          canMutateDocuments: bool
+          canChangeSourceSelection: bool }
+
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
@@ -53,15 +60,17 @@ module PdfSourcesView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private row appTheme processingActive canMutateDocuments canChangeSourceSelection (doc: PdfDocumentSource) =
+    let private row item =
+        let doc = item.document
+
         let deleteIcon =
-            if processingActive then
+            if item.processingActive then
                 Icons.deleteForever
             else
                 Icons.delete
 
         let deleteMessage =
-            if processingActive then
+            if item.processingActive then
                 CancelPdfProcessing
             else
                 DeletePdf doc.id
@@ -75,7 +84,7 @@ module PdfSourcesView =
                 [ Dimension.Absolute 28.; Dimension.Absolute 28. ]
             ) {
                 CheckBox(doc.selected, fun selected -> PdfSelectionChanged(doc.id, selected))
-                    .isEnabled(canChangeSourceSelection && PdfDocuments.canSelect doc)
+                    .isEnabled(item.canChangeSourceSelection && PdfDocuments.canSelect doc)
                     .centerVertical()
                     .gridRowSpan(2)
                     .gridColumn (0)
@@ -89,7 +98,7 @@ module PdfSourcesView =
 
                 Label(PdfDocuments.statusText doc)
                     .font(size = 12.)
-                    .textColor(statusColor appTheme doc)
+                    .textColor(statusColor item.appTheme doc)
                     .lineBreakMode(LineBreakMode.TailTruncation)
                     .centerVertical()
                     .gridColumn(1)
@@ -97,7 +106,7 @@ module PdfSourcesView =
 
                 if doc.status = Failed then
                     (ViewControls.compactIconButton Icons.play (RetryPdfProcessing doc.id))
-                        .isEnabled(canMutateDocuments)
+                        .isEnabled(item.canMutateDocuments)
                         .gridColumn(2)
                         .gridRowSpan (2)
 
@@ -108,13 +117,13 @@ module PdfSourcesView =
                         .gridRowSpan (2)
 
                 (ViewControls.compactDangerIconButton deleteIcon deleteMessage)
-                    .isEnabled(processingActive || canMutateDocuments)
+                    .isEnabled(item.processingActive || item.canMutateDocuments)
                     .gridColumn(3)
                     .gridRowSpan (2)
             })
                 .padding (8.)
         )
-            .stroke(SolidColorBrush(Theme.borderColor appTheme))
+            .stroke(SolidColorBrush(Theme.borderColor item.appTheme))
             .strokeThickness(1.)
             .strokeShape(RoundRectangle(CornerRadius(8.)))
             .margin (0., 0., 0., 6.)
@@ -123,6 +132,15 @@ module PdfSourcesView =
         let canMutateDocuments = canMutateDocuments model
         let canChangeSourceSelection = canChangeSourceSelection model
         let processingActive = model.documentProcessingCancellation.IsSome
+
+        let rows =
+            model.pdfDocuments
+            |> List.map (fun doc ->
+                { document = doc
+                  appTheme = model.appTheme
+                  processingActive = processingActive
+                  canMutateDocuments = canMutateDocuments
+                  canChangeSourceSelection = canChangeSourceSelection })
 
         Border(
             (Grid([ Dimension.Star; Dimension.Absolute 40. ], [ Dimension.Absolute 44.; Dimension.Star ]) {
@@ -137,11 +155,7 @@ module PdfSourcesView =
                 if List.isEmpty model.pdfDocuments then
                     (emptyView model.appTheme).gridColumnSpan(2).gridRow (1)
                 else
-                    (CollectionView
-                        (model.pdfDocuments)
-                        (row model.appTheme processingActive canMutateDocuments canChangeSourceSelection))
-                        .gridColumnSpan(2)
-                        .gridRow (1)
+                    (CollectionView (rows) (row)).gridColumnSpan(2).gridRow (1)
             })
                 .padding (10.)
         )
