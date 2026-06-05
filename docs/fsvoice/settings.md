@@ -4,7 +4,7 @@
 
 Speak2Docs uses your OpenAI API key to connect to OpenAI services for realtime voice interaction, answers, and optional keyword enrichment.
 
-Before sending microphone audio, transcripts, prompts, or selected document passages to OpenAI during a realtime connection, Speak2Docs asks you to acknowledge an OpenAI data notice inside the app. You can choose not to show the notice again before connecting, and you can review or re-enable the notice from Settings.
+Before sending microphone audio, transcripts, prompts, selected document passages, or optional keyword-generation text to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app. You can review or revoke this permission from Settings.
 
 To create a key:
 
@@ -27,6 +27,32 @@ Good API key practices:
 
 Speak2Docs uses separate model roles for realtime voice, transcription, answers, planning, keyword generation, and query expansion. The defaults are selected for the built-in Generic QA plugin, and advanced users can override model ids in Settings.
 
+Model settings are advanced controls. Change them only when you know which OpenAI model id you want each role to use.
+
+- Reasoning Level controls the answer model's reasoning effort. The default is Low.
+- Max Answer Tokens limits the answer response length. The default is 2500, and values are kept between 128 and 32000.
+- Tool Rounds limits how many function-call rounds the answer model can run for one question. The default is 3, and values are kept between 1 and 8.
+
 ## Retrieval
 
 Retrieval settings control how selected documents are searched before the answer model responds. Indexed retrieval uses persisted local indexes when available, with fallback behavior for source matching. Lexical filtering and keyword indexing can improve source targeting for document questions.
+
+- Mode switches between FsColbert with fallback and the internal document index.
+- Lexical Filter is on by default and helps narrow retrieval to likely matching document text.
+- Log Expansions and Log Chunks add retrieval diagnostics to the activity log for troubleshooting.
+
+## PDF Parsing
+
+PDF parsing controls how Speak2Docs extracts text from PDF sources before indexing.
+
+- PDF Parser is Hybrid by default. Legacy parsing is available if a PDF behaves poorly with hybrid parsing.
+- Layout Analysis is on by default when Hybrid parsing is enabled. It can improve document structure handling, but it may make indexing slower.
+- Index Keywords is off by default. When enabled, Speak2Docs can generate extra keywords for indexed chunks to improve matching.
+
+## Activity
+
+The Activity log records important setup, indexing, connection, retrieval, and answer events. The default log level is Informational. Turn on the verbose log level when troubleshooting a connection, retrieval, or answer-generation problem.
+
+## When Settings Are Locked
+
+Some settings are disabled while the app is busy, a realtime connection is active, or a source operation is running. Disconnect or wait for processing to finish before changing model, retrieval, or parsing settings.
