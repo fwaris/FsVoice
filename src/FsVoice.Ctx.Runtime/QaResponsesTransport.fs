@@ -8,13 +8,17 @@ open System.Threading.Tasks
 type internal QaResponsesRequestRunner =
     FsResponses.WebSocketCreateRequest -> CancellationToken -> Task<FsResponses.ResponseStreamEvent list>
 
+type internal QaResponsesPrepareRunner = CancellationToken -> Task<unit>
+
 type internal QaResponsesTransportOverride =
-    { runAnswerRequest: QaResponsesRequestRunner
+    { prepareAnswerConnection: QaResponsesPrepareRunner option
+      runAnswerRequest: QaResponsesRequestRunner
       runStatelessRequest: QaResponsesRequestRunner }
 
 module internal QaResponsesTransportOverride =
     let same runner =
-        { runAnswerRequest = runner
+        { prepareAnswerConnection = None
+          runAnswerRequest = runner
           runStatelessRequest = runner }
 
 type internal QaResponsesTransport
@@ -105,6 +109,16 @@ type internal QaResponsesTransport
             match transportOverride with
             | Some overrideTransport -> return! overrideTransport.runAnswerRequest request cancellationToken
             | None -> return! runOnLiveAnswerConnection config request cancellationToken
+        }
+
+    member _.PrepareAnswerConnection cancellationToken =
+        task {
+            match transportOverride with
+            | Some { prepareAnswerConnection = Some prepare } -> return! prepare cancellationToken
+            | Some _ -> return ()
+            | None ->
+                let! _ = liveAnswerConnection config cancellationToken
+                return ()
         }
 
     member _.RunStatelessRequest request cancellationToken =

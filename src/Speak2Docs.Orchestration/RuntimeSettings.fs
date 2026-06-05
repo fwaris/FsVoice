@@ -18,6 +18,12 @@ module RuntimeSettings =
     let AnswerMaxOutputTokens = "answer.maxOutputTokens"
 
     [<Literal>]
+    let AnswerReasoningEffort = "answer.reasoningEffort"
+
+    [<Literal>]
+    let AnswerToolCallLoopLimit = "answer.toolCallLoopLimit"
+
+    [<Literal>]
     let UseLexicalFilter = "retrieval.useLexicalFilter"
 
     [<Literal>]
@@ -37,6 +43,18 @@ module RuntimeSettings =
 
     [<Literal>]
     let MaxAnswerMaxOutputTokens = 32000
+
+    [<Literal>]
+    let DefaultAnswerReasoningEffort = "low"
+
+    [<Literal>]
+    let DefaultAnswerToolCallLoopLimit = 3
+
+    [<Literal>]
+    let MinAnswerToolCallLoopLimit = 1
+
+    [<Literal>]
+    let MaxAnswerToolCallLoopLimit = 8
 
     let empty () : RuntimeSettings = ref Map.empty
 
@@ -75,6 +93,24 @@ module RuntimeSettings =
         |> int AnswerMaxOutputTokens DefaultAnswerMaxOutputTokens
         |> clamp MinAnswerMaxOutputTokens MaxAnswerMaxOutputTokens
 
+    let normalizeAnswerReasoningEffort value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "low" -> "low"
+        | "medium" -> "medium"
+        | "high" -> "high"
+        | _ -> DefaultAnswerReasoningEffort
+
+    let answerReasoningEffort values =
+        values
+        |> string AnswerReasoningEffort DefaultAnswerReasoningEffort
+        |> normalizeAnswerReasoningEffort
+        |> Text.notEmpty
+
+    let answerToolCallLoopLimit values =
+        values
+        |> int AnswerToolCallLoopLimit DefaultAnswerToolCallLoopLimit
+        |> clamp MinAnswerToolCallLoopLimit MaxAnswerToolCallLoopLimit
+
     let modelRoleKey role =
         $"model.{FsVoice.Ctx.ModelRole.storageName role}"
 
@@ -100,7 +136,8 @@ module RuntimeSettings =
           useLexicalFilter = bool UseLexicalFilter true values
           elaborateIndexKeywords = bool ElaborateIndexKeywords false values
           useHybridPdfParsing = bool UseHybridPdfParsing true values
-          useLayoutAnalysis = bool UseLayoutAnalysis true values }
+          useLayoutAnalysis = bool UseLayoutAnalysis true values
+          answerToolCallLoopLimit = answerToolCallLoopLimit values }
 
     let composePlugIn
         (retrievalMode: RetrievalMode)
@@ -123,4 +160,5 @@ module RuntimeSettings =
                 |> Map.add
                     FsVoice.Ctx.Answer
                     { answerModel with
-                        maxOutputTokens = Some(answerMaxOutputTokens values) } }
+                        maxOutputTokens = Some(answerMaxOutputTokens values)
+                        reasoningEffort = answerReasoningEffort values |> Option.orElse answerModel.reasoningEffort } }

@@ -39,8 +39,8 @@ type QaSessionOptions =
       useLexicalFilter: bool
       autoWriteback: bool
       enableDurableMemory: bool
-      answerCompactionThresholdChars: int option
-      answerCompactionMaxOutputTokens: int
+      answerOpenAiCompactionThresholdTokens: int option
+      answerToolCallLoopLimit: int
       report: string -> unit }
 
 module QaSessionOptions =
@@ -73,6 +73,6 @@ module QaSessionOptions =
           useLexicalFilter = true
           autoWriteback = true
           enableDurableMemory = true
-          answerCompactionThresholdChars = Some 80000
-          answerCompactionMaxOutputTokens = 1200
+          answerOpenAiCompactionThresholdTokens = Some 200000
+          answerToolCallLoopLimit = 3
           report = ignore }

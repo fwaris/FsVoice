@@ -45,15 +45,6 @@ module internal QaResponses =
             | FsResponses.ResponseStreamEvent.ResponseIncomplete event -> Some event.response
             | _ -> None)
 
-    let inputTokens events =
-        terminalResponse events |> Option.bind _.usage |> Option.map _.input_tokens
-
-    let responseChainCompactionReason threshold events =
-        match inputTokens events with
-        | Some inputTokens when inputTokens >= threshold ->
-            Some $"server response chain input tokens {inputTokens} reached threshold {threshold}"
-        | _ -> None
-
     let lifecycleResponse event =
         match event with
         | FsResponses.ResponseStreamEvent.ResponseCreated lifecycle

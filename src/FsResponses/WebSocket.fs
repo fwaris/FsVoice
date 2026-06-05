@@ -14,6 +14,7 @@ type WebSocketCreateRequest =
     { ``type``: string
       model: string
       input: IOitem list
+      context_management: ResponseContextManagement list option
       instructions: string option
       max_output_tokens: int option
       metadata: Map<string, string> option
@@ -37,6 +38,7 @@ type WebSocketCreateRequest =
         { ``type`` = "response.create"
           model = Models.gpt_5
           input = []
+          context_management = None
           instructions = None
           max_output_tokens = None
           metadata = None
@@ -60,6 +62,7 @@ type WebSocketCreateRequest =
         { WebSocketCreateRequest.Default with
             model = req.model
             input = req.input
+            context_management = req.context_management
             instructions = req.instructions
             max_output_tokens = req.max_output_tokens
             metadata = req.metadata

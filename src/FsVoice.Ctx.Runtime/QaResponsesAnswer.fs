@@ -1,22 +1,13 @@
 namespace FsVoice.Ctx
 
 open System
+open System.Diagnostics
 open System.Threading
 open System.Threading.Tasks
 open FsVoice.Core
 
 type private AnswerConversationState =
     { previousResponseId: string option
-      items: FsResponses.IOitem list
-      compacted: bool
-      version: int
-      generation: int
-      compactionInProgress: bool }
-
-type private AnswerCompactionCheckpoint =
-    { generation: int
-      version: int
-      itemCount: int
       items: FsResponses.IOitem list }
 
 type internal QaResponsesAnswerer
@@ -29,29 +20,18 @@ type internal QaResponsesAnswerer
         responseToolCatalog: unit -> ResponseToolCatalog,
         recordObservation: string -> IQaTool -> string -> string -> QaToolObservation
     ) =
-    let maxResponseToolRounds = 3
-    let responseChainCompactionInputTokenThreshold = 16000
+    let maxResponseToolRounds = max 1 options.answerToolCallLoopLimit
+
+    let answerContextManagement () =
+        match options.answerOpenAiCompactionThresholdTokens with
+        | Some threshold when threshold > 0 ->
+            Some [ FsResponses.ResponseContextManagement.Compaction {| compact_threshold = threshold |} ]
+        | _ -> None
 
     let withAnswerPromptCache (request: FsResponses.WebSocketCreateRequest) =
         { request with
             prompt_cache_key = options.answerPromptCacheKey
             prompt_cache_retention = options.answerPromptCacheRetention }
-
-    let responseWarmupRequest (answerConfig: ModelRoleConfig) (prompt: AnswerPrompt) responseTools =
-        { FsResponses.WebSocketCreateRequest.Default with
-            model = answerConfig.modelId
-            input =
-                [ FsResponses.IOitem.Message(
-                      FsResponses.Message.OfText "Warm up the answer conversation with stable instructions and tools."
-                  ) ]
-            instructions = Some prompt.instructions
-            generate = Some false
-            reasoning = QaAnswerModel.answerReasoning answerConfig
-            store = Some true
-            temperature = QaAnswerModel.answerTemperature answerConfig
-            tools = Some responseTools
-            tool_choice = Some FsResponses.ToolChoice.Auto }
-        |> withAnswerPromptCache
 
     let responseCreateRequest
         (answerConfig: ModelRoleConfig)
@@ -65,6 +45,7 @@ type internal QaResponsesAnswerer
         { FsResponses.WebSocketCreateRequest.Default with
             model = answerConfig.modelId
             input = input
+            context_management = answerContextManagement ()
             instructions = Some prompt.instructions
             max_output_tokens = Some maxOutputTokens
             previous_response_id = previousResponseId
@@ -90,6 +71,7 @@ type internal QaResponsesAnswerer
         { FsResponses.WebSocketCreateRequest.Default with
             model = answerConfig.modelId
             input = input
+            context_management = answerContextManagement ()
             instructions = Some prompt.instructions
             max_output_tokens = Some maxOutputTokens
             previous_response_id = previousResponseId
@@ -101,116 +83,12 @@ type internal QaResponsesAnswerer
             tool_choice = Some FsResponses.ToolChoice.None }
         |> withAnswerPromptCache
 
-    let contentText =
-        function
-        | FsResponses.Content.Input_text text -> text.text
-        | FsResponses.Content.Output_text output -> output.text
-        | FsResponses.Content.Refusal refusal -> refusal.refusal
-        | FsResponses.Content.Reasoning_text reasoning -> reasoning.text
-        | FsResponses.Content.Input_image image -> $"[image: {image.image_url}]"
-
-    let itemText =
-        function
-        | FsResponses.IOitem.Message message ->
-            let content = message.content |> List.map contentText |> String.concat "\n"
-            $"{message.role}: {content}"
-        | FsResponses.IOitem.Function_call call -> $"tool call {call.name}: {call.arguments}"
-        | FsResponses.IOitem.Function_call_output output -> $"tool output {output.call_id}: {output.output}"
-        | FsResponses.IOitem.Web_search search -> $"web search: {search.search_context_size}"
-        | FsResponses.IOitem.Web_search_call _ -> "web search call"
-        | FsResponses.IOitem.File_search_call call ->
-            call.queries
-            |> Option.defaultValue []
-            |> String.concat "; "
-            |> sprintf "file search: %s"
-        | FsResponses.IOitem.Code_interpreter_call call ->
-            call.code |> Option.defaultValue "" |> sprintf "code interpreter: %s"
-        | FsResponses.IOitem.Mcp_call call
-        | FsResponses.IOitem.Mcp_approval_request call
-        | FsResponses.IOitem.Mcp_approval_response call ->
-            let name = call.name |> Option.defaultValue "mcp"
-            let output = call.output |> Option.orElse call.error |> Option.defaultValue ""
-            $"{name}: {output}"
-        | FsResponses.IOitem.Reasoning reasoning ->
-            reasoning.summary
-            |> List.map _.text
-            |> String.concat "\n"
-            |> sprintf "reasoning: %s"
-        | FsResponses.IOitem.Image _ -> "[image]"
-        | FsResponses.IOitem.File _ -> "[file]"
-        | FsResponses.IOitem.Local_shell_call _ -> "local shell call"
-        | FsResponses.IOitem.Image_generation_call _ -> "image generation call"
-        | FsResponses.IOitem.Computer_use _ -> "computer use"
-        | FsResponses.IOitem.Computer_call call -> $"computer call {call.call_id}"
-        | FsResponses.IOitem.Computer_call_output output -> $"computer output {output.call_id}"
-
-    let itemSize item = (itemText item).Length
-
-    let conversationSize items = items |> List.sumBy itemSize
-
-    let renderConversationItems items =
-        items
-        |> List.mapi (fun index item -> $"[{index + 1}]\n{itemText item |> Text.truncate 6000}")
-        |> String.concat "\n\n"
-
-    let compactionInstructions =
-        "Compact Speak2Docs QA conversation state. Preserve facts, user goals, prior answers, source-grounded findings, cited document details, tool observations, memory decisions, corrections, and unresolved follow-ups. Prefer concise bullets grouped by topic. Do not invent facts."
-
-    let compactionUserItem items =
-        let text =
-            $"Create a compact checkpoint for this conversation. The next answer model will receive this checkpoint plus any turns that happened after it.\n\nConversation to compact:\n\n{renderConversationItems items}"
-
-        FsResponses.IOitem.Message(FsResponses.Message.OfText text)
-
-    let compactionSummaryItem summary =
-        FsResponses.IOitem.Message
-            { FsResponses.Message.Default with
-                role = "user"
-                content =
-                    [ FsResponses.Content.Input_text
-                          {| text =
-                              $"Compacted conversation checkpoint. Use this as prior conversation memory. If more source context is needed, call the available source or memory tools again.\n\n{summary}" |} ] }
-
-    let responseCompactionRequest (answerConfig: ModelRoleConfig) items =
-        { FsResponses.WebSocketCreateRequest.Default with
-            model = answerConfig.modelId
-            input = [ compactionUserItem items ]
-            instructions = Some compactionInstructions
-            max_output_tokens = Some options.answerCompactionMaxOutputTokens
-            generate = Some true
-            reasoning = QaAnswerModel.answerReasoning answerConfig
-            store = Some true
-            temperature = QaAnswerModel.answerTemperature answerConfig
-            tools = Some []
-            tool_choice = None }
-        |> withAnswerPromptCache
-
-    let responseConversationRefreshRequest answerConfig (prompt: AnswerPrompt) responseTools items =
-        { FsResponses.WebSocketCreateRequest.Default with
-            model = answerConfig.modelId
-            input = items
-            instructions = Some prompt.instructions
-            generate = Some false
-            reasoning = QaAnswerModel.answerReasoning answerConfig
-            store = Some true
-            temperature = QaAnswerModel.answerTemperature answerConfig
-            tools = Some responseTools
-            tool_choice = Some FsResponses.ToolChoice.Auto }
-        |> withAnswerPromptCache
-
-    let answerBootstrapGate = obj ()
-    let mutable answerBootstrapTask: Task<string option> option = None
-
-    let emptyAnswerConversation generation =
+    let emptyAnswerConversation =
         { previousResponseId = None
-          items = []
-          compacted = false
-          version = 0
-          generation = generation
-          compactionInProgress = false }
+          items = [] }
 
     let answerConversationGate = obj ()
-    let mutable answerConversation = emptyAnswerConversation 0
+    let mutable answerConversation = emptyAnswerConversation
 
     let getAnswerConversation () =
         lock answerConversationGate (fun () -> answerConversation)
@@ -220,81 +98,11 @@ type internal QaResponsesAnswerer
             answerConversation <- update answerConversation
             answerConversation)
 
-    let answerConversationHasCompacted () = (getAnswerConversation ()).compacted
-
-    let clearCompletedAnswerBootstrapTask (task: Task<string option>) =
-        if task.IsCompleted then
-            lock answerBootstrapGate (fun () ->
-                match answerBootstrapTask with
-                | Some current when Object.ReferenceEquals(current, task) -> answerBootstrapTask <- None
-                | _ -> ())
-
-    let abandonAnswerBootstrapTask (task: Task<string option>) =
-        lock answerBootstrapGate (fun () ->
-            match answerBootstrapTask with
-            | Some current when Object.ReferenceEquals(current, task) -> answerBootstrapTask <- None
-            | _ -> ())
-
-    let runAnswerBootstrap answerConfig prompt responseTools cancellationToken =
-        task {
-            let request = responseWarmupRequest answerConfig prompt responseTools.tools
-            let! events = transport.RunAnswerRequest request cancellationToken
-
-            match QaResponses.responseIdFromEvents events with
-            | Some responseId ->
-                let state =
-                    updateAnswerConversationState (fun state ->
-                        match state.previousResponseId with
-                        | Some _ -> state
-                        | None ->
-                            { state with
-                                previousResponseId = Some responseId
-                                version = state.version + 1 })
-
-                return state.previousResponseId
-            | None ->
-                report
-                    $"Answer Responses WebSocket warmup did not return a response id; sending stable instructions and tools with the next turn. {QaResponses.diagnostics events}."
-
-                return None
-        }
-
-    let ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken =
-        async {
-            match getAnswerConversation () with
-            | { previousResponseId = Some previousResponseId } -> return Some previousResponseId
-            | { previousResponseId = None
-                items = _ :: _ } -> return None
-            | { previousResponseId = None } ->
-                let bootstrapTask =
-                    lock answerBootstrapGate (fun () ->
-                        match getAnswerConversation () with
-                        | { previousResponseId = Some previousResponseId } -> Task.FromResult(Some previousResponseId)
-                        | { previousResponseId = None
-                            items = _ :: _ } -> Task.FromResult(None)
-                        | { previousResponseId = None } ->
-                            match answerBootstrapTask with
-                            | Some task -> task
-                            | None ->
-                                let task = runAnswerBootstrap answerConfig prompt responseTools cancellationToken
-                                answerBootstrapTask <- Some task
-                                task)
-
-                try
-                    let! responseId = bootstrapTask.WaitAsync(cancellationToken) |> Async.AwaitTask
-                    clearCompletedAnswerBootstrapTask bootstrapTask
-                    return responseId
-                with ex ->
-                    abandonAnswerBootstrapTask bootstrapTask
-                    return raise ex
-        }
-
     let appendAnswerConversation userItem answer previousResponseId =
         updateAnswerConversationState (fun state ->
             { state with
                 previousResponseId = previousResponseId
-                items = state.items @ [ userItem; QaAnswerModel.answerAssistantItem answer ]
-                version = state.version + 1 })
+                items = state.items @ [ userItem; QaAnswerModel.answerAssistantItem answer ] })
         |> ignore
 
     let updateAnswerConversation userItem answer events =
@@ -310,140 +118,32 @@ type internal QaResponsesAnswerer
         else
             [ userItem ]
 
-    let markCompactionFinished generation =
-        updateAnswerConversationState (fun state ->
-            if state.generation = generation then
-                { state with
-                    compactionInProgress = false }
-            else
-                state)
-        |> ignore
+    let reportAnswerTiming message =
+        if options.logTimings then
+            report message
 
-    let tryCreateCompactionCheckpoint threshold force =
-        lock answerConversationGate (fun () ->
-            let size = conversationSize answerConversation.items
+    let compactionItemsFromEvents events =
+        events
+        |> List.collect (function
+            | FsResponses.ResponseStreamEvent.OutputItemAdded event
+            | FsResponses.ResponseStreamEvent.OutputItemDone event -> [ event.item ]
+            | FsResponses.ResponseStreamEvent.ResponseCompleted event
+            | FsResponses.ResponseStreamEvent.ResponseFailed event
+            | FsResponses.ResponseStreamEvent.ResponseIncomplete event -> event.response.output
+            | _ -> [])
+        |> List.choose (function
+            | FsResponses.IOitem.Compaction item -> Some item
+            | _ -> None)
+        |> List.distinctBy (fun item -> item.id, item.encrypted_content)
 
-            if
-                answerConversation.compactionInProgress
-                || List.isEmpty answerConversation.items
-                || ((not force) && size <= threshold)
-            then
-                None
-            else
-                answerConversation <-
-                    { answerConversation with
-                        compactionInProgress = true }
+    let reportOpenAiCompaction phase events =
+        match compactionItemsFromEvents events with
+        | [] -> ()
+        | items ->
+            let ids = items |> List.choose _.id |> String.concat ","
 
-                Some
-                    { generation = answerConversation.generation
-                      version = answerConversation.version
-                      itemCount = answerConversation.items.Length
-                      items = answerConversation.items })
-
-    let tryCreateCompactionRefreshInput checkpoint summary =
-        let summaryItem = compactionSummaryItem summary
-
-        lock answerConversationGate (fun () ->
-            if
-                answerConversation.generation <> checkpoint.generation
-                || answerConversation.items.Length < checkpoint.itemCount
-            then
-                None
-            else
-                let tail = answerConversation.items |> List.skip checkpoint.itemCount
-                let items = summaryItem :: tail
-                Some(items, answerConversation.version))
-
-    let tryApplyCompaction checkpoint refreshVersion refreshedItems responseId =
-        lock answerConversationGate (fun () ->
-            if
-                answerConversation.generation = checkpoint.generation
-                && answerConversation.version = refreshVersion
-            then
-                answerConversation <-
-                    { answerConversation with
-                        previousResponseId = Some responseId
-                        items = refreshedItems
-                        compacted = true
-                        version = answerConversation.version + 1
-                        compactionInProgress = false }
-
-                true
-            else
-                answerConversation <-
-                    { answerConversation with
-                        compactionInProgress = false }
-
-                false)
-
-    let rec runAnswerCompaction answerConfig prompt checkpoint =
-        async {
-            try
-                let token = sessionCancellation.Token
-
-                report
-                    $"Answer conversation compaction started: items={checkpoint.itemCount}; chars={conversationSize checkpoint.items}; version={checkpoint.version}."
-
-                let compactionRequest = responseCompactionRequest answerConfig checkpoint.items
-                let! compactionEvents = transport.RunStatelessRequest compactionRequest token |> Async.AwaitTask
-
-                let summary =
-                    FsResponses.ResponseStream.outputText compactionEvents
-                    |> Text.normalizeWhitespace
-
-                if String.IsNullOrWhiteSpace summary then
-                    report
-                        $"Answer conversation compaction returned empty text; keeping existing response history. {QaResponses.diagnostics compactionEvents}."
-
-                    markCompactionFinished checkpoint.generation
-                else
-                    match tryCreateCompactionRefreshInput checkpoint summary with
-                    | None ->
-                        report "Answer conversation compaction was discarded because the QA session was reconfigured."
-                        markCompactionFinished checkpoint.generation
-                    | Some(refreshedItems, refreshVersion) ->
-                        let responseTools = responseToolCatalog ()
-
-                        let refreshRequest =
-                            responseConversationRefreshRequest answerConfig prompt responseTools.tools refreshedItems
-
-                        let! refreshEvents = transport.RunStatelessRequest refreshRequest token |> Async.AwaitTask
-
-                        match QaResponses.responseIdFromEvents refreshEvents with
-                        | Some responseId ->
-                            if tryApplyCompaction checkpoint refreshVersion refreshedItems responseId then
-                                report
-                                    $"Answer conversation compaction applied: compacted_items={checkpoint.itemCount}; retained_tail={refreshedItems.Length - 1}; summary_chars={summary.Length}; responseId={responseId}."
-                            else
-                                report
-                                    "Answer conversation compaction finished, but new turns arrived before the compacted response root could be applied; a later turn will retry if needed."
-
-                                scheduleAnswerCompactionIfNeeded answerConfig prompt None
-                        | None ->
-                            report
-                                $"Answer conversation compaction could not refresh the response root; keeping existing response history. {QaResponses.diagnostics refreshEvents}."
-
-                            markCompactionFinished checkpoint.generation
-            with
-            | :? OperationCanceledException -> markCompactionFinished checkpoint.generation
-            | ex ->
-                report $"Answer conversation compaction failed: {ex.Message}"
-                markCompactionFinished checkpoint.generation
-        }
-
-    and scheduleAnswerCompactionIfNeeded answerConfig prompt (forceReason: string option) =
-        match options.answerCompactionThresholdChars with
-        | Some threshold when threshold > 0 ->
-            match tryCreateCompactionCheckpoint threshold forceReason.IsSome with
-            | Some checkpoint ->
-                forceReason
-                |> Option.iter (fun reason ->
-                    report
-                        $"Answer conversation compaction scheduled early: {reason}; items={checkpoint.itemCount}; chars={conversationSize checkpoint.items}; version={checkpoint.version}.")
-
-                Async.Start(runAnswerCompaction answerConfig prompt checkpoint, sessionCancellation.Token)
-            | None -> ()
-        | _ -> ()
+            report
+                $"OpenAI server-side answer compaction applied: phase={phase}; compactionItems={items.Length}; ids={ids}; {QaResponses.diagnostics events}."
 
     let responsesCreateAndComplete
         turnId
@@ -467,7 +167,15 @@ type internal QaResponsesAnswerer
                     requireInitialToolCall
                     responseTools.tools
 
+            let initialSw = Stopwatch.StartNew()
             let! initialEvents = transport.RunAnswerRequest request cancellationToken |> Async.AwaitTask
+            initialSw.Stop()
+            reportOpenAiCompaction "initial" initialEvents
+
+            let previousResponseIdText = previousResponseId |> Option.defaultValue "<none>"
+
+            reportAnswerTiming
+                $"Answer Responses timing: phase=initial; elapsed={initialSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={previousResponseIdText}; inputItems={input.Length}; {QaResponses.diagnostics initialEvents}."
 
             let rec complete remainingToolTurns events observations =
                 async {
@@ -500,6 +208,8 @@ type internal QaResponsesAnswerer
                                 observations,
                                 false
                         | Some responseId ->
+                            let toolSw = Stopwatch.StartNew()
+
                             let! outputs, newObservations =
                                 QaResponseTools.invokeFunctionCalls
                                     report
@@ -510,7 +220,12 @@ type internal QaResponsesAnswerer
                                     cancellationToken
                                 |> Async.AwaitTask
 
+                            toolSw.Stop()
+
                             let allObservations = observations @ newObservations
+
+                            reportAnswerTiming
+                                $"Answer Responses timing: phase=tool_calls; elapsed={toolSw.Elapsed.TotalMilliseconds:F0}ms; calls={calls.Length}; observations={allObservations.Length}; remainingToolTurns={remainingToolTurns}."
 
                             if remainingToolTurns <= 1 then
                                 report
@@ -524,8 +239,16 @@ type internal QaResponsesAnswerer
                                         (Some responseId)
                                         outputs
 
+                                let finalSw = Stopwatch.StartNew()
+
                                 let! finalEvents =
                                     transport.RunAnswerRequest finalRequest cancellationToken |> Async.AwaitTask
+
+                                finalSw.Stop()
+                                reportOpenAiCompaction "final_synthesis" finalEvents
+
+                                reportAnswerTiming
+                                    $"Answer Responses timing: phase=final_synthesis; elapsed={finalSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={responseId}; outputItems={outputs.Length}; {QaResponses.diagnostics finalEvents}."
 
                                 let finalCalls = QaResponseTools.functionCalls finalEvents
 
@@ -555,8 +278,16 @@ type internal QaResponsesAnswerer
                                         false
                                         responseTools.tools
 
+                                let followUpSw = Stopwatch.StartNew()
+
                                 let! nextEvents =
                                     transport.RunAnswerRequest followUpRequest cancellationToken |> Async.AwaitTask
+
+                                followUpSw.Stop()
+                                reportOpenAiCompaction "tool_followup" nextEvents
+
+                                reportAnswerTiming
+                                    $"Answer Responses timing: phase=tool_followup; elapsed={followUpSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={responseId}; outputItems={outputs.Length}; {QaResponses.diagnostics nextEvents}."
 
                                 return! complete (remainingToolTurns - 1) nextEvents allObservations
                 }
@@ -565,8 +296,7 @@ type internal QaResponsesAnswerer
         }
 
     member _.ResetConversation() =
-        updateAnswerConversationState (fun state -> emptyAnswerConversation (state.generation + 1))
-        |> ignore
+        updateAnswerConversationState (fun _ -> emptyAnswerConversation) |> ignore
 
     member _.PrepareAsync(cancellationToken) =
         task {
@@ -574,17 +304,12 @@ type internal QaResponsesAnswerer
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sessionCancellation.Token)
 
             let token = linkedCts.Token
-            let answerConfig = QaAnswerModel.modelConfig options Answer
+            let sw = Stopwatch.StartNew()
+            do! transport.PrepareAnswerConnection token
+            sw.Stop()
 
-            let prompt =
-                { instructions = QaAnswerModel.answerInstructions options
-                  userPrompt = "" }
-
-            let responseTools = responseToolCatalog ()
-
-            let! _ =
-                ensureAnswerBootstrap answerConfig prompt responseTools token
-                |> Async.StartAsTask
+            reportAnswerTiming
+                $"Answer Responses timing: phase=prepare_connection; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms."
 
             return ()
         }
@@ -610,11 +335,12 @@ type internal QaResponsesAnswerer
                 async {
                     let responseTools = responseToolCatalog ()
 
-                    let! previousResponseId = ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
+                    let conversation = getAnswerConversation ()
+                    let previousResponseId = conversation.previousResponseId
 
                     let replayLocalHistory =
                         replayHistory
-                        || (previousResponseId.IsNone && not (List.isEmpty (getAnswerConversation ()).items))
+                        || (previousResponseId.IsNone && not (List.isEmpty conversation.items))
 
                     let! events, answer, toolObservations, responseChainReusable =
                         responsesCreateAndComplete
@@ -632,14 +358,8 @@ type internal QaResponsesAnswerer
                         report
                             $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={(getAnswerConversation ()).items.Length}; {QaResponses.diagnostics events}."
 
-                        updateAnswerConversationState (fun state ->
-                            { state with
-                                previousResponseId = None
-                                version = state.version + 1 })
+                        updateAnswerConversationState (fun state -> { state with previousResponseId = None })
                         |> ignore
-
-                        let! replayPreviousResponseId =
-                            ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
 
                         return!
                             responsesCreateAndComplete
@@ -648,7 +368,7 @@ type internal QaResponsesAnswerer
                                 maxOutputTokens
                                 prompt
                                 responseTools
-                                replayPreviousResponseId
+                                None
                                 (responsesInputItems userItem true)
                                 options.answerRequireToolCall
                                 cancellationToken
@@ -676,9 +396,6 @@ type internal QaResponsesAnswerer
             elif not (String.IsNullOrWhiteSpace answer) then
                 if responseChainReusable then
                     updateAnswerConversation userItem answer events
-
-                    QaResponses.responseChainCompactionReason responseChainCompactionInputTokenThreshold events
-                    |> scheduleAnswerCompactionIfNeeded answerConfig prompt
                 else
                     resetAnswerConversationChain userItem answer
 
@@ -708,9 +425,6 @@ type internal QaResponsesAnswerer
                 elif not (String.IsNullOrWhiteSpace retryAnswer) then
                     if retryResponseChainReusable then
                         updateAnswerConversation userItem retryAnswer retryEvents
-
-                        QaResponses.responseChainCompactionReason responseChainCompactionInputTokenThreshold retryEvents
-                        |> scheduleAnswerCompactionIfNeeded answerConfig prompt
                     else
                         resetAnswerConversationChain userItem retryAnswer
 

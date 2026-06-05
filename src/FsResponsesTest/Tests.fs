@@ -185,6 +185,18 @@ let ``websocket request includes prompt cache controls when configured`` () =
     Assert.Equal("24h", root.GetProperty("prompt_cache_retention").GetString())
 
 [<Fact>]
+let ``websocket request serializes context management compaction`` () =
+    let request =
+        { WebSocketCreateRequest.ofText Models.gpt_5 "Say hello from WebSocket mode." with
+            context_management = Some [ ResponseContextManagement.Compaction {| compact_threshold = 200000 |} ] }
+
+    let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
+    let firstContext = root.GetProperty("context_management") |> firstArrayItem
+
+    Assert.Equal("compaction", firstContext.GetProperty("type").GetString())
+    Assert.Equal(200000, firstContext.GetProperty("compact_threshold").GetInt32())
+
+[<Fact>]
 let ``warmup request sets generate false`` () =
     let request =
         WebSocketCreateRequest.warmup
@@ -379,6 +391,20 @@ let ``function call output item event deserializes to typed function call`` () =
     | other -> failwith $"Unexpected event: {other}"
 
 [<Fact>]
+let ``compaction output item event deserializes to typed compaction`` () =
+    let json =
+        @"{""type"":""response.output_item.done"",""sequence_number"":2,""response_id"":""resp_123"",""output_index"":0,""item"":{""type"":""compaction"",""id"":""cmp_123"",""encrypted_content"":""encrypted-state""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.OutputItemDone event ->
+        match event.item with
+        | IOitem.Compaction item ->
+            Assert.Equal(Some "cmp_123", item.id)
+            Assert.Equal("encrypted-state", item.encrypted_content)
+        | other -> failwith $"Unexpected item: {other}"
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
 let ``reasoning content part event deserializes to typed content`` () =
     let json =
         @"{""type"":""response.content_part.added"",""sequence_number"":3,""response_id"":""resp_123"",""item_id"":""rs_123"",""output_index"":0,""content_index"":0,""part"":{""type"":""reasoning_text"",""text"":""thinking""}}"
@@ -509,6 +535,22 @@ let ``legacy request message serialization still uses Responses item tags`` () =
     Assert.Equal("message", firstInput.GetProperty("type").GetString())
     Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_text")
     Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_image")
+
+[<Fact>]
+let ``http request serializes context management compaction`` () =
+    let request =
+        { createRequest () with
+            context_management = Some [ ResponseContextManagement.Compaction {| compact_threshold = 200000 |} ] }
+
+    let root: JsonElement =
+        request
+        |> fun req -> JsonSerializer.Serialize(req, Api.serOpts)
+        |> parseObject
+
+    let firstContext = root.GetProperty("context_management") |> firstArrayItem
+
+    Assert.Equal("compaction", firstContext.GetProperty("type").GetString())
+    Assert.Equal(200000, firstContext.GetProperty("compact_threshold").GetInt32())
 
 [<Fact(Skip = "Live OpenAI HTTP smoke test; enable manually when OPENAI_API_KEY is available.")>]
 let ``Create a response`` () =

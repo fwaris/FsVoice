@@ -117,6 +117,8 @@ module Update =
             yield RuntimeSettings.LogExpansions, string model.logExpansions
             yield RuntimeSettings.LogChunks, string model.logChunks
             yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
+            yield RuntimeSettings.AnswerReasoningEffort, model.answerReasoningEffort
+            yield RuntimeSettings.AnswerToolCallLoopLimit, model.answerToolCallLoopLimit
             yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
             yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
@@ -172,6 +174,8 @@ module Update =
         Settings.setLogChunks model.logChunks
         Settings.setActivityLogVerbosity model.activityLogVerbosity
         Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
+        Settings.setAnswerReasoningEffort model.answerReasoningEffort
+        Settings.setAnswerToolCallLoopLimit model.answerToolCallLoopLimit
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
@@ -718,6 +722,8 @@ module Update =
               logExpansions = Settings.logExpansions ()
               logChunks = Settings.logChunks ()
               answerMaxOutputTokens = string (Settings.answerMaxOutputTokens ())
+              answerReasoningEffort = Settings.answerReasoningEffort ()
+              answerToolCallLoopLimit = string (Settings.answerToolCallLoopLimit ())
               useLexicalFilter =
                 Settings.plugInUseLexicalFilter
                     loadedPlugIn.definition.id
@@ -819,6 +825,28 @@ module Update =
             | None ->
                 { model with
                     answerMaxOutputTokens = value }
+                |> refreshRuntimeSettings,
+                Cmd.none
+        | AnswerReasoningEffortChanged value ->
+            match sourceConfigBlocked model "Changing answer reasoning level" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    answerReasoningEffort = Settings.normalizeAnswerReasoningEffort value }
+                |> refreshRuntimeSettings,
+                Cmd.none
+        | AnswerToolCallLoopLimitChanged value ->
+            match sourceConfigBlocked model "Changing tool call loop limit" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    answerToolCallLoopLimit = value }
                 |> refreshRuntimeSettings,
                 Cmd.none
         | ModelRoleModelChanged(role, value) ->

@@ -74,6 +74,7 @@ module OracleAgent =
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
                 autoWriteback = st.plugIn.runtime.autoWriteback
                 enableDurableMemory = false
+                answerToolCallLoopLimit = flags.answerToolCallLoopLimit
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks

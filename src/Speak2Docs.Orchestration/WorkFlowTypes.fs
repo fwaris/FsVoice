@@ -99,7 +99,8 @@ type SourceFlags =
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
-      useLayoutAnalysis: bool }
+      useLayoutAnalysis: bool
+      answerToolCallLoopLimit: int }
 
 type RealtimeConnectionState =
     | RealtimeDisconnected
