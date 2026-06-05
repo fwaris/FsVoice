@@ -7,7 +7,7 @@ open System.Threading.Tasks
 open FsVoice.Core
 open FsVoice.Retrieval
 
-type QaSession(options: QaSessionOptions) =
+type QaSession private (options: QaSessionOptions, transportOverride: QaResponsesTransportOverride option) =
     let mutable contextProviders = options.contextProviders
 
     let memoryPath =
@@ -32,10 +32,8 @@ type QaSession(options: QaSessionOptions) =
     let report message = options.report message
     let clamp (maxValue: int) (value: int) = Math.Max(1, Math.Min(maxValue, value))
 
-    let transport = QaResponsesTransport(options, sessionCancellation, report)
-
-    let blackboard =
-        QaBlackboardRuntime(options, sessionCancellation, report, currentMemoryEncoder, transport)
+    let transport =
+        QaResponsesTransport(options, sessionCancellation, report, transportOverride)
 
     let retrieveContext question maxResults cancellationToken =
         async {
@@ -110,7 +108,7 @@ type QaSession(options: QaSessionOptions) =
                 memoryService.SearchAsync(query, maxResults, cancellationToken)
 
             member _.SearchBlackboardAsync(query, cancellationToken) =
-                blackboard.SearchAsync(query, cancellationToken) }
+                Task.FromResult "No QA blackboard is configured for this session." }
 
     let loadToolCatalog () =
         let loaded =
@@ -124,8 +122,7 @@ type QaSession(options: QaSessionOptions) =
 
     let mutable catalog = loadToolCatalog ()
 
-    let responseToolCatalog includeBlackboard =
-        QaResponseTools.createCatalog includeBlackboard catalog
+    let responseToolCatalog () = QaResponseTools.createCatalog catalog
 
     let recordResponseToolObservation turnId (tool: IQaTool) query content =
         let observation =
@@ -135,7 +132,6 @@ type QaSession(options: QaSessionOptions) =
               content = content
               createdAt = DateTimeOffset.UtcNow }
 
-        blackboard.AddRecord(BlackboardRecords.toolObservation turnId observation)
         observation
 
     let responsesAnswerer =
@@ -146,47 +142,12 @@ type QaSession(options: QaSessionOptions) =
             report,
             contextSources,
             responseToolCatalog,
-            recordResponseToolObservation,
-            blackboard.HasSummary
+            recordResponseToolObservation
         )
 
     do
         for log in memoryService.StartupLogs @ catalog.logs do
             report log
-
-    let answerWithModel
-        (snapshot: TranscriptSnapshot)
-        (decision: SupervisorDecision)
-        (memoryHits: MemoryRecallHit list)
-        (chunks: SourceChunk list)
-        (observations: QaToolObservation list)
-        cancellationToken
-        =
-        async {
-            match options.answerTransport with
-            | Some _ ->
-                return!
-                    responsesAnswerer.AnswerAsync(
-                        snapshot,
-                        decision,
-                        memoryHits,
-                        chunks,
-                        observations,
-                        cancellationToken
-                    )
-            | None ->
-                return!
-                    QaAnswerModel.answerWithChatClient
-                        options
-                        report
-                        contextSources
-                        snapshot
-                        decision
-                        memoryHits
-                        chunks
-                        observations
-                        cancellationToken
-        }
 
     let durableMemoryForgetObservation (snapshot: TranscriptSnapshot) logs =
         if List.isEmpty logs then
@@ -213,6 +174,11 @@ type QaSession(options: QaSessionOptions) =
 
             for log in logs do
                 report log
+
+    new(options: QaSessionOptions) = QaSession(options, None)
+
+    internal new(options: QaSessionOptions, transportOverride: QaResponsesTransportOverride) =
+        QaSession(options, Some transportOverride)
 
     member _.ToolCatalog = catalog
 
@@ -290,16 +256,8 @@ type QaSession(options: QaSessionOptions) =
             let totalSw = Stopwatch.StartNew()
             let snapshot = QaAnswerModel.createSnapshot request
 
-            blackboard.AddRecord(BlackboardRecords.transcript snapshot)
-
-            request.realtimeJudgement
-            |> Option.iter (fun judgement ->
-                blackboard.AddRecord(BlackboardRecords.realtimeJudgement snapshot.turnId judgement))
-
             let decision =
                 memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
-
-            blackboard.AddRecord(BlackboardRecords.recallDecision snapshot.turnId decision)
 
             let forgetLogs =
                 if options.enableDurableMemory then
@@ -333,16 +291,17 @@ type QaSession(options: QaSessionOptions) =
             let! chunks, sourceRetrievalElapsedMs = sourceTask
             let toolObservations = forgetObservations
 
-            blackboard.AddRecords(
-                (memoryHits |> List.map (BlackboardRecords.memoryEvidence snapshot.turnId))
-                @ (chunks |> List.map (BlackboardRecords.sourceEvidence snapshot.turnId))
-                @ (toolObservations |> List.map (BlackboardRecords.toolObservation snapshot.turnId))
-            )
-
             let answerSw = Stopwatch.StartNew()
 
             let! answerResult =
-                answerWithModel snapshot decision memoryHits chunks toolObservations cancellationToken
+                responsesAnswerer.AnswerAsync(
+                    snapshot,
+                    decision,
+                    memoryHits,
+                    chunks,
+                    toolObservations,
+                    cancellationToken
+                )
                 |> Async.StartAsTask
 
             answerSw.Stop()
@@ -373,12 +332,6 @@ type QaSession(options: QaSessionOptions) =
                   timedOut = false
                   createdAt = DateTimeOffset.UtcNow }
 
-            blackboard.AddRecords
-                [ BlackboardRecords.answerCandidate snapshot.turnId answer
-                  BlackboardRecords.finalAnswer qaAnswer ]
-
-            blackboard.SchedulePruningIfNeeded()
-
             return qaAnswer
         }
 
@@ -389,9 +342,7 @@ type QaSession(options: QaSessionOptions) =
             for provider in contextProviders do
                 provider.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
-            for client in
-                [ options.clients.queryExpansion; options.clients.answerGenerator ]
-                |> List.choose id do
+            for client in [ options.clients.queryExpansion ] |> List.choose id do
                 client.Dispose()
 
             transport.Dispose()

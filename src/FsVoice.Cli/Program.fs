@@ -154,12 +154,9 @@ Index-folder options:
         | None -> QaModelClients.none
         | Some key ->
             let smallModel = optionValue "small-model" QaDefaults.nanoModel parsed
-            let answerModel = optionValue "answer-model" QaDefaults.answerModel parsed
             let small = createClient key smallModel
-            let answer = createClient key answerModel
 
-            { queryExpansion = Some small
-              answerGenerator = Some answer }
+            { queryExpansion = Some small }
 
     let retrievalMode parsed =
         match
@@ -201,13 +198,14 @@ Index-folder options:
         |> Option.bind QaPlugInProfile.tryLoad
         |> Option.defaultValue QaPlugInProfile.generic
 
-    let createSession parsed autoWriteback =
+    let createSession parsed autoWriteback apiKey =
         let storageRoot = storageRoot parsed
 
         Directory.CreateDirectory storageRoot |> ignore
+        let answerWebSocketConfig = FsResponses.ResponseWebSocketConfig.create apiKey
 
         let options =
-            { QaSessionOptions.create storageRoot with
+            { QaSessionOptions.create storageRoot answerWebSocketConfig with
                 retrievalMode = retrievalMode parsed
                 clients = clientsFromArgs parsed
                 plugInProfile = plugInProfile parsed
@@ -488,31 +486,36 @@ Index-folder options:
                 Console.Error.WriteLine "Missing --question."
                 return 2
             else
-                use session = createSession parsed true
-                let! _ = session.LoadSourcesAsync(retrievalMode parsed, sources, CancellationToken.None)
+                match apiKey parsed with
+                | None ->
+                    Console.Error.WriteLine "The ask command requires --api-key or OPENAI_API_KEY."
+                    return 2
+                | Some key ->
+                    use session = createSession parsed true key
+                    let! _ = session.LoadSourcesAsync(retrievalMode parsed, sources, CancellationToken.None)
 
-                let request =
-                    { turnId = Guid.NewGuid().ToString("N")
-                      question = question
-                      realtimeJudgement = None
-                      deadline = None }
+                    let request =
+                        { turnId = Guid.NewGuid().ToString("N")
+                          question = question
+                          realtimeJudgement = None
+                          deadline = None }
 
-                let! answer = session.AnswerAsync(request, CancellationToken.None)
+                    let! answer = session.AnswerAsync(request, CancellationToken.None)
 
-                if hasFlag "json" parsed then
-                    printJson (answerJson answer)
-                else
-                    printfn "%s" answer.answer
+                    if hasFlag "json" parsed then
+                        printJson (answerJson answer)
+                    else
+                        printfn "%s" answer.answer
 
-                    if not (List.isEmpty answer.context) then
-                        printfn "\nContext:"
+                        if not (List.isEmpty answer.context) then
+                            printfn "\nContext:"
 
-                        answer.context
-                        |> List.truncate 5
-                        |> List.iter (fun chunk ->
-                            printfn "- %s chunk %d score %.3f" chunk.source.DisplayName chunk.index chunk.score)
+                            answer.context
+                            |> List.truncate 5
+                            |> List.iter (fun chunk ->
+                                printfn "- %s chunk %d score %.3f" chunk.source.DisplayName chunk.index chunk.score)
 
-                return 0
+                    return 0
         }
 
     let ensureDownloaded (client: HttpClient) url path =
@@ -1704,134 +1707,139 @@ Answers:
             let resultsPath =
                 Path.Combine(Path.GetFullPath dataDir, $"insuranceqa-eval-{sample}.jsonl")
 
-            use session = createSession parsed false
+            match apiKey parsed with
+            | None ->
+                Console.Error.WriteLine "The insuranceqa-eval command requires --api-key or OPENAI_API_KEY."
+                return 2
+            | Some key ->
+                use session = createSession parsed false key
 
-            let source =
-                { kind = sourceKind answersSourcePath
-                  location = answersSourcePath
-                  enabled = true }
+                let source =
+                    { kind = sourceKind answersSourcePath
+                      location = answersSourcePath
+                      enabled = true }
 
-            let! _ = session.LoadSourcesAsync(retrievalMode parsed, [ source ], CancellationToken.None)
+                let! _ = session.LoadSourcesAsync(retrievalMode parsed, [ source ], CancellationToken.None)
 
-            use writer = new StreamWriter(resultsPath, false)
-            let mutable totalF1 = 0.0
-            let mutable hitCount = 0
-            let mutable judged = 0
-            let mutable judgeScore = 0.0
-            let mutable correct = 0
-            let sourceRetrievalTimes = ResizeArray<float>()
-            let answerTimes = ResizeArray<float>()
+                use writer = new StreamWriter(resultsPath, false)
+                let mutable totalF1 = 0.0
+                let mutable hitCount = 0
+                let mutable judged = 0
+                let mutable judgeScore = 0.0
+                let mutable correct = 0
+                let sourceRetrievalTimes = ResizeArray<float>()
+                let answerTimes = ResizeArray<float>()
 
-            for index, question in selected |> List.indexed do
-                let references =
-                    question.answerLabels |> List.choose (fun label -> answers |> Map.tryFind label)
+                for index, question in selected |> List.indexed do
+                    let references =
+                        question.answerLabels |> List.choose (fun label -> answers |> Map.tryFind label)
 
-                let request =
-                    { turnId = $"insuranceqa-{index + 1}"
-                      question = question.question
-                      realtimeJudgement = None
-                      deadline = None }
+                    let request =
+                        { turnId = $"insuranceqa-{index + 1}"
+                          question = question.question
+                          realtimeJudgement = None
+                          deadline = None }
 
-                let answerSw = Stopwatch.StartNew()
-                let! answer = session.AnswerAsync(request, CancellationToken.None)
-                answerSw.Stop()
+                    let answerSw = Stopwatch.StartNew()
+                    let! answer = session.AnswerAsync(request, CancellationToken.None)
+                    answerSw.Stop()
 
-                let answerElapsedMs = answerSw.Elapsed.TotalMilliseconds
-                let sourceRetrievalElapsedMs = answer.sourceRetrievalElapsedMs
-                let f1 = lexicalF1 answer.answer references
-                let hit = contextHit question.answerLabels answer.context
-                let! judgement = judgeAnswer judgeClient answer.answer references
+                    let answerElapsedMs = answerSw.Elapsed.TotalMilliseconds
+                    let sourceRetrievalElapsedMs = answer.sourceRetrievalElapsedMs
+                    let f1 = lexicalF1 answer.answer references
+                    let hit = contextHit question.answerLabels answer.context
+                    let! judgement = judgeAnswer judgeClient answer.answer references
 
-                totalF1 <- totalF1 + f1
-                sourceRetrievalTimes.Add sourceRetrievalElapsedMs
-                answerTimes.Add answerElapsedMs
+                    totalF1 <- totalF1 + f1
+                    sourceRetrievalTimes.Add sourceRetrievalElapsedMs
+                    answerTimes.Add answerElapsedMs
 
-                if hit then
-                    hitCount <- hitCount + 1
+                    if hit then
+                        hitCount <- hitCount + 1
 
-                match judgement with
-                | Some(verdict, score) ->
-                    judged <- judged + 1
-                    judgeScore <- judgeScore + score
+                    match judgement with
+                    | Some(verdict, score) ->
+                        judged <- judged + 1
+                        judgeScore <- judgeScore + score
 
-                    if String.Equals(verdict, "correct", StringComparison.OrdinalIgnoreCase) then
-                        correct <- correct + 1
-                | None -> ()
+                        if String.Equals(verdict, "correct", StringComparison.OrdinalIgnoreCase) then
+                            correct <- correct + 1
+                    | None -> ()
 
-                let record =
-                    {| index = index + 1
-                       category = question.category
-                       question = question.question
-                       answerLabels = question.answerLabels
-                       retrievedAnswerLabels =
-                        answer.context
-                        |> List.choose (fun chunk -> tryAnswerLabel chunk.text)
-                        |> List.distinct
-                       retrievedChunks =
-                        answer.context
-                        |> List.map (fun chunk ->
-                            {| answerLabel = tryAnswerLabel chunk.text |> Option.defaultValue -1
-                               score = chunk.score
-                               index = chunk.index |})
-                       generatedAnswer = answer.answer
-                       contextHit = hit
-                       lexicalF1 = f1
-                       sourceRetrievalElapsedMs = sourceRetrievalElapsedMs
-                       answerElapsedMs = answerElapsedMs
-                       judge = judgement |}
+                    let record =
+                        {| index = index + 1
+                           category = question.category
+                           question = question.question
+                           answerLabels = question.answerLabels
+                           retrievedAnswerLabels =
+                            answer.context
+                            |> List.choose (fun chunk -> tryAnswerLabel chunk.text)
+                            |> List.distinct
+                           retrievedChunks =
+                            answer.context
+                            |> List.map (fun chunk ->
+                                {| answerLabel = tryAnswerLabel chunk.text |> Option.defaultValue -1
+                                   score = chunk.score
+                                   index = chunk.index |})
+                           generatedAnswer = answer.answer
+                           contextHit = hit
+                           lexicalF1 = f1
+                           sourceRetrievalElapsedMs = sourceRetrievalElapsedMs
+                           answerElapsedMs = answerElapsedMs
+                           judge = judgement |}
 
-                writer.WriteLine(JsonSerializer.Serialize(record, jsonLineOptions))
-                writer.Flush()
+                    writer.WriteLine(JsonSerializer.Serialize(record, jsonLineOptions))
+                    writer.Flush()
 
-                printfn
-                    "InsuranceQA %d/%d contextHit=%b lexicalF1=%.3f searchMs=%.0f answerMs=%.0f"
-                    (index + 1)
-                    selected.Length
-                    hit
-                    f1
-                    sourceRetrievalElapsedMs
-                    answerElapsedMs
+                    printfn
+                        "InsuranceQA %d/%d contextHit=%b lexicalF1=%.3f searchMs=%.0f answerMs=%.0f"
+                        (index + 1)
+                        selected.Length
+                        hit
+                        f1
+                        sourceRetrievalElapsedMs
+                        answerElapsedMs
 
-            let summary =
-                {| sample = selected.Length
-                   indexedAnswers = answers.Count
-                   plugInProfile = profile.id
-                   retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
-                   contextHitRate =
-                    if selected.IsEmpty then
-                        0.0
-                    else
-                        float hitCount / float selected.Length
-                   averageLexicalF1 =
-                    if selected.IsEmpty then
-                        0.0
-                    else
-                        totalF1 / float selected.Length
-                   averageSourceRetrievalMs =
-                    if sourceRetrievalTimes.Count = 0 then
-                        0.0
-                    else
-                        sourceRetrievalTimes |> Seq.average
-                   medianSourceRetrievalMs = percentile 0.50 sourceRetrievalTimes
-                   p95SourceRetrievalMs = percentile 0.95 sourceRetrievalTimes
-                   maxSourceRetrievalMs =
-                    if sourceRetrievalTimes.Count = 0 then
-                        0.0
-                    else
-                        sourceRetrievalTimes |> Seq.max
-                   averageAnswerMs =
-                    if answerTimes.Count = 0 then
-                        0.0
-                    else
-                        answerTimes |> Seq.average
-                   medianAnswerMs = percentile 0.50 answerTimes
-                   judged = judged
-                   judgeAverageScore = if judged = 0 then 0.0 else judgeScore / float judged
-                   judgeCorrectRate = if judged = 0 then 0.0 else float correct / float judged
-                   resultsPath = resultsPath |}
+                let summary =
+                    {| sample = selected.Length
+                       indexedAnswers = answers.Count
+                       plugInProfile = profile.id
+                       retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
+                       contextHitRate =
+                        if selected.IsEmpty then
+                            0.0
+                        else
+                            float hitCount / float selected.Length
+                       averageLexicalF1 =
+                        if selected.IsEmpty then
+                            0.0
+                        else
+                            totalF1 / float selected.Length
+                       averageSourceRetrievalMs =
+                        if sourceRetrievalTimes.Count = 0 then
+                            0.0
+                        else
+                            sourceRetrievalTimes |> Seq.average
+                       medianSourceRetrievalMs = percentile 0.50 sourceRetrievalTimes
+                       p95SourceRetrievalMs = percentile 0.95 sourceRetrievalTimes
+                       maxSourceRetrievalMs =
+                        if sourceRetrievalTimes.Count = 0 then
+                            0.0
+                        else
+                            sourceRetrievalTimes |> Seq.max
+                       averageAnswerMs =
+                        if answerTimes.Count = 0 then
+                            0.0
+                        else
+                            answerTimes |> Seq.average
+                       medianAnswerMs = percentile 0.50 answerTimes
+                       judged = judged
+                       judgeAverageScore = if judged = 0 then 0.0 else judgeScore / float judged
+                       judgeCorrectRate = if judged = 0 then 0.0 else float correct / float judged
+                       resultsPath = resultsPath |}
 
-            printJson summary
-            return 0
+                printJson summary
+                return 0
         }
 
     [<EntryPoint>]

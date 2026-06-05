@@ -12,17 +12,12 @@ type internal ResponseToolCatalog =
       byName: Map<string, IQaTool> }
 
 module internal QaResponseTools =
+    let private maxFunctionCallsPerRound = 8
+
     let isBuiltInContextTool (tool: IQaTool) =
         String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
-        && ([ "selected_source_search"
-              "source_inventory"
-              "durable_memory_search"
-              "blackboard_search" ]
+        && ([ "selected_source_search"; "source_inventory"; "durable_memory_search" ]
             |> List.exists (fun name -> String.Equals(tool.Name, name, StringComparison.OrdinalIgnoreCase)))
-
-    let isBlackboardSearchTool (tool: IQaTool) =
-        String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
-        && String.Equals(tool.Name, "blackboard_search", StringComparison.OrdinalIgnoreCase)
 
     let isDurableMemorySearchTool (tool: IQaTool) =
         String.Equals(tool.PluginName, "FsVoiceTools", StringComparison.OrdinalIgnoreCase)
@@ -84,7 +79,7 @@ module internal QaResponseTools =
                 { description = description
                   enum = None }
 
-    let createCatalog includeBlackboard (catalog: QaToolCatalog) =
+    let createCatalog (catalog: QaToolCatalog) =
         let folder (usedNames, byName, tools) (tool: IQaTool) =
             let name = responseToolName usedNames tool
 
@@ -109,7 +104,6 @@ module internal QaResponseTools =
 
         let _, byName, tools =
             catalog.tools
-            |> List.filter (fun tool -> includeBlackboard || not (isBlackboardSearchTool tool))
             |> List.sortBy (fun tool -> tool.PluginName, tool.Name)
             |> List.fold folder (Set.empty, Map.empty, [])
 
@@ -208,14 +202,27 @@ module internal QaResponseTools =
 
     let invokeFunctionCalls report recordObservation turnId responseTools calls cancellationToken =
         task {
-            let boundedCalls = calls |> List.truncate 8
+            let runnableCalls = calls |> List.truncate maxFunctionCallsPerRound
+            let skippedCalls = calls |> List.skip runnableCalls.Length
 
             let! results =
-                boundedCalls
+                runnableCalls
                 |> List.map (fun call ->
                     invokeFunctionCall report recordObservation turnId responseTools call cancellationToken)
                 |> Task.WhenAll
 
             let outputs, observations = results |> Array.toList |> List.unzip
-            return outputs, observations |> List.choose id
+
+            let skippedOutputs =
+                skippedCalls
+                |> List.map (fun call ->
+                    let output =
+                        $"Tool call '{call.name}' was skipped because the model requested more than {maxFunctionCallsPerRound} tool calls in one round. Use the available tool results to answer without repeating skipped calls."
+
+                    report output
+                    functionOutput call.call_id output)
+
+            let chosenObservations = observations |> List.choose id
+
+            return outputs @ skippedOutputs, chosenObservations
         }

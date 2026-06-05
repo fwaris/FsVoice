@@ -26,9 +26,8 @@ type internal QaResponsesAnswerer
         sessionCancellation: CancellationTokenSource,
         report: string -> unit,
         contextSources: unit -> KnowledgeSource list,
-        responseToolCatalog: bool -> ResponseToolCatalog,
-        recordObservation: string -> IQaTool -> string -> string -> QaToolObservation,
-        blackboardHasSummary: unit -> bool
+        responseToolCatalog: unit -> ResponseToolCatalog,
+        recordObservation: string -> IQaTool -> string -> string -> QaToolObservation
     ) =
     let maxResponseToolRounds = 3
     let responseChainCompactionInputTokenThreshold = 16000
@@ -60,18 +59,13 @@ type internal QaResponsesAnswerer
         (prompt: AnswerPrompt)
         previousResponseId
         input
-        includeStableContext
         requireToolCall
         responseTools
         =
         { FsResponses.WebSocketCreateRequest.Default with
             model = answerConfig.modelId
             input = input
-            instructions =
-                if includeStableContext then
-                    Some prompt.instructions
-                else
-                    None
+            instructions = Some prompt.instructions
             max_output_tokens = Some maxOutputTokens
             previous_response_id = previousResponseId
             generate = Some true
@@ -84,6 +78,27 @@ type internal QaResponsesAnswerer
                     Some FsResponses.ToolChoice.Required
                 else
                     Some FsResponses.ToolChoice.Auto }
+        |> withAnswerPromptCache
+
+    let responseFinalAnswerRequest
+        (answerConfig: ModelRoleConfig)
+        maxOutputTokens
+        (prompt: AnswerPrompt)
+        previousResponseId
+        input
+        =
+        { FsResponses.WebSocketCreateRequest.Default with
+            model = answerConfig.modelId
+            input = input
+            instructions = Some prompt.instructions
+            max_output_tokens = Some maxOutputTokens
+            previous_response_id = previousResponseId
+            generate = Some true
+            reasoning = QaAnswerModel.answerReasoning answerConfig
+            store = Some true
+            temperature = QaAnswerModel.answerTemperature answerConfig
+            tools = Some []
+            tool_choice = Some FsResponses.ToolChoice.None }
         |> withAnswerPromptCache
 
     let contentText =
@@ -154,7 +169,7 @@ type internal QaResponsesAnswerer
                 content =
                     [ FsResponses.Content.Input_text
                           {| text =
-                              $"Compacted conversation checkpoint. Use this as prior conversation memory, and call blackboard_search if more detail from pre-compaction tool observations is needed.\n\n{summary}" |} ] }
+                              $"Compacted conversation checkpoint. Use this as prior conversation memory. If more source context is needed, call the available source or memory tools again.\n\n{summary}" |} ] }
 
     let responseCompactionRequest (answerConfig: ModelRoleConfig) items =
         { FsResponses.WebSocketCreateRequest.Default with
@@ -223,7 +238,7 @@ type internal QaResponsesAnswerer
     let runAnswerBootstrap answerConfig prompt responseTools cancellationToken =
         task {
             let request = responseWarmupRequest answerConfig prompt responseTools.tools
-            let! events = transport.RunWarmupRequest request cancellationToken
+            let! events = transport.RunAnswerRequest request cancellationToken
 
             match QaResponses.responseIdFromEvents events with
             | Some responseId ->
@@ -370,7 +385,7 @@ type internal QaResponsesAnswerer
                     $"Answer conversation compaction started: items={checkpoint.itemCount}; chars={conversationSize checkpoint.items}; version={checkpoint.version}."
 
                 let compactionRequest = responseCompactionRequest answerConfig checkpoint.items
-                let! compactionEvents = transport.RunOfflineRequest compactionRequest token |> Async.AwaitTask
+                let! compactionEvents = transport.RunStatelessRequest compactionRequest token |> Async.AwaitTask
 
                 let summary =
                     FsResponses.ResponseStream.outputText compactionEvents
@@ -387,12 +402,12 @@ type internal QaResponsesAnswerer
                         report "Answer conversation compaction was discarded because the QA session was reconfigured."
                         markCompactionFinished checkpoint.generation
                     | Some(refreshedItems, refreshVersion) ->
-                        let responseTools = responseToolCatalog true
+                        let responseTools = responseToolCatalog ()
 
                         let refreshRequest =
                             responseConversationRefreshRequest answerConfig prompt responseTools.tools refreshedItems
 
-                        let! refreshEvents = transport.RunOfflineRequest refreshRequest token |> Async.AwaitTask
+                        let! refreshEvents = transport.RunStatelessRequest refreshRequest token |> Async.AwaitTask
 
                         match QaResponses.responseIdFromEvents refreshEvents with
                         | Some responseId ->
@@ -417,8 +432,8 @@ type internal QaResponsesAnswerer
         }
 
     and scheduleAnswerCompactionIfNeeded answerConfig prompt (forceReason: string option) =
-        match options.answerTransport, options.answerCompactionThresholdChars with
-        | Some _, Some threshold when threshold > 0 ->
+        match options.answerCompactionThresholdChars with
+        | Some threshold when threshold > 0 ->
             match tryCreateCompactionCheckpoint threshold forceReason.IsSome with
             | Some checkpoint ->
                 forceReason
@@ -438,7 +453,6 @@ type internal QaResponsesAnswerer
         responseTools
         previousResponseId
         input
-        includeStableContext
         requireInitialToolCall
         cancellationToken
         =
@@ -450,11 +464,10 @@ type internal QaResponsesAnswerer
                     prompt
                     previousResponseId
                     input
-                    includeStableContext
                     requireInitialToolCall
                     responseTools.tools
 
-            let! initialEvents = transport.RunRequest request cancellationToken |> Async.AwaitTask
+            let! initialEvents = transport.RunAnswerRequest request cancellationToken |> Async.AwaitTask
 
             let rec complete remainingToolTurns events observations =
                 async {
@@ -497,14 +510,40 @@ type internal QaResponsesAnswerer
                                     cancellationToken
                                 |> Async.AwaitTask
 
+                            let allObservations = observations @ newObservations
+
                             if remainingToolTurns <= 1 then
-                                let allObservations = observations @ newObservations
-                                let answer = QaAnswerModel.toolBudgetFallbackAnswer allObservations
-
                                 report
-                                    $"Answer Responses WebSocket reached the final tool-call round; returning latest tool observations without another model call. pendingToolCalls={calls.Length}; observations={allObservations.Length}; {QaResponses.diagnostics events}."
+                                    $"Answer Responses WebSocket reached the final tool-call round; sending a no-tool answer synthesis request. pendingToolCalls={calls.Length}; observations={allObservations.Length}; {QaResponses.diagnostics events}."
 
-                                return events, Text.normalizeWhitespace answer, allObservations, false
+                                let finalRequest =
+                                    responseFinalAnswerRequest
+                                        answerConfig
+                                        maxOutputTokens
+                                        prompt
+                                        (Some responseId)
+                                        outputs
+
+                                let! finalEvents =
+                                    transport.RunAnswerRequest finalRequest cancellationToken |> Async.AwaitTask
+
+                                let finalCalls = QaResponseTools.functionCalls finalEvents
+
+                                if List.isEmpty finalCalls then
+                                    return
+                                        finalEvents,
+                                        FsResponses.ResponseStream.outputText finalEvents |> Text.normalizeWhitespace,
+                                        allObservations,
+                                        true
+                                else
+                                    report
+                                        $"Answer Responses WebSocket no-tool synthesis still produced tool calls; returning latest model text. pendingToolCalls={finalCalls.Length}; {QaResponses.diagnostics finalEvents}."
+
+                                    return
+                                        finalEvents,
+                                        FsResponses.ResponseStream.outputText finalEvents |> Text.normalizeWhitespace,
+                                        allObservations,
+                                        false
                             else
                                 let followUpRequest =
                                     responseCreateRequest
@@ -514,13 +553,12 @@ type internal QaResponsesAnswerer
                                         (Some responseId)
                                         outputs
                                         false
-                                        false
                                         responseTools.tools
 
                                 let! nextEvents =
-                                    transport.RunRequest followUpRequest cancellationToken |> Async.AwaitTask
+                                    transport.RunAnswerRequest followUpRequest cancellationToken |> Async.AwaitTask
 
-                                return! complete (remainingToolTurns - 1) nextEvents (observations @ newObservations)
+                                return! complete (remainingToolTurns - 1) nextEvents allObservations
                 }
 
             return! complete maxResponseToolRounds initialEvents []
@@ -532,26 +570,23 @@ type internal QaResponsesAnswerer
 
     member _.PrepareAsync(cancellationToken) =
         task {
-            match options.answerTransport with
-            | Some _ ->
-                use linkedCts =
-                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sessionCancellation.Token)
+            use linkedCts =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sessionCancellation.Token)
 
-                let token = linkedCts.Token
-                let answerConfig = QaAnswerModel.modelConfig options Answer
+            let token = linkedCts.Token
+            let answerConfig = QaAnswerModel.modelConfig options Answer
 
-                let prompt =
-                    { instructions = QaAnswerModel.answerInstructions options
-                      userPrompt = "" }
+            let prompt =
+                { instructions = QaAnswerModel.answerInstructions options
+                  userPrompt = "" }
 
-                let responseTools = responseToolCatalog false
+            let responseTools = responseToolCatalog ()
 
-                let! _ =
-                    ensureAnswerBootstrap answerConfig prompt responseTools token
-                    |> Async.StartAsTask
+            let! _ =
+                ensureAnswerBootstrap answerConfig prompt responseTools token
+                |> Async.StartAsTask
 
-                return ()
-            | None -> return ()
+            return ()
         }
 
     member _.AnswerAsync
@@ -573,8 +608,7 @@ type internal QaResponsesAnswerer
 
             let answerAttempt maxOutputTokens replayHistory =
                 async {
-                    let responseTools =
-                        responseToolCatalog (answerConversationHasCompacted () || blackboardHasSummary ())
+                    let responseTools = responseToolCatalog ()
 
                     let! previousResponseId = ensureAnswerBootstrap answerConfig prompt responseTools cancellationToken
 
@@ -591,7 +625,6 @@ type internal QaResponsesAnswerer
                             responseTools
                             previousResponseId
                             (responsesInputItems userItem replayLocalHistory)
-                            previousResponseId.IsNone
                             options.answerRequireToolCall
                             cancellationToken
 
@@ -617,7 +650,6 @@ type internal QaResponsesAnswerer
                                 responseTools
                                 replayPreviousResponseId
                                 (responsesInputItems userItem true)
-                                replayPreviousResponseId.IsNone
                                 options.answerRequireToolCall
                                 cancellationToken
                     else

@@ -5,11 +5,29 @@ open System.Net.WebSockets
 open System.Threading
 open System.Threading.Tasks
 
+type internal QaResponsesRequestRunner =
+    FsResponses.WebSocketCreateRequest -> CancellationToken -> Task<FsResponses.ResponseStreamEvent list>
+
+type internal QaResponsesTransportOverride =
+    { runAnswerRequest: QaResponsesRequestRunner
+      runStatelessRequest: QaResponsesRequestRunner }
+
+module internal QaResponsesTransportOverride =
+    let same runner =
+        { runAnswerRequest = runner
+          runStatelessRequest = runner }
+
 type internal QaResponsesTransport
-    (options: QaSessionOptions, sessionCancellation: CancellationTokenSource, report: string -> unit) =
+    (
+        options: QaSessionOptions,
+        sessionCancellation: CancellationTokenSource,
+        report: string -> unit,
+        transportOverride: QaResponsesTransportOverride option
+    ) =
     let answerConnectionGate = obj ()
     let mutable answerConnection: FsResponses.ResponseWebSocket option = None
     let mutable answerConnectionTask: Task<FsResponses.ResponseWebSocket> option = None
+    let config = options.answerResponseWebSocketConfig
 
     let answerConnectionIsOpen (connection: FsResponses.ResponseWebSocket) =
         connection.socket.State = WebSocketState.Open
@@ -82,32 +100,18 @@ type internal QaResponsesTransport
                 return raise ex
         }
 
-    member _.RunRequest request cancellationToken =
+    member _.RunAnswerRequest request cancellationToken =
         task {
-            match options.answerTransport with
-            | Some(QaAnswerTransport.CustomResponsesWebSocket createAndCollect) ->
-                return! createAndCollect request cancellationToken
-            | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
-                return! runOnLiveAnswerConnection config request cancellationToken
-            | None -> return []
+            match transportOverride with
+            | Some overrideTransport -> return! overrideTransport.runAnswerRequest request cancellationToken
+            | None -> return! runOnLiveAnswerConnection config request cancellationToken
         }
 
-    member this.RunWarmupRequest request cancellationToken =
-        this.RunRequest request cancellationToken
-
-    member _.RunOfflineRequest request cancellationToken =
+    member _.RunStatelessRequest request cancellationToken =
         task {
-            match options.answerTransport with
-            | Some(QaAnswerTransport.CustomResponsesWebSocket createAndCollect) ->
-                return! createAndCollect request cancellationToken
-            | Some(QaAnswerTransport.OpenAIResponsesWebSocket config) ->
-                let! connection = FsResponses.ResponsesWebSocket.connect config cancellationToken
-
-                try
-                    return! FsResponses.ResponsesWebSocket.createAndCollect connection request cancellationToken
-                finally
-                    FsResponses.ResponsesWebSocket.dispose connection
-            | None -> return []
+            match transportOverride with
+            | Some overrideTransport -> return! overrideTransport.runStatelessRequest request cancellationToken
+            | None -> return! FsResponses.ResponsesWebSocket.createWithNewConnection config request cancellationToken
         }
 
     member _.Dispose() =

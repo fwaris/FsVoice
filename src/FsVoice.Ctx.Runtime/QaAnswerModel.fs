@@ -1,7 +1,6 @@
 namespace FsVoice.Ctx
 
 open System
-open Microsoft.Extensions.AI
 open FsVoice.Core
 open FsVoice.Retrieval
 
@@ -49,49 +48,6 @@ module internal QaAnswerModel =
             |> List.mapi (fun index observation ->
                 $"[{index + 1}] {observation.pluginName}.{observation.toolName}\n{Text.truncate 900 observation.content}")
             |> String.concat "\n\n"
-
-    let toolBudgetFallbackAnswer (observations: QaToolObservation list) =
-        let latest = observations |> List.rev |> List.truncate 3 |> List.rev
-
-        if List.isEmpty latest then
-            ""
-        else
-            $"The latest source evidence I found before stopping extra searches is:\n\n{renderObservations latest}"
-            |> Text.truncate 2200
-
-    let nullableValue (value: Nullable<'T>) =
-        if value.HasValue then string value.Value else "n/a"
-
-    let responseDiagnostics (response: ChatResponse) =
-        let finishReason = response.FinishReason |> nullableValue
-
-        let usage =
-            if isNull response.Usage then
-                "usage=n/a"
-            else
-                $"usage=input:{nullableValue response.Usage.InputTokenCount} output:{nullableValue response.Usage.OutputTokenCount} reasoning:{nullableValue response.Usage.ReasoningTokenCount} total:{nullableValue response.Usage.TotalTokenCount}"
-
-        let messageCount =
-            if isNull response.Messages then
-                0
-            else
-                response.Messages.Count
-
-        $"finish={finishReason}; {usage}; messages={messageCount}"
-
-    let isTokenLimitFinish (response: ChatResponse) =
-        if isNull response then
-            false
-        else
-            let finishReason = response.FinishReason |> nullableValue
-
-            finishReason.Contains("length", StringComparison.OrdinalIgnoreCase)
-            || finishReason.Contains("max_tokens", StringComparison.OrdinalIgnoreCase)
-            || finishReason.Contains("max output", StringComparison.OrdinalIgnoreCase)
-
-    let answerPromptMessages prompt =
-        [ ChatMessage(ChatRole.System, prompt.instructions)
-          ChatMessage(ChatRole.User, prompt.userPrompt) ]
 
     let answerReasoning (answerConfig: ModelRoleConfig) =
         answerConfig.reasoningEffort
@@ -168,84 +124,3 @@ module internal QaAnswerModel =
           text = Text.normalizeWhitespace request.question
           isFinal = true
           receivedAt = DateTimeOffset.UtcNow }
-
-    let answerWithChatClient
-        (options: QaSessionOptions)
-        report
-        contextSources
-        (snapshot: TranscriptSnapshot)
-        (decision: SupervisorDecision)
-        (memoryHits: MemoryRecallHit list)
-        (chunks: SourceChunk list)
-        (observations: QaToolObservation list)
-        cancellationToken
-        =
-        async {
-            match options.clients.answerGenerator with
-            | None ->
-                return
-                    { answer = "No answer model is configured for this QA session."
-                      observations = [] }
-            | Some client ->
-                let answerConfig = modelConfig options Answer
-
-                let prompt =
-                    answerPrompt options contextSources snapshot decision memoryHits chunks observations
-
-                let messages = answerPromptMessages prompt
-
-                let answerAttempt maxOutputTokens =
-                    async {
-                        let opts = ChatOptions()
-
-                        if ModelCapabilities.supportsTemperature answerConfig.modelId then
-                            opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
-
-                        opts.MaxOutputTokens <- Nullable(maxOutputTokens)
-
-                        let! response = client.GetResponseAsync(messages, opts, cancellationToken) |> Async.AwaitTask
-
-                        return response, response.Text |> Text.normalizeWhitespace
-                    }
-
-                let maxOutputTokens = roleMaxTokens options Answer 2500
-                let! response, answer = answerAttempt maxOutputTokens
-
-                if isTokenLimitFinish response then
-                    report
-                        $"Answer model hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {responseDiagnostics response}."
-
-                    return
-                        { answer = tokenLimitFallback maxOutputTokens
-                          observations = [] }
-                elif not (String.IsNullOrWhiteSpace answer) then
-                    return { answer = answer; observations = [] }
-                else
-                    report
-                        $"Answer model returned empty text: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics response}."
-
-                    let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
-                    let! retryResponse, retryAnswer = answerAttempt retryMaxOutputTokens
-
-                    if isTokenLimitFinish retryResponse then
-                        report
-                            $"Answer model retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
-
-                        return
-                            { answer = tokenLimitFallback retryMaxOutputTokens
-                              observations = [] }
-                    elif not (String.IsNullOrWhiteSpace retryAnswer) then
-                        report
-                            $"Answer model retry succeeded after empty response: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; {responseDiagnostics retryResponse}."
-
-                        return
-                            { answer = retryAnswer
-                              observations = [] }
-                    else
-                        report
-                            $"Answer model retry also returned empty text: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {responseDiagnostics retryResponse}."
-
-                        return
-                            { answer = emptyAnswerFallbackWithLimit retryMaxOutputTokens
-                              observations = [] }
-        }

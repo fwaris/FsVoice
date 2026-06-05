@@ -5,41 +5,10 @@ open System.Threading.Tasks
 open Microsoft.Extensions.AI
 open FsVoice.Retrieval
 
-type QaModelClients =
-    { queryExpansion: IChatClient option
-      answerGenerator: IChatClient option }
+type QaModelClients = { queryExpansion: IChatClient option }
 
 module QaModelClients =
-    let none =
-        { queryExpansion = None
-          answerGenerator = None }
-
-type QaAnswerTransport =
-    | OpenAIResponsesWebSocket of FsResponses.ResponseWebSocketConfig
-    | CustomResponsesWebSocket of
-        (FsResponses.WebSocketCreateRequest -> CancellationToken -> Task<FsResponses.ResponseStreamEvent list>)
-
-module QaAnswerTransport =
-    let openAIResponsesWebSocket apiKey =
-        FsResponses.ResponseWebSocketConfig.create apiKey |> OpenAIResponsesWebSocket
-
-    let customResponsesWebSocket createAndCollect =
-        CustomResponsesWebSocket createAndCollect
-
-type BlackboardPruningOptions =
-    { enabled: bool
-      triggerChars: int
-      targetChars: int
-      preserveRecentTurns: int
-      summaryMaxOutputTokens: int }
-
-module BlackboardPruningOptions =
-    let defaults =
-        { enabled = true
-          triggerChars = 60000
-          targetChars = 40000
-          preserveRecentTurns = 6
-          summaryMaxOutputTokens = 900 }
+    let none = { queryExpansion = None }
 
 type QaSessionOptions =
     { storageRoot: string
@@ -47,7 +16,7 @@ type QaSessionOptions =
       toolProviderDirectory: string option
       retrievalMode: RetrievalMode
       clients: QaModelClients
-      answerTransport: QaAnswerTransport option
+      answerResponseWebSocketConfig: FsResponses.ResponseWebSocketConfig
       answerRequireToolCall: bool
       answerPromptCacheKey: string option
       answerPromptCacheRetention: string option
@@ -72,17 +41,16 @@ type QaSessionOptions =
       enableDurableMemory: bool
       answerCompactionThresholdChars: int option
       answerCompactionMaxOutputTokens: int
-      blackboardPruning: BlackboardPruningOptions
       report: string -> unit }
 
 module QaSessionOptions =
-    let create storageRoot =
+    let create storageRoot answerResponseWebSocketConfig =
         { storageRoot = storageRoot
           memoryStorePath = None
           toolProviderDirectory = None
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
-          answerTransport = None
+          answerResponseWebSocketConfig = answerResponseWebSocketConfig
           answerRequireToolCall = false
           answerPromptCacheKey = None
           answerPromptCacheRetention = None
@@ -107,5 +75,4 @@ module QaSessionOptions =
           enableDurableMemory = true
           answerCompactionThresholdChars = Some 80000
           answerCompactionMaxOutputTokens = 1200
-          blackboardPruning = BlackboardPruningOptions.defaults
           report = ignore }

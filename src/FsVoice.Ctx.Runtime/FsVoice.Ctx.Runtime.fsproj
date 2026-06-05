@@ -5,7 +5,7 @@
     <RootNamespace>FsVoice.Ctx</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <PackageId>FsVoice.Ctx.Runtime</PackageId>
-    <Description>Oracle-style context runtime for grounded FsVoice answers, tools, blackboard, and durable memory.</Description>
+    <Description>Oracle-style context runtime for grounded FsVoice answers, tools, durable memory, and optional blackboard utilities.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>FSharp;Voice;Context;Oracle;AI</PackageTags>
   </PropertyGroup>
@@ -23,7 +23,6 @@
     <Compile Include="QaResponses.fs" />
     <Compile Include="QaResponsesTransport.fs" />
     <Compile Include="QaResponsesAnswer.fs" />
-    <Compile Include="QaBlackboardRuntime.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
 
