@@ -213,7 +213,7 @@ module PlugInRuntimeOptions =
           memoryCandidateChunks = 14
           maxContextChunks = 12
           realtimeMemoryTimeoutMs = 1200
-          functionCallTimeoutMs = 45000
+          functionCallTimeoutMs = 120000
           autoWriteback = true }
 
     let sanitize runtime =

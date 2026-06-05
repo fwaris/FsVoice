@@ -15,8 +15,15 @@
     <Compile Include="PlugIns.fs" />
     <Compile Include="DurableMemory.fs" />
     <Compile Include="MemoryService.fs" />
+    <Compile Include="QaSessionOptions.fs" />
     <Compile Include="Blackboard.fs" />
     <Compile Include="Tools.fs" />
+    <Compile Include="QaAnswerModel.fs" />
+    <Compile Include="QaResponseTools.fs" />
+    <Compile Include="QaResponses.fs" />
+    <Compile Include="QaResponsesTransport.fs" />
+    <Compile Include="QaResponsesAnswer.fs" />
+    <Compile Include="QaBlackboardRuntime.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
 

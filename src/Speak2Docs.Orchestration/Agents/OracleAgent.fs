@@ -127,12 +127,25 @@ module OracleAgent =
         match session with
         | :? FsVoice.Ctx.IQaAnswerTransportPreparer as preparer ->
             async {
+                use preparationTimeout = new CancellationTokenSource()
+                preparationTimeout.CancelAfter(TimeSpan.FromMilliseconds(float st.plugIn.runtime.functionCallTimeoutMs))
+
                 try
-                    do! preparer.PrepareAnswerTransportAsync(CancellationToken.None) |> Async.AwaitTask
+                    do!
+                        preparer.PrepareAnswerTransportAsync(preparationTimeout.Token)
+                        |> Async.AwaitTask
+
                     st.bus.PostToAgent(Ag_Log "Answer Responses WebSocket prepared.")
                 with
-                | :? OperationCanceledException -> ()
-                | ex -> st.bus.PostToAgent(Ag_Log $"Answer Responses WebSocket preparation failed: {ex.Message}")
+                | :? OperationCanceledException ->
+                    st.bus.PostToAgent(
+                        Ag_Log
+                            $"Answer Responses WebSocket preparation timed out after {st.plugIn.runtime.functionCallTimeoutMs} ms; the next oracle request will connect on demand."
+                    )
+                | ex ->
+                    st.bus.PostToAgent(
+                        Ag_Log $"Answer Responses WebSocket preparation failed: {ex.GetType().Name}: {ex.Message}"
+                    )
             }
             |> Async.Start
         | _ -> ()
@@ -241,10 +254,11 @@ module OracleAgent =
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, Some candidate))
             with
             | :? OperationCanceledException ->
+                st.bus.PostToAgent(Ag_Log $"QA request canceled for turn {request.snapshot.turnId}.")
                 request.completion.TrySetCanceled request.cancellationToken |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
             | ex ->
-                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.Message}")
+                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.GetType().Name}: {ex.Message}")
                 request.completion.TrySetException ex |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
         }

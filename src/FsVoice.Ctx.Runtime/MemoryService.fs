@@ -80,3 +80,26 @@ type DurableMemoryService(path: string, encoder: unit -> FsColbert.OnnxColbertEn
             let cleared, logs = DurableMemory.clear store
             store <- cleared
             logs
+
+type DisabledMemoryService() =
+    interface IMemoryService with
+        member _.StartupLogs = []
+
+        member _.DefaultNamespace = DurableMemory.defaultNamespace
+
+        member _.CreateSupervisorDecision(snapshot, judgement) =
+            DurableMemory.createSupervisorDecision snapshot judgement
+
+        member _.RecallAsync(_, _) = Task.FromResult []
+
+        member _.SearchAsync(_, _, _) =
+            Task.FromResult "Durable memory is disabled for this QA session."
+
+        member _.ProposalsFromExchange(_, _) = []
+
+        member _.CommitProposals _ = [], []
+
+        member _.RetractFromTurn _ = []
+
+        member _.ClearAll() =
+            [ "Durable memory is disabled for this QA session." ]

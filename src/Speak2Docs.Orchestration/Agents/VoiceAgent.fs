@@ -623,7 +623,11 @@ module VoiceAgent =
                 let output =
                     $"I was unable to obtain an answer from the oracle before the timeout. The request may have exceeded the current max answer token limit of {toolCall.answerMaxOutputTokens}, or the backend may still be working. {maxAnswerTokensSettingsGuidance} You can also ask a narrower question."
 
-                bus.PostToAgent(Ag_Log $"Oracle tool call timed out for {toolCall.callId}: {ex.Message}")
+                bus.PostToAgent(
+                    Ag_Log
+                        $"Oracle tool call timed out for {toolCall.callId} after {toolCall.timeout.TotalMilliseconds:F0} ms: {ex.Message}"
+                )
+
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))
         }
 
