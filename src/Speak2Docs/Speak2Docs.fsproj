@@ -30,6 +30,7 @@
 
     <TargetPlatformIdentifier Condition=" $(TargetPlatformIdentifier) == '' ">$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</TargetPlatformIdentifier>
 
+    <TargetPlatformVersion Condition="$(TargetPlatformIdentifier) == 'ios' and '$(TargetPlatformVersion)' == ''">26.5</TargetPlatformVersion>
     <SupportedOSPlatformVersion Condition="$(TargetPlatformIdentifier) == 'ios'">15.1</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
     <SupportedOSPlatformVersion Condition="$(TargetPlatformIdentifier) == 'android'">24.0</SupportedOSPlatformVersion>

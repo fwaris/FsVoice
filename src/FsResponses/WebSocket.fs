@@ -729,7 +729,6 @@ module ResponseWebSocketConfig =
 type ResponseWebSocket =
     { socket: ClientWebSocket
       threadSafeSocket: ThreadSafeWebSocket.ThreadSafeWebSocket
-      transactionGate: SemaphoreSlim
       config: ResponseWebSocketConfig }
 
 type WebSocketClosed =
@@ -762,13 +761,11 @@ module ResponsesWebSocket =
             return
                 { socket = socket
                   threadSafeSocket = threadSafeSocket
-                  transactionGate = new SemaphoreSlim(1, 1)
                   config = config }
         }
 
     let dispose connection =
         (connection.threadSafeSocket :> IDisposable).Dispose()
-        connection.transactionGate.Dispose()
 
     let close connection (cancellationToken: CancellationToken) =
         task {
@@ -855,13 +852,8 @@ module ResponsesWebSocket =
 
     let createAndCollect connection request (cancellationToken: CancellationToken) =
         task {
-            do! connection.transactionGate.WaitAsync(cancellationToken)
-
-            try
-                do! sendCreate connection request cancellationToken
-                return! readUntilTerminal connection cancellationToken
-            finally
-                connection.transactionGate.Release() |> ignore
+            do! sendCreate connection request cancellationToken
+            return! readUntilTerminal connection cancellationToken
         }
 
     let createWithNewConnection config request cancellationToken =

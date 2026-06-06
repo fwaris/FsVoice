@@ -442,6 +442,7 @@ module Update =
         | PrivacyPolicy -> C.PRIVACY_POLICY_URL
         | ThirdPartyNotices -> C.THIRD_PARTY_NOTICES_URL
         | SettingsHelp -> C.SETTINGS_HELP_URL
+        | OpenAiApiKeys -> C.OPENAI_API_KEYS_URL
 
     let private openAppLink link : Async<Result<unit, exn>> =
         async {

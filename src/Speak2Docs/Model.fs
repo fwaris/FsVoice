@@ -32,6 +32,7 @@ type AppLink =
     | PrivacyPolicy
     | ThirdPartyNotices
     | SettingsHelp
+    | OpenAiApiKeys
 
 type StartParams =
     { connectionId: string

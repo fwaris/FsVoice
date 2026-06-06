@@ -95,6 +95,12 @@ module SettingsView =
     let private columns =
         [ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ]
 
+    let private accountColumns =
+        [ Dimension.Absolute 112.
+          Dimension.Star
+          Dimension.Absolute 76.
+          Dimension.Absolute 48. ]
+
     let private sectionRows count =
         Dimension.Absolute 34. :: List.init count (fun _ -> Dimension.Absolute 48.)
 
@@ -114,7 +120,7 @@ module SettingsView =
     let private accountSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 2) {
+            ((Grid(accountColumns, sectionRows 2) {
                 sectionTitle "Account"
 
                 ViewControls.formLabel "OpenAI key" 1
@@ -127,6 +133,8 @@ module SettingsView =
                     .gridColumn(1)
                     .margin (2.)
 
+                Button("Get key", OpenAppLink OpenAiApiKeys).font(size = 13.).gridRow(1).gridColumn(2).margin (2.)
+
                 (ViewControls.compactIconButton
                     (if model.hideSecrets then
                          Icons.visible
@@ -135,7 +143,7 @@ module SettingsView =
                     ToggleSecretVisibility)
                     .isEnabled(canEdit)
                     .gridRow(1)
-                    .gridColumn (2)
+                    .gridColumn (3)
 
                 ViewControls.formLabel "PlugIn" 2
 
@@ -144,7 +152,7 @@ module SettingsView =
                     .centerVertical()
                     .gridRow(2)
                     .gridColumn(1)
-                    .gridColumnSpan(2)
+                    .gridColumnSpan(3)
                     .margin (2.)
             })
                 .padding (10.))

@@ -10,6 +10,8 @@ Account settings identify the OpenAI account and active behavior profile Speak2D
 
 Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for realtime voice interaction, transcription, answers, query expansion, and optional keyword enrichment. The key is saved with the platform secure-storage mechanism when available.
 
+Use **Get key** next to the OpenAI key field to open the OpenAI API keys page. Sign in or create an OpenAI account there, create a new secret key, copy it, and paste it into Speak2Docs Settings.
+
 ### Show or hide key
 
 Toggles whether the OpenAI key field is displayed as plain text while you edit it. This only changes visibility in the Settings screen; it does not change the saved key.
@@ -20,10 +22,10 @@ Shows the active Speak2Docs plugin. A plugin supplies prompts, model defaults, r
 
 Before sending microphone audio, transcripts, prompts, selected document passages, or optional keyword-generation text to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app. You can review or revoke this permission from Settings.
 
-To create a key:
+To create a key manually:
 
-1. Sign in to the OpenAI platform.
-2. Open the API keys page.
+1. Sign in to the OpenAI platform at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+2. Open the API keys page if you are not taken there automatically.
 3. Create a new secret key.
 4. Copy the key and paste it into the OpenAI API key field in Speak2Docs Settings.
 
