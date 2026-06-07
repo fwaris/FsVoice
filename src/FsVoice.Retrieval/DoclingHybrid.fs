@@ -1736,13 +1736,17 @@ Rules:
 
         if layoutPassages.Length <= 1 then
             Some $"Document structure layout conversion produced only {layoutPassages.Length} passage(s)"
-        elif
-            nativePassages.Length > layoutPassages.Length
-            && nativeChars >= 2000L
-            && layoutChars * 4L < nativeChars * 3L
-        then
-            Some
-                $"Document structure layout conversion looked incomplete ({layoutPassages.Length} passage(s), {layoutChars} chars vs {nativeChars} native chars)"
+        elif nativePassages.Length > layoutPassages.Length && nativeChars >= 2000L then
+            let materiallyLessText = layoutChars * 10L < nativeChars * 9L
+
+            let droppedTextWithFewerPassages =
+                layoutChars < nativeChars && nativePassages.Length - layoutPassages.Length >= 5
+
+            if materiallyLessText || droppedTextWithFewerPassages then
+                Some
+                    $"Document structure layout conversion looked incomplete ({layoutPassages.Length} passage(s), {layoutChars} chars vs {nativeChars} native chars)"
+            else
+                None
         else
             None
 
