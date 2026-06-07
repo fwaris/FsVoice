@@ -242,6 +242,11 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords
                     pdfParsingMode = options.pdfParsingMode
+                    pdfVisualDescriptionOptions =
+                        { options.pdfVisualDescriptionOptions with
+                            client =
+                                options.pdfVisualDescriptionOptions.client
+                                |> Option.orElse options.clients.visualDescription }
                     logExpansions = options.logExpansions
                     logChunks = options.logChunks
                     useLexicalFilter = options.useLexicalFilter
@@ -255,6 +260,14 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
         task {
             let totalSw = Stopwatch.StartNew()
             let snapshot = QaAnswerModel.createSnapshot request
+            let transportMode = QaAnswerTransportMode.storageName options.answerTransportMode
+
+            let reportTiming message =
+                if options.logTimings then
+                    report message
+
+            reportTiming
+                $"QA request started: turn={snapshot.turnId}; question_chars={snapshot.text.Length}; answerModel={options.answerModelId}; transportMode={transportMode}."
 
             let decision =
                 memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
@@ -270,20 +283,29 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
             let memoryTask =
                 task {
                     let sw = Stopwatch.StartNew()
+                    reportTiming $"QA memory started: turn={snapshot.turnId}."
                     let! hits = memoryService.RecallAsync(decision, cancellationToken)
                     sw.Stop()
+                    reportTiming
+                        $"QA memory completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; hits={hits.Length}."
+
                     return hits, sw.Elapsed.TotalMilliseconds
                 }
 
             let sourceTask =
                 task {
                     let sw = Stopwatch.StartNew()
+                    reportTiming
+                        $"QA retrieval started: turn={snapshot.turnId}; candidateChunks={options.memoryCandidateChunks}; providers={contextProviders.Length}."
 
                     let! chunks =
                         retrieveContext snapshot.text options.memoryCandidateChunks cancellationToken
                         |> Async.StartAsTask
 
                     sw.Stop()
+                    reportTiming
+                        $"QA retrieval completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; chunks={chunks.Length}."
+
                     return chunks, sw.Elapsed.TotalMilliseconds
                 }
 
@@ -292,19 +314,44 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
             let toolObservations = forgetObservations
 
             let answerSw = Stopwatch.StartNew()
+            reportTiming
+                $"QA answer started: turn={snapshot.turnId}; model={options.answerModelId}; contextChunks={chunks.Length}; memoryHits={memoryHits.Length}; transportMode={transportMode}."
 
             let! answerResult =
-                responsesAnswerer.AnswerAsync(
-                    snapshot,
-                    decision,
-                    memoryHits,
-                    chunks,
-                    toolObservations,
-                    cancellationToken
-                )
-                |> Async.StartAsTask
+                task {
+                    try
+                        let! result =
+                            responsesAnswerer.AnswerAsync(
+                                snapshot,
+                                decision,
+                                memoryHits,
+                                chunks,
+                                toolObservations,
+                                cancellationToken
+                            )
+                            |> Async.StartAsTask
+
+                        return result
+                    with
+                    | :? OperationCanceledException as ex ->
+                        answerSw.Stop()
+
+                        reportTiming
+                            $"QA answer canceled: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; error={ex.Message}."
+
+                        return raise ex
+                    | ex ->
+                        answerSw.Stop()
+
+                        reportTiming
+                            $"QA answer failed: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; error={ex.GetType().Name}: {ex.Message}."
+
+                        return raise ex
+                }
 
             answerSw.Stop()
+            reportTiming
+                $"QA answer completed: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; answer_chars={answerResult.answer.Length}; observations={answerResult.observations.Length}; transportMode={transportMode}."
 
             let answer = answerResult.answer
             let allObservations = toolObservations @ answerResult.observations
@@ -319,7 +366,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
             if options.logTimings then
                 report
-                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}."
+                    $"QA timing: turn={snapshot.turnId}; total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}; transportMode={transportMode}."
 
             let qaAnswer =
                 { turnId = request.turnId

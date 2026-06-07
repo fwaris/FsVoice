@@ -55,8 +55,11 @@ and PickedSourceImportResult =
 
 and TransientNotification = { id: int; message: string }
 
+and ViewportSize = { width: float; height: float }
+
 and Model =
     { currentPage: AppPage
+      mainPageSize: ViewportSize option
       mailbox: Channel<Msg>
       bundle: ConnectionBundle option
       pendingConnectionId: string option
@@ -81,6 +84,7 @@ and Model =
       documentProcessingCancellation: CancellationTokenSource option
       logExpansions: bool
       logChunks: bool
+      audioDefaultToSpeaker: bool
       answerMaxOutputTokens: string
       answerReasoningEffort: string
       answerToolCallLoopLimit: string
@@ -88,12 +92,14 @@ and Model =
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      describePdfVisuals: bool
       notification: TransientNotification option
       nextNotificationId: int
       appTheme: AppTheme
       indexPreview: IndexPreviewState option }
 
 and Msg =
+    | MainPageSizeAllocated of float * float
     | TermsAccepted
     | TermsDeclined
     | OpenAiDisclosure_Show of OpenAiDisclosureMode
@@ -136,6 +142,7 @@ and Msg =
     | LogFont_Increase
     | LogFont_Decrease
     | ActivityLogVerbosityChanged of ActivityLogVerbosity
+    | AudioDefaultToSpeakerToggled of bool
     | NotificationExpired of int
     | ThemeChanged of AppTheme
     | EventError of exn
@@ -148,4 +155,5 @@ and Msg =
     | ElaborateIndexKeywordsToggled of bool
     | UseHybridPdfParsingToggled of bool
     | UseLayoutAnalysisToggled of bool
+    | DescribePdfVisualsToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

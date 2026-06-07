@@ -13,12 +13,14 @@ type internal QaResponsesPrepareRunner = CancellationToken -> Task<unit>
 type internal QaResponsesTransportOverride =
     { prepareAnswerConnection: QaResponsesPrepareRunner option
       runAnswerRequest: QaResponsesRequestRunner
+      runNewAnswerRequest: QaResponsesRequestRunner option
       runStatelessRequest: QaResponsesRequestRunner }
 
 module internal QaResponsesTransportOverride =
     let same runner =
         { prepareAnswerConnection = None
           runAnswerRequest = runner
+          runNewAnswerRequest = None
           runStatelessRequest = runner }
 
 type internal QaResponsesTransport
@@ -104,19 +106,52 @@ type internal QaResponsesTransport
                 return raise ex
         }
 
+    let persistentRunner request cancellationToken =
+        match transportOverride with
+        | Some overrideTransport -> overrideTransport.runAnswerRequest request cancellationToken
+        | None -> runOnLiveAnswerConnection config request cancellationToken
+
+    let runPersistentAnswerRequest request cancellationToken =
+        let rec run attempt =
+            task {
+                try
+                    return! persistentRunner request cancellationToken
+                with
+                | :? OperationCanceledException as ex -> return raise ex
+                | ex when attempt = 1 ->
+                    report
+                        $"Answer Responses persistent websocket request failed; reconnecting and retrying once; error={ex.GetType().Name}: {ex.Message}."
+
+                    return! run (attempt + 1)
+                | ex ->
+                    report
+                        $"Answer Responses persistent websocket request failed after retry; error={ex.GetType().Name}: {ex.Message}."
+
+                    return raise ex
+            }
+
+        run 1
+
     member _.RunAnswerRequest request cancellationToken =
         task {
-            match transportOverride with
-            | Some overrideTransport -> return! overrideTransport.runAnswerRequest request cancellationToken
-            | None -> return! runOnLiveAnswerConnection config request cancellationToken
+            match options.answerTransportMode, transportOverride with
+            | NewWebSocketPerRequest, Some { runNewAnswerRequest = Some runNew } ->
+                return! runNew request cancellationToken
+            | NewWebSocketPerRequest, Some overrideTransport ->
+                return! overrideTransport.runAnswerRequest request cancellationToken
+            | PersistentWebSocket, Some _ -> return! runPersistentAnswerRequest request cancellationToken
+            | NewWebSocketPerRequest, None ->
+                return! FsResponses.ResponsesWebSocket.createWithNewConnection config request cancellationToken
+            | PersistentWebSocket, None -> return! runPersistentAnswerRequest request cancellationToken
         }
 
     member _.PrepareAnswerConnection cancellationToken =
         task {
-            match transportOverride with
-            | Some { prepareAnswerConnection = Some prepare } -> return! prepare cancellationToken
-            | Some _ -> return ()
-            | None ->
+            match options.answerTransportMode, transportOverride with
+            | NewWebSocketPerRequest, _ -> return ()
+            | PersistentWebSocket, Some { prepareAnswerConnection = Some prepare } -> return! prepare cancellationToken
+            | PersistentWebSocket, Some _ -> return ()
+            | PersistentWebSocket, None ->
                 let! _ = liveAnswerConnection config cancellationToken
                 return ()
         }

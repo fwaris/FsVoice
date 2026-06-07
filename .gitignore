@@ -9,6 +9,7 @@ obj/
 *.user
 temp/
 artifacts/
+nuget.local/
 # Release signing material and store upload credentials.
 *.p12
 *.mobileprovision

@@ -24,6 +24,9 @@ module RuntimeSettings =
     let AnswerToolCallLoopLimit = "answer.toolCallLoopLimit"
 
     [<Literal>]
+    let AudioDefaultToSpeaker = "audio.defaultToSpeaker"
+
+    [<Literal>]
     let UseLexicalFilter = "retrieval.useLexicalFilter"
 
     [<Literal>]
@@ -34,6 +37,15 @@ module RuntimeSettings =
 
     [<Literal>]
     let UseLayoutAnalysis = "pdf.useLayoutAnalysis"
+
+    [<Literal>]
+    let DescribePdfVisuals = "pdf.describeVisuals"
+
+    [<Literal>]
+    let IosAudioRoutePolicy = "audio.iosRoutePolicy"
+
+    [<Literal>]
+    let DefaultIosAudioRoutePolicy = "receiverOrHeadset"
 
     [<Literal>]
     let DefaultAnswerMaxOutputTokens = 2500
@@ -49,6 +61,12 @@ module RuntimeSettings =
 
     [<Literal>]
     let DefaultAnswerToolCallLoopLimit = 3
+
+    [<Literal>]
+    let DefaultRealtimeOracleFunctionCallTimeoutMs = 45000
+
+    let DefaultOracleAnswerTransportMode =
+        FsVoice.Ctx.QaAnswerTransportMode.PersistentWebSocket
 
     [<Literal>]
     let MinAnswerToolCallLoopLimit = 1
@@ -111,6 +129,33 @@ module RuntimeSettings =
         |> int AnswerToolCallLoopLimit DefaultAnswerToolCallLoopLimit
         |> clamp MinAnswerToolCallLoopLimit MaxAnswerToolCallLoopLimit
 
+    let normalizeIosAudioRoutePolicy value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "speaker"
+        | "speakerphone" -> "speakerphone"
+        | "receiver"
+        | "headset"
+        | "receiverorheadset"
+        | "receiver-or-headset" -> DefaultIosAudioRoutePolicy
+        | _ -> DefaultIosAudioRoutePolicy
+
+    let iosAudioRoutePolicy values =
+        values
+        |> string IosAudioRoutePolicy DefaultIosAudioRoutePolicy
+        |> normalizeIosAudioRoutePolicy
+
+    let audioDefaultToSpeaker fallback values =
+        match values |> tryGet AudioDefaultToSpeaker with
+        | Some value ->
+            match System.Boolean.TryParse value with
+            | true, parsed -> parsed
+            | false, _ -> fallback
+        | None ->
+            values
+            |> tryGet IosAudioRoutePolicy
+            |> Option.map (fun value -> normalizeIosAudioRoutePolicy value = "speakerphone")
+            |> Option.defaultValue fallback
+
     let modelRoleKey role =
         $"model.{FsVoice.Ctx.ModelRole.storageName role}"
 
@@ -137,6 +182,7 @@ module RuntimeSettings =
           elaborateIndexKeywords = bool ElaborateIndexKeywords false values
           useHybridPdfParsing = bool UseHybridPdfParsing true values
           useLayoutAnalysis = bool UseLayoutAnalysis true values
+          describePdfVisuals = bool DescribePdfVisuals false values
           answerToolCallLoopLimit = answerToolCallLoopLimit values }
 
     let composePlugIn
@@ -154,7 +200,18 @@ module RuntimeSettings =
 
         let answerModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer definition
 
+        let functionCallTimeoutMs =
+            if
+                definition.runtime.functionCallTimeoutMs = FsVoice.Ctx.PlugInRuntimeOptions.defaults.functionCallTimeoutMs
+            then
+                DefaultRealtimeOracleFunctionCallTimeoutMs
+            else
+                definition.runtime.functionCallTimeoutMs
+
         { definition with
+            runtime =
+                { definition.runtime with
+                    functionCallTimeoutMs = functionCallTimeoutMs }
             models =
                 definition.models
                 |> Map.add

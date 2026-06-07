@@ -404,6 +404,7 @@ module Settings =
         let fallback =
             match role with
             | FsVoice.Ctx.Answer -> C.DEFAULT_ORACLE_MODEL
+            | FsVoice.Ctx.VisualDescription -> C.DEFAULT_VISUAL_DESCRIPTION_MODEL
             | _ -> ""
 
         let value = value |> Text.notEmpty |> Option.defaultValue fallback
@@ -455,6 +456,19 @@ module Settings =
 
     let setActivityLogVerbosity value =
         Preferences.Default.Set(C.SETTINGS_ACTIVITY_LOG_LEVEL, ActivityLog.toStorageValue value)
+
+    let defaultAudioDefaultToSpeaker () =
+#if ANDROID
+        true
+#else
+        false
+#endif
+
+    let audioDefaultToSpeaker () =
+        Preferences.Default.Get(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, defaultAudioDefaultToSpeaker ())
+
+    let setAudioDefaultToSpeaker value =
+        Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, value)
 
     let answerMaxOutputTokens () =
         let fallback = C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
@@ -522,6 +536,12 @@ module Settings =
 
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
+
+    let describePdfVisuals () =
+        Preferences.Default.Get(C.SETTINGS_DESCRIBE_PDF_VISUALS, false)
+
+    let setDescribePdfVisuals value =
+        Preferences.Default.Set(C.SETTINGS_DESCRIBE_PDF_VISUALS, value)
 
     let plugInSetting plugInId key fallback =
         getScopedString plugInId $"Settings.{key}" fallback

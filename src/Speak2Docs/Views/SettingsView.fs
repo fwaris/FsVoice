@@ -233,6 +233,29 @@ module SettingsView =
             })
                 .padding (10.))
 
+    let private audioSection model canEdit =
+        sectionBorder
+            model.appTheme
+            ((Grid(columns, sectionRows 1) {
+                sectionTitle "Audio"
+
+                ViewControls.formLabel "Default Speaker" 1
+
+                (switchWithText
+                    model.audioDefaultToSpeaker
+                    AudioDefaultToSpeakerToggled
+                    canEdit
+                    (if model.audioDefaultToSpeaker then
+                         "Speaker"
+                     else
+                         "Receiver/headset"))
+                    .gridRow(1)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+            })
+                .padding (10.))
+
     let private retrievalSection model canEdit =
         sectionBorder
             model.appTheme
@@ -276,7 +299,7 @@ module SettingsView =
     let private pdfParsingSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 3) {
+            ((Grid(columns, sectionRows 4) {
                 sectionTitle "PDF Parsing"
 
                 ViewControls.formLabel "PDF Parser" 1
@@ -310,6 +333,18 @@ module SettingsView =
                     .gridRow(3)
                     .gridColumn(1)
                     .centerVertical ()
+
+                ViewControls.formLabel "Describe Visuals" 4
+
+                (switchWithText
+                    model.describePdfVisuals
+                    DescribePdfVisualsToggled
+                    (canEdit && model.useHybridPdfParsing && model.useLayoutAnalysis)
+                    (if model.describePdfVisuals then "On - slower" else "Off"))
+                    .gridRow(4)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
             })
                 .padding (10.))
 
@@ -431,6 +466,7 @@ module SettingsView =
             accountSection model canEdit
             modelsSection model canEdit
             activitySection model canEdit
+            audioSection model canEdit
             retrievalSection model canEdit
             pdfParsingSection model canEdit
             runtimeSection model.appTheme

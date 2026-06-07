@@ -339,6 +339,21 @@ let private responsesFunctionCallEvent id callId name arguments =
                 name = name
                 arguments = arguments } ]
 
+let private responsesFunctionCallEventWithText id text callId name arguments =
+    responsesCompletedEventWithOutput
+        id
+        [ FsResponses.IOitem.Message
+              { FsResponses.Message.Default with
+                  id = Some $"msg_{id}"
+                  status = Some "completed"
+                  role = "assistant"
+                  content = [ FsResponses.Content.Output_text { text = text; annotations = None } ] }
+          FsResponses.IOitem.Function_call
+              { id = $"fc_{callId}"
+                call_id = callId
+                name = name
+                arguments = arguments } ]
+
 let private responsesFunctionCallEvents id calls =
     responsesCompletedEventWithOutput
         id
@@ -362,8 +377,21 @@ let private previousResponseNotFoundEvent =
               ``type`` = Some "invalid_request_error"
               param = Some "previous_response_id" } }
 
+let private responsesErrorEvent code message =
+    FsResponses.ResponseStreamEvent.Error
+        { event_id = None
+          sequence_number = None
+          status = Some 500
+          response_id = None
+          error =
+            { code = code
+              message = message
+              ``type`` = Some "server_error"
+              param = None } }
+
 type private ResponseRequestPath =
     | PersistentAnswer
+    | NewAnswer
     | StatelessMaintenance
 
 let private testResponseWebSocketConfig =
@@ -375,11 +403,13 @@ let private testQaSessionOptions storageRoot =
 let private responsesTransportOverrideAsync handler =
     { prepareAnswerConnection = None
       runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
+      runNewAnswerRequest = None
       runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
 
 let private responsesTransportOverrideWithPrepareAsync prepare handler =
     { prepareAnswerConnection = Some prepare
       runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
+      runNewAnswerRequest = None
       runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
 
 let private responsesTransportOverride handler =
@@ -584,6 +614,54 @@ let private doclingCluster id label l t r b : FsColbert.DoclingLayoutCluster =
       confidence = 0.95f
       bbox = FsColbert.DoclingGeometry.topLeftBox l t r b
       cells = [] }
+
+let private visualDescriptionOptions storageRoot client =
+    { PdfVisualDescriptionOptions.defaults with
+        enabled = true
+        client = client
+        modelId = $"test-visual-model-{Guid.NewGuid():N}"
+        schemaVersion = $"test-visual-schema-{Guid.NewGuid():N}"
+        cacheStorageRoot = Some storageRoot
+        parallelism = 1 }
+
+let private readHybridVisualPassages options report path =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 400.0 }
+                      cells = [ doclingNativeCell "Native paragraph describing nearby content" 20.0 285.0 220.0 310.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters =
+                      [ doclingCluster 0 FsColbert.DoclingLabel.Text 15.0 80.0 260.0 130.0
+                        doclingCluster 1 FsColbert.DoclingLabel.Picture 250.0 190.0 360.0 300.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource = FsColbert.PassageSource.create path "Visual Doc" path
+
+        return!
+            DoclingHybrid.readPdfPassagesWithProviders
+                options
+                report
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                path
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+    }
 
 let private testKeywordCachePath storageRoot sourceFingerprint (options: KnowledgeSources.KeywordGenerationOptions) =
     let folder = Path.Combine(storageRoot, "FsVoice", "FsColbert", "KeywordCache")
@@ -1040,6 +1118,100 @@ let ``qa session shares in flight response websocket preparation`` () =
     }
 
 [<Fact>]
+let ``qa session options default to persistent answer websocket`` () =
+    let options = testQaSessionOptions (tempStorageRoot ())
+
+    Assert.Equal(QaAnswerTransportMode.PersistentWebSocket, options.answerTransportMode)
+
+[<Fact>]
+let ``qa session persistent answer transport retries once after request exception`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-persistent-retry"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+        let mutable callNumber = 0
+
+        let transport =
+            responsesTransportOverrideAsync (fun _ request _ ->
+                task {
+                    captured.Add request
+                    callNumber <- callNumber + 1
+
+                    match callNumber with
+                    | 1 -> return raise (InvalidOperationException("stale answer websocket"))
+                    | _ -> return [ responsesCompletedEvent "resp_persistent_retry" "recovered persistent answer" ]
+                })
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("recovered persistent answer", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(None, captured[0].previous_response_id)
+        Assert.Equal(None, captured[1].previous_response_id)
+
+        Assert.Contains(
+            logs,
+            fun log -> log.Contains("reconnecting and retrying once", StringComparison.OrdinalIgnoreCase)
+        )
+    }
+
+[<Fact>]
+let ``qa session persistent answer transport does not retry cancellation`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-persistent-cancel"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            responsesTransportOverrideAsync (fun _ request _ ->
+                task {
+                    captured.Add request
+                    return raise (OperationCanceledException("answer canceled"))
+                })
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        do!
+            Assert.ThrowsAnyAsync<OperationCanceledException>(fun () ->
+                session.AnswerAsync(request, CancellationToken.None))
+            :> Task
+
+        Assert.Single(captured) |> ignore
+    }
+
+[<Fact>]
 let ``qa session websocket answer uses previous response id after first turn`` () =
     task {
         let source =
@@ -1087,6 +1259,232 @@ let ``qa session websocket answer uses previous response id after first turn`` (
         Assert.Contains("selected_source_search", responseToolNames captured[1])
         Assert.Contains("source_inventory", responseToolNames captured[1])
         Assert.Contains("second question", inputTextFromResponseRequest captured[1])
+    }
+
+[<Fact>]
+let ``qa session per request answer transport opens fresh answer path and keeps response history`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-per-request"
+              enabled = true }
+
+        let captured =
+            ResizeArray<ResponseRequestPath * FsResponses.WebSocketCreateRequest>()
+
+        let gate = obj ()
+        let mutable prepareCount = 0
+        let mutable answerNumber = 0
+
+        let transport =
+            { prepareAnswerConnection =
+                Some(fun _ ->
+                    task {
+                        prepareCount <- prepareCount + 1
+                        return ()
+                    })
+              runAnswerRequest =
+                fun request _ ->
+                    task {
+                        lock gate (fun () -> captured.Add(PersistentAnswer, request))
+                        return [ responsesCompletedEvent "resp_persistent" "persistent answer" ]
+                    }
+              runNewAnswerRequest =
+                Some(fun request _ ->
+                    task {
+                        let responseId, text =
+                            lock gate (fun () ->
+                                answerNumber <- answerNumber + 1
+                                captured.Add(NewAnswer, request)
+                                $"resp_per_request_{answerNumber}", $"per request answer {answerNumber}")
+
+                        return [ responsesCompletedEvent responseId text ]
+                    })
+              runStatelessRequest =
+                fun request _ ->
+                    task {
+                        lock gate (fun () -> captured.Add(StatelessMaintenance, request))
+                        return [ responsesCompletedEvent "resp_stateless" "stateless answer" ]
+                    } }
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                answerTransportMode = QaAnswerTransportMode.NewWebSocketPerRequest
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+
+        let preparer = session :> IQaAnswerTransportPreparer
+        do! preparer.PrepareAnswerTransportAsync(CancellationToken.None)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let! first = session.AnswerAsync(request "first question", CancellationToken.None)
+        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
+
+        let capturedRequests = lock gate (fun () -> captured |> Seq.toList)
+
+        Assert.Equal(0, prepareCount)
+        Assert.Equal("per request answer 1", first.answer)
+        Assert.Equal("per request answer 2", second.answer)
+        Assert.Equal<ResponseRequestPath list>([ NewAnswer; NewAnswer ], capturedRequests |> List.map fst)
+        Assert.Equal(None, (snd capturedRequests[0]).previous_response_id)
+        Assert.Equal(Some "resp_per_request_1", (snd capturedRequests[1]).previous_response_id)
+        Assert.Contains("first question", inputTextFromResponseRequest (snd capturedRequests[0]))
+        Assert.Contains("second question", inputTextFromResponseRequest (snd capturedRequests[1]))
+    }
+
+[<Fact>]
+let ``qa session canceled per request answer releases serialized answer gate`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-per-request-cancel"
+              enabled = true }
+
+        let firstRequestEntered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let captured = ResizeArray<string>()
+        let gate = obj ()
+        let mutable requestNumber = 0
+
+        let transport =
+            { prepareAnswerConnection = None
+              runAnswerRequest =
+                fun _ _ -> task { return [ responsesCompletedEvent "resp_persistent" "persistent answer" ] }
+              runNewAnswerRequest =
+                Some(fun _ cancellationToken ->
+                    task {
+                        let current =
+                            lock gate (fun () ->
+                                requestNumber <- requestNumber + 1
+                                requestNumber)
+
+                        if current = 1 then
+                            firstRequestEntered.TrySetResult() |> ignore
+                            do! Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                            return [ responsesCompletedEvent "resp_never" "never" ]
+                        else
+                            lock gate (fun () -> captured.Add $"request-{current}")
+                            return [ responsesCompletedEvent $"resp_{current}" $"answer {current}" ]
+                    })
+              runStatelessRequest =
+                fun _ _ -> task { return [ responsesCompletedEvent "resp_stateless" "stateless answer" ] } }
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                answerTransportMode = QaAnswerTransportMode.NewWebSocketPerRequest
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+        use firstCancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds 100.0)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let firstTask =
+            session.AnswerAsync(request "first question", firstCancellation.Token)
+
+        do! firstRequestEntered.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+        do! Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> firstTask) :> Task
+
+        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
+
+        Assert.Equal("answer 2", second.answer)
+        Assert.Equal<string list>([ "request-2" ], lock gate (fun () -> captured |> Seq.toList))
+    }
+
+[<Fact>]
+let ``qa session serializes concurrent responses websocket answers`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-serialized"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let gate = obj ()
+        let mutable activeRequests = 0
+        let mutable maxActiveRequests = 0
+
+        let firstRequestEntered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let releaseFirstRequest =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let capturedSnapshot () =
+            lock gate (fun () -> captured |> Seq.toList)
+
+        let transport =
+            responsesTransportOverrideAsync (fun _ request cancellationToken ->
+                task {
+                    let requestNumber =
+                        lock gate (fun () ->
+                            activeRequests <- activeRequests + 1
+                            maxActiveRequests <- max maxActiveRequests activeRequests
+                            captured.Add request
+                            captured.Count)
+
+                    try
+                        if requestNumber = 1 then
+                            firstRequestEntered.TrySetResult() |> ignore
+                            do! releaseFirstRequest.Task.WaitAsync(cancellationToken)
+
+                        return [ responsesCompletedEvent $"resp_{requestNumber}" $"socket answer {requestNumber}" ]
+                    finally
+                        lock gate (fun () -> activeRequests <- activeRequests - 1)
+                })
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+
+        let request question =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = question
+              realtimeJudgement = None
+              deadline = None }
+
+        let firstTask =
+            session.AnswerAsync(request "first question", CancellationToken.None)
+
+        do! firstRequestEntered.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+        let secondTask =
+            session.AnswerAsync(request "second question", CancellationToken.None)
+
+        do! Task.Delay 100
+
+        Assert.Single(capturedSnapshot ()) |> ignore
+
+        releaseFirstRequest.TrySetResult() |> ignore
+
+        let! first = firstTask
+        let! second = secondTask
+        let requests = capturedSnapshot ()
+
+        Assert.Equal("socket answer 1", first.answer)
+        Assert.Equal("socket answer 2", second.answer)
+        Assert.Equal(2, requests.Length)
+        Assert.Equal(1, maxActiveRequests)
+        Assert.Equal(None, requests[0].previous_response_id)
+        Assert.Equal(Some "resp_1", requests[1].previous_response_id)
+        Assert.Contains("first question", inputTextFromResponseRequest requests[0])
+        Assert.Contains("second question", inputTextFromResponseRequest requests[1])
     }
 
 [<Fact>]
@@ -1414,15 +1812,16 @@ let ``qa session websocket forces no-tool final answer after tool round budget``
         Assert.Equal(Some "resp_tool_budget_2", captured[2].previous_response_id)
         Assert.Equal(Some true, captured[2].generate)
 
-        Assert.Equal(Some "resp_tool_budget_3", captured[3].previous_response_id)
+        Assert.Equal(None, captured[3].previous_response_id)
         Assert.Equal(Some true, captured[3].generate)
         Assert.Equal(Some FsResponses.ToolChoice.None, captured[3].tool_choice)
         Assert.Empty(responseToolNames captured[3])
+        Assert.Empty(functionOutputsFromResponseRequest captured[3])
 
-        let finalOutput = Assert.Single(functionOutputsFromResponseRequest captured[3])
-        Assert.Equal("call_inventory_3", finalOutput.call_id)
-        Assert.Contains("Fake Context inventory.", finalOutput.output)
-        Assert.Contains(logs, fun log -> log.Contains("no-tool answer synthesis"))
+        let finalizerInput = inputTextFromResponseRequest captured[3]
+        Assert.Contains("Keep checking tools forever?", finalizerInput)
+        Assert.Contains("Fake Context inventory.", finalizerInput)
+        Assert.Contains(logs, fun log -> log.Contains("evidence-only finalizer"))
 
         let secondRequest =
             { turnId = Guid.NewGuid().ToString("N")
@@ -1477,13 +1876,138 @@ let ``qa session websocket uses configured tool call loop limit`` () =
         Assert.Equal("final answer after one tool round", answer.answer)
         Assert.Equal(2, captured.Count)
         Assert.Equal(Some true, captured[0].generate)
-        Assert.Equal(Some "resp_tool_loop_call", captured[1].previous_response_id)
+        Assert.Equal(None, captured[1].previous_response_id)
+        Assert.Equal(Some FsResponses.ToolChoice.None, captured[1].tool_choice)
+        Assert.Contains("Final answer synthesis mode", captured[1].instructions.Value)
+        Assert.Empty(responseToolNames captured[1])
+        Assert.Empty(functionOutputsFromResponseRequest captured[1])
+
+        let finalizerInput = inputTextFromResponseRequest captured[1]
+        Assert.Contains("Use the tool once.", finalizerInput)
+        Assert.Contains("Fake Context inventory.", finalizerInput)
+    }
+
+[<Fact>]
+let ``qa session evidence finalizer replaces tool-limit musing with clean answer`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-tool-limit-musing"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match captured.Count with
+                | 1 ->
+                    [ responsesFunctionCallEventWithText
+                          "resp_musing_tool_call"
+                          "I should inspect another source before answering, and I can use the inventory tool."
+                          "call_inventory"
+                          "source_inventory"
+                          "{}" ]
+                | _ -> [ responsesCompletedEvent "resp_musing_final" "clean final answer from evidence" ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerToolCallLoopLimit = 1 }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Summarize the selected source."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("clean final answer from evidence", answer.answer)
+        Assert.DoesNotContain("I should", answer.answer)
+        Assert.DoesNotContain("I can use", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(None, captured[1].previous_response_id)
+        Assert.Equal(Some FsResponses.ToolChoice.None, captured[1].tool_choice)
+        Assert.Contains("Final answer synthesis mode", captured[1].instructions.Value)
+        Assert.Empty(responseToolNames captured[1])
+        Assert.Empty(functionOutputsFromResponseRequest captured[1])
+
+        let finalizerInput = inputTextFromResponseRequest captured[1]
+        Assert.Contains("Summarize the selected source.", finalizerInput)
+        Assert.Contains("Fake Context inventory.", finalizerInput)
+    }
+
+[<Theory>]
+[<InlineData("empty")>]
+[<InlineData("error")>]
+[<InlineData("token_limit")>]
+[<InlineData("tool_call")>]
+let ``qa session evidence finalizer failure returns controlled fallback`` mode =
+    task {
+        let source =
+            { kind = Json
+              location = $"memory://fake-websocket-finalizer-failure-{mode}"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+
+        let finalizerFailureEvents () =
+            match mode with
+            | "empty" -> [ responsesCompletedEmptyEvent "resp_finalizer_empty" ]
+            | "error" -> [ responsesErrorEvent "finalizer_failed" "Finalizer failed." ]
+            | "token_limit" -> [ responsesTokenLimitEvent "resp_finalizer_token_limit" "partial finalizer text" ]
+            | "tool_call" ->
+                [ responsesFunctionCallEvent
+                      "resp_finalizer_tool_call"
+                      "call_inventory_finalizer"
+                      "source_inventory"
+                      "{}" ]
+            | _ -> failwith $"Unexpected finalizer failure mode: {mode}"
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match captured.Count with
+                | 1 ->
+                    [ responsesFunctionCallEventWithText
+                          "resp_finalizer_failure_call"
+                          "I should keep searching before I answer."
+                          "call_inventory"
+                          "source_inventory"
+                          "{}" ]
+                | _ -> finalizerFailureEvents ())
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                answerToolCallLoopLimit = 1
+                report = fun msg -> logs.Add msg }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Answer from the selected source."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal(QaAnswerModel.reliableAnswerFallback, answer.answer)
+        Assert.DoesNotContain("I should keep searching", answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(None, captured[1].previous_response_id)
         Assert.Equal(Some FsResponses.ToolChoice.None, captured[1].tool_choice)
         Assert.Empty(responseToolNames captured[1])
-
-        let finalOutput = Assert.Single(functionOutputsFromResponseRequest captured[1])
-        Assert.Equal("call_inventory", finalOutput.call_id)
-        Assert.Contains("Fake Context inventory.", finalOutput.output)
+        Assert.Contains(logs, fun log -> log.Contains("did not produce a clean answer"))
     }
 
 [<Fact>]
@@ -1884,6 +2408,46 @@ let ``pdf parser index fingerprint includes layout quality revision`` () =
     Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
 
 [<Fact>]
+let ``pdf source parsing fingerprint includes docling rasterizer and layout model`` () =
+    let storageRoot = tempStorageRoot ()
+    let path = Path.Combine(storageRoot, "fingerprint.pdf")
+
+    let source =
+        { kind = Pdf
+          location = path
+          enabled = true }
+
+    let hybridOptions =
+        KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid
+
+    try
+        DoclingHybrid.clearRasterizerFactory ()
+
+        let withoutRasterizer =
+            KnowledgeSources.sourceParsingFingerprint hybridOptions source
+
+        Assert.Contains("pdfLayoutAnalysis=true", withoutRasterizer)
+        Assert.Contains("pdfLayoutModel=pp-doclayout-m", withoutRasterizer)
+        Assert.Contains("pdfRasterizer=none", withoutRasterizer)
+
+        DoclingHybrid.setRasterizerFactoryWithInfo "test-rasterizer-v1" "Test rasterizer" (fun _ ->
+            FakeDoclingRasterizer(Error "unused") :> FsColbert.IDoclingPageRasterizer)
+
+        let withRasterizer = KnowledgeSources.sourceParsingFingerprint hybridOptions source
+        Assert.Contains("pdfRasterizer=test-rasterizer-v1", withRasterizer)
+        Assert.False(String.Equals(withoutRasterizer, withRasterizer, StringComparison.Ordinal))
+
+        let withoutLayout =
+            KnowledgeSources.sourceParsingFingerprint
+                (KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.HybridWithoutLayout)
+                source
+
+        Assert.Contains("pdfLayoutAnalysis=false", withoutLayout)
+        Assert.Contains("pdfRasterizer=test-rasterizer-v1", withoutLayout)
+    finally
+        DoclingHybrid.clearRasterizerFactory ()
+
+[<Fact>]
 let ``docling hybrid layout disabled bypasses supplied layout predictor`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -1985,6 +2549,342 @@ let ``docling hybrid provider path emits native text table picture metadata and 
             Assert.Contains("table", passage.keywords)
             Assert.Contains("picture", passage.keywords)
             Assert.Contains("diagram", passage.keywords)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual descriptions disabled preserves hybrid passage output without model calls`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-disabled.pdf")
+
+        let response =
+            """{"description":"Revenue chart rises across quarters.","keywords":["revenue trend","quarterly sales"]}"""
+
+        let client = new CountingChatClient(response)
+
+        let! baseline =
+            readHybridVisualPassages
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                ignore
+                path
+
+        let! disabled =
+            readHybridVisualPassages
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    visualDescriptions =
+                        { PdfVisualDescriptionOptions.defaults with
+                            enabled = false
+                            client = Some(client :> IChatClient)
+                            cacheStorageRoot = Some storageRoot } }
+                ignore
+                path
+
+        match baseline, disabled with
+        | Ok baseline, Ok disabled ->
+            Assert.Equal(0, client.Count)
+            Assert.Equal<string list>(baseline |> List.map _.text, disabled |> List.map _.text)
+
+            Assert.DoesNotContain(
+                disabled,
+                fun passage -> passage.text.Contains("[Visual description:", StringComparison.Ordinal)
+            )
+        | Error err, _
+        | _, Error err -> failwith err
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual descriptions enabled adds synthetic visual text and keywords`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-enabled.pdf")
+
+        let response =
+            """{"description":"Revenue chart rises from Q1 to Q4 with the strongest increase near Q4.","keywords":["revenue trend","q4","quarterly sales"]}"""
+
+        let client = new CountingChatClient(response)
+
+        let options =
+            { DoclingHybrid.defaults with
+                minNativeCharsPerPage = 8
+                visualDescriptions = visualDescriptionOptions storageRoot (Some(client :> IChatClient)) }
+
+        let reports = ResizeArray<string>()
+        let! result = readHybridVisualPassages options reports.Add path
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage = Assert.Single passages
+            Assert.Equal(1, client.Count)
+            Assert.Contains("[Visual description: picture] Revenue chart rises from Q1 to Q4", passage.text)
+            Assert.Contains("revenue trend", passage.keywords)
+            Assert.Contains("quarterly sales", passage.keywords)
+            Assert.Contains(reports, fun message -> message.Contains("added 1 visual description"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual descriptions survive native-text fallback`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-fallback.pdf")
+
+        let response =
+            """{"description":"Block diagram shows sensor inputs flowing into an anomaly detector.","keywords":["block diagram","sensor inputs","anomaly detector"]}"""
+
+        let client = new CountingChatClient(response)
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativeText =
+                    String.replicate
+                        80
+                        "Native text from the paper explains wearable sensor streams, contextual anomaly detection, and clinician-facing monitoring. "
+
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 400.0 }
+                      cells = [ doclingNativeCell nativeText 20.0 285.0 360.0 310.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters = [ doclingCluster 1 FsColbert.DoclingLabel.Picture 250.0 190.0 360.0 300.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource = FsColbert.PassageSource.create path "Visual Fallback Doc" path
+
+        let options =
+            { DoclingHybrid.defaults with
+                minNativeCharsPerPage = 8
+                visualDescriptions = visualDescriptionOptions storageRoot (Some(client :> IChatClient)) }
+
+        let reports = ResizeArray<string>()
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                options
+                reports.Add
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                path
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.Equal(1, client.Count)
+            Assert.Contains(reports, fun message -> message.Contains("Using document structure native-text conversion"))
+            Assert.Contains(passages, fun passage -> passage.text.Contains("Native text from the paper"))
+
+            Assert.Contains(
+                passages,
+                fun passage ->
+                    passage.text.Contains(
+                        "[Visual description: picture] Block diagram shows sensor inputs",
+                        StringComparison.Ordinal
+                    )
+            )
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual descriptions enabled without client logs and skips`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-no-client.pdf")
+
+        let options =
+            { DoclingHybrid.defaults with
+                minNativeCharsPerPage = 8
+                visualDescriptions = visualDescriptionOptions storageRoot None }
+
+        let reports = ResizeArray<string>()
+        let! result = readHybridVisualPassages options reports.Add path
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.NotEmpty passages
+
+            Assert.DoesNotContain(
+                passages,
+                fun passage -> passage.text.Contains("[Visual description:", StringComparison.Ordinal)
+            )
+
+            Assert.Contains(
+                reports,
+                fun message -> message.Contains("no visual-description model client is configured")
+            )
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual description model failure logs and keeps indexing`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-failure.pdf")
+
+        let options =
+            { DoclingHybrid.defaults with
+                minNativeCharsPerPage = 8
+                visualDescriptions =
+                    visualDescriptionOptions storageRoot (Some(new InvalidJsonSchemaChatClient() :> IChatClient)) }
+
+        let reports = ResizeArray<string>()
+        let! result = readHybridVisualPassages options reports.Add path
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.NotEmpty passages
+
+            Assert.DoesNotContain(
+                passages,
+                fun passage -> passage.text.Contains("[Visual description:", StringComparison.Ordinal)
+            )
+
+            Assert.Contains(reports, fun message -> message.Contains("PDF visual description failed"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual description cache hit avoids second model call`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-cache.pdf")
+
+        let response =
+            """{"description":"A labeled process diagram connects intake to approval.","keywords":["process diagram","approval"]}"""
+
+        let firstClient = new CountingChatClient(response)
+        let secondClient = new CountingChatClient(response)
+
+        let firstVisualOptions =
+            visualDescriptionOptions storageRoot (Some(firstClient :> IChatClient))
+
+        let firstOptions =
+            { DoclingHybrid.defaults with
+                minNativeCharsPerPage = 8
+                visualDescriptions = firstVisualOptions }
+
+        let secondOptions =
+            { firstOptions with
+                visualDescriptions =
+                    { firstVisualOptions with
+                        client = Some(secondClient :> IChatClient) } }
+
+        let! first = readHybridVisualPassages firstOptions ignore path
+        let! second = readHybridVisualPassages secondOptions ignore path
+
+        match first, second with
+        | Ok first, Ok second ->
+            Assert.Equal(1, firstClient.Count)
+            Assert.Equal(0, secondClient.Count)
+            Assert.Contains("[Visual description: picture] A labeled process diagram", (Assert.Single first).text)
+            Assert.Contains("[Visual description: picture] A labeled process diagram", (Assert.Single second).text)
+        | Error err, _
+        | _, Error err -> failwith err
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``pdf visual description fingerprint changes with enablement model and schema`` () =
+    let storageRoot = tempStorageRoot ()
+    let path = Path.Combine(storageRoot, "visual-fingerprint.pdf")
+
+    let source =
+        { kind = Pdf
+          location = path
+          enabled = true }
+
+    let disabled =
+        { KnowledgeSources.PdfIngestionOptions.defaults with
+            visualDescriptions = PdfVisualDescriptionOptions.disabled }
+
+    let enabled =
+        { disabled with
+            visualDescriptions =
+                { PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    modelId = "visual-model-a"
+                    schemaVersion = "visual-schema-a" } }
+
+    let modelChanged =
+        { enabled with
+            visualDescriptions =
+                { enabled.visualDescriptions with
+                    modelId = "visual-model-b" } }
+
+    let schemaChanged =
+        { enabled with
+            visualDescriptions =
+                { enabled.visualDescriptions with
+                    schemaVersion = "visual-schema-b" } }
+
+    let fingerprint options =
+        KnowledgeSources.sourceParsingFingerprint options source
+
+    Assert.False(String.Equals(fingerprint disabled, fingerprint enabled, StringComparison.Ordinal))
+    Assert.False(String.Equals(fingerprint enabled, fingerprint modelChanged, StringComparison.Ordinal))
+    Assert.False(String.Equals(fingerprint enabled, fingerprint schemaChanged, StringComparison.Ordinal))
+
+[<Fact>]
+let ``hybrid pdf without layout does not attempt visual descriptions`` () =
+    async {
+        let storageRoot = tempStorageRoot ()
+        let path = Path.Combine(storageRoot, "visual-without-layout.pdf")
+        let response = """{"description":"Should not be called.","keywords":["unused"]}"""
+        let client = new CountingChatClient(response)
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 400.0 }
+                      cells = [ doclingNativeCell "Native only hybrid without layout text" 20.0 285.0 260.0 310.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let passageSource = FsColbert.PassageSource.create path "No Layout Visual Doc" path
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    enableLayoutAnalysis = false
+                    minNativeCharsPerPage = 8
+                    visualDescriptions = visualDescriptionOptions storageRoot (Some(client :> IChatClient)) }
+                ignore
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                path
+                rasterizer
+                nativeProvider
+                None
+                (FailingDoclingLayout() :> FsColbert.IDoclingLayoutPredictor)
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.Equal(0, client.Count)
+            Assert.Contains("Native only hybrid without layout text", (Assert.Single passages).text)
     }
     |> Async.RunSynchronously
 
@@ -2459,6 +3359,126 @@ let ``index preview loads bundled prebuilt index`` () =
     | Ok preview ->
         Assert.Equal(1, preview.records.Length)
         Assert.Equal<string list>([ "bundle keyword" ], preview.records.Head.keywords)
+
+[<Fact>]
+let ``visual descriptions setting does not block bundled prebuilt pdf index`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-bundle.pdf")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview bundle PDF source.")
+
+    let source =
+        { kind = Pdf
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "preview-bundle-pdf.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Bundled PDF visual and text passage." [ "bundle pdf" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    FsColbert.IndexBundle.create
+        "preview-bundle-pdf"
+        "1.0.0"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ { sourceId = sourcePath
+            sourceDisplayName = "Preview Bundle PDF"
+            sourceLocation = Some sourcePath
+            sourceKind = Some "pdf"
+            indexFile = "preview-bundle-pdf.fsci" } ]
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(folder, "index-bundle.json"))
+
+    let pdfOptions =
+        { KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid with
+            visualDescriptions =
+                { PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    modelId = "test-visual-model"
+                    schemaVersion = "test-visual-schema" } }
+
+    match KnowledgeSources.loadIndexPreviewWithOptions storageRoot ignore pdfOptions 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(1, preview.records.Length)
+        Assert.Contains("Bundled PDF visual and text passage.", preview.records.Head.text)
+
+[<Fact>]
+let ``visual descriptions setting falls back to existing persisted pdf index`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-existing.pdf")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview existing PDF source.")
+
+    let source =
+        { kind = Pdf
+          location = sourcePath
+          enabled = true }
+
+    let indexPath =
+        Path.Combine(persistedIndexFolder storageRoot, "preview-existing.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Existing PDF passage should remain searchable." [] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let reports = ResizeArray<string>()
+
+    let pdfOptions =
+        { KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid with
+            visualDescriptions =
+                { PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    modelId = "test-visual-model"
+                    schemaVersion = "test-visual-schema" } }
+
+    match KnowledgeSources.loadIndexPreviewWithOptions storageRoot reports.Add pdfOptions 20 source with
+    | Error err -> failwith err
+    | Ok preview ->
+        Assert.Equal(1, preview.records.Length)
+        Assert.Contains("Existing PDF passage should remain searchable.", preview.records.Head.text)
+
+        Assert.Contains(
+            reports,
+            fun message -> message.Contains("reprocess this source to refresh", StringComparison.OrdinalIgnoreCase)
+        )
+
+[<Fact>]
+let ``visual descriptions fallback does not load an index for a different pdf`` () =
+    let storageRoot = tempStorageRoot ()
+    let selectedPath = Path.Combine(storageRoot, "selected.pdf")
+    let unselectedPath = Path.Combine(storageRoot, "unselected.pdf")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(selectedPath, "Selected PDF has no index.")
+    File.WriteAllText(unselectedPath, "Unselected PDF has an index.")
+
+    let selected =
+        { kind = Pdf
+          location = selectedPath
+          enabled = true }
+
+    let unselected =
+        { kind = Pdf
+          location = unselectedPath
+          enabled = true }
+
+    let indexPath = Path.Combine(persistedIndexFolder storageRoot, "unselected.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage unselected 0 "Unselected PDF passage must not be returned." [] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let pdfOptions =
+        { KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid with
+            visualDescriptions =
+                { PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    modelId = "test-visual-model"
+                    schemaVersion = "test-visual-schema" } }
+
+    match KnowledgeSources.loadIndexPreviewWithOptions storageRoot ignore pdfOptions 20 selected with
+    | Ok preview -> failwith $"Expected no index for selected PDF, but loaded {preview.totalChunks} chunk(s)."
+    | Error err -> Assert.Contains("No FsColbert index is available", err)
 
 [<Fact>]
 let ``index preview loads Speak2Docs installed prebuilt index`` () =
@@ -4513,6 +5533,46 @@ let ``runtime settings apply answer model and loop settings`` () =
     Assert.Equal(5, flags.answerToolCallLoopLimit)
 
 [<Fact>]
+let ``runtime settings apply Speak2Docs realtime oracle timeout when plugin uses core default`` () =
+    let settings = demoRuntimeSettings []
+
+    let plugIn =
+        FsVoice.Ctx.PlugInDefinition.generic
+        |> Speak2Docs.RuntimeSettings.composePlugIn
+            Speak2Docs.InternalDocumentIndex
+            (Speak2Docs.RuntimeSettings.snapshot settings)
+
+    Assert.Equal(
+        Speak2Docs.RuntimeSettings.DefaultRealtimeOracleFunctionCallTimeoutMs,
+        plugIn.runtime.functionCallTimeoutMs
+    )
+
+[<Fact>]
+let ``Speak2Docs oracle answer transport defaults to persistent websocket`` () =
+    Assert.Equal(
+        FsVoice.Ctx.QaAnswerTransportMode.PersistentWebSocket,
+        Speak2Docs.RuntimeSettings.DefaultOracleAnswerTransportMode
+    )
+
+[<Fact>]
+let ``runtime settings preserve explicit plugin function call timeout`` () =
+    let settings = demoRuntimeSettings []
+
+    let definition =
+        { FsVoice.Ctx.PlugInDefinition.generic with
+            runtime =
+                { FsVoice.Ctx.PlugInDefinition.generic.runtime with
+                    functionCallTimeoutMs = 60000 } }
+
+    let plugIn =
+        definition
+        |> Speak2Docs.RuntimeSettings.composePlugIn
+            Speak2Docs.InternalDocumentIndex
+            (Speak2Docs.RuntimeSettings.snapshot settings)
+
+    Assert.Equal(60000, plugIn.runtime.functionCallTimeoutMs)
+
+[<Fact>]
 let ``runtime settings default answer reasoning effort is low`` () =
     let settings = demoRuntimeSettings []
 
@@ -4525,3 +5585,61 @@ let ``runtime settings default answer reasoning effort is low`` () =
     let answer = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer plugIn
 
     Assert.Equal(Some "low", answer.reasoningEffort)
+
+[<Fact>]
+let ``runtime settings default pdf visual descriptions off`` () =
+    let settings = demoRuntimeSettings []
+
+    let flags =
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
+
+    Assert.False flags.describePdfVisuals
+
+[<Fact>]
+let ``runtime settings default audio speaker follows platform fallback`` () =
+    let settings = demoRuntimeSettings []
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+
+    Assert.True(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker true values)
+    Assert.False(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker false values)
+
+[<Fact>]
+let ``runtime settings carry audio default speaker flag`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AudioDefaultToSpeaker, "true" ]
+
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+
+    Assert.True(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker false values)
+
+[<Fact>]
+let ``runtime settings carry pdf visual description flag`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.DescribePdfVisuals, "true" ]
+
+    let flags =
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
+
+    Assert.True flags.describePdfVisuals
+
+[<Fact>]
+let ``runtime settings compose visual description model role override`` () =
+    let visualModel = "gpt-visual-test"
+
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.modelRoleKey FsVoice.Ctx.VisualDescription, visualModel ]
+
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+    let overrides = Speak2Docs.RuntimeSettings.modelRoleOverrides values
+
+    let plugIn =
+        FsVoice.Ctx.PlugInDefinition.generic
+        |> Speak2Docs.RuntimeSettings.composePlugIn Speak2Docs.InternalDocumentIndex values
+
+    let visualDescription =
+        FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.VisualDescription plugIn
+
+    Assert.Equal(visualModel, overrides[FsVoice.Ctx.VisualDescription])
+    Assert.Equal(visualModel, visualDescription.modelId)

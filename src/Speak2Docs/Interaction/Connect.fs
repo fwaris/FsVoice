@@ -8,6 +8,7 @@ open FSharp.Control
 open FsVoice.Platform
 open Speak2Docs.WorkFlow
 open RTOpenAI.Api
+open RTOpenAI.WebRTC
 
 module Connect =
     let private log (mailbox: Channel<Msg>) text =
@@ -20,6 +21,29 @@ module Connect =
 
     let private notifyHost (session: IVoiceSession<ToHost, FromHost>) token message =
         session.SendFromHostAsync(message, token).ContinueWith(ignore) |> ignore
+
+    let private platformDefaultToSpeaker =
+#if ANDROID
+        true
+#else
+        false
+#endif
+
+    let private audioDefaultToSpeaker settings =
+        RuntimeSettings.audioDefaultToSpeaker platformDefaultToSpeaker settings
+
+    let private iosAudioRoutePolicy settings =
+        if audioDefaultToSpeaker settings then
+            IosAudioRoutePolicy.Speakerphone
+        else
+            IosAudioRoutePolicy.ReceiverOrHeadset
+
+    let private webRtcClientConfig settings =
+        { WebRtcClientConfig.Default with
+            IosAudioRoutePolicy = iosAudioRoutePolicy settings }
+
+    let private applyAudioRoute settings =
+        Audio.applyDefaultToSpeaker (audioDefaultToSpeaker settings)
 
     let private startClientPump
         (mailbox: Channel<Msg>)
@@ -137,12 +161,14 @@ module Connect =
                     match Text.notEmpty apiKey with
                     | None -> return Error(InvalidOperationException "OpenAI API key is required." :> exn)
                     | Some apiKey ->
+                        let settings = RuntimeSettings.snapshot parms.runtimeSettings
                         let! hasPermission = Audio.haveRecordPermission ()
 
                         if not hasPermission then
                             return Error(UnauthorizedAccessException "Microphone permission was not granted." :> exn)
                         else
-                            let conn = Connection.create ()
+                            applyAudioRoute settings
+                            let conn = Connection.createWithConfig (webRtcClientConfig settings)
                             let cancellation = new CancellationTokenSource()
                             let serverEvents = Channel.CreateUnbounded<JsonElement>()
                             let clientEvents = Channel.CreateUnbounded<JsonElement>()
@@ -161,6 +187,9 @@ module Connect =
 
                             let stateSubscription =
                                 conn.WebRtcClient.StateChanged.Subscribe(fun state ->
+                                    if state.IsConnected then
+                                        applyAudioRoute settings
+
                                     parms.mailbox.Writer.TryWrite(WebRTC_StateChanged(parms.connectionId, state))
                                     |> ignore
 

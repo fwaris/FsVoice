@@ -6,7 +6,13 @@ open System.IO
 open System.Net.Http
 open System.Reflection
 open System.Security.Cryptography
+open System.Text
+open System.Text.Json
+open System.Text.Json.Serialization
 open System.Threading
+open FSharp.Control
+open FSharp.SystemTextJson
+open Microsoft.Extensions.AI
 open Microsoft.ML.OnnxRuntime
 open Microsoft.ML.OnnxRuntime.Tensors
 open FsColbert
@@ -28,6 +34,55 @@ type IDoclingLayoutModelProvider =
     abstract DisplayName: string
     abstract CreateAsync: DoclingLayoutModelProviderContext -> Async<Result<DoclingLayoutModelProviderResult, string>>
 
+type PdfVisualDescriptionOptions =
+    { enabled: bool
+      client: IChatClient option
+      modelId: string
+      schemaVersion: string
+      maxOutputTokens: int
+      parallelism: int
+      cacheStorageRoot: string option }
+
+module PdfVisualDescriptionOptions =
+    [<Literal>]
+    let defaultModelId = "gpt-5-mini"
+
+    [<Literal>]
+    let defaultSchemaVersion = "pdf-visual-descriptions-v1"
+
+    let defaults =
+        { enabled = false
+          client = None
+          modelId = defaultModelId
+          schemaVersion = defaultSchemaVersion
+          maxOutputTokens = 1000
+          parallelism = 2
+          cacheStorageRoot = None }
+
+    let disabled = defaults
+
+    let sanitize (options: PdfVisualDescriptionOptions) =
+        { options with
+            modelId = options.modelId |> Text.notEmpty |> Option.defaultValue defaultModelId
+            schemaVersion =
+                options.schemaVersion
+                |> Text.notEmpty
+                |> Option.defaultValue defaultSchemaVersion
+            maxOutputTokens = max 128 options.maxOutputTokens
+            parallelism = max 1 options.parallelism }
+
+    let fingerprint (options: PdfVisualDescriptionOptions) =
+        let options = sanitize options
+
+        if not options.enabled then
+            "pdfVisualDescriptions=disabled"
+        else
+            [ "pdfVisualDescriptions=enabled"
+              $"pdfVisualDescriptionModel={options.modelId}"
+              $"pdfVisualDescriptionSchema={options.schemaVersion}"
+              "pdfVisualDescriptionPrompt=visual-descriptions-v2" ]
+            |> String.concat "\n"
+
 type DoclingHybridOptions =
     { minNativeCharsPerPage: int
       ocrDedupeOverlapThreshold: float
@@ -35,9 +90,17 @@ type DoclingHybridOptions =
       enableOcr: bool
       enableLayoutAnalysis: bool
       enableFigureClassification: bool
-      layoutModelProvider: IDoclingLayoutModelProvider option }
+      layoutModelProvider: IDoclingLayoutModelProvider option
+      visualDescriptions: PdfVisualDescriptionOptions }
+
+type DoclingRasterizerInfo = { id: string; displayName: string }
 
 module DoclingHybrid =
+    let private normalizeFingerprintPart fallback value =
+        match Text.notEmpty value with
+        | Some text -> text.Trim().ToLowerInvariant().Replace(" ", "-").Replace(":", "-").Replace("=", "-")
+        | None -> fallback
+
     let defaults =
         { minNativeCharsPerPage = 24
           ocrDedupeOverlapThreshold = 0.75
@@ -45,7 +108,8 @@ module DoclingHybrid =
           enableOcr = true
           enableLayoutAnalysis = true
           enableFigureClassification = false
-          layoutModelProvider = None }
+          layoutModelProvider = None
+          visualDescriptions = PdfVisualDescriptionOptions.disabled }
 
     let mutable private activeDefaults = defaults
 
@@ -130,16 +194,515 @@ module DoclingHybrid =
 
         bitmap
 
-    let mutable private rasterizerFactory: (DoclingHybridOptions -> IDoclingPageRasterizer) option =
-        None
+    type private VisualDescriptionResult =
+        { description: string
+          keywords: string list }
 
-    let setRasterizerFactory factory = rasterizerFactory <- Some factory
+    type private VisualDescriptionCandidate =
+        { selfRef: string
+          parent: string
+          label: DoclingLabel
+          contentLayer: DoclingContentLayer
+          prov: DoclingProvenance list
+          keywords: string list
+          sourceId: string option
+          sourceDisplayName: string option }
 
-    let clearRasterizerFactory () = rasterizerFactory <- None
+    let private visualDescriptionPromptVersion = "visual-descriptions-v2"
+
+    let private visualDescriptionJsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+        options.Converters.Add(JsonFSharpConverter())
+        options
+
+    let private hashBytes (bytes: byte[]) =
+        use sha = SHA256.Create()
+
+        sha.ComputeHash bytes
+        |> Convert.ToHexString
+        |> fun hash -> hash.ToLowerInvariant()
+
+    let private hashText (value: string) =
+        value |> Encoding.UTF8.GetBytes |> hashBytes
+
+    let private pdfSourceFingerprint (path: string) =
+        let info = FileInfo path
+
+        if info.Exists then
+            $"{info.FullName}:{info.Length}:{info.LastWriteTimeUtc.Ticks}"
+        else
+            path
+
+    let private cleanKeywords maxValues values =
+        values
+        |> Seq.choose (Text.normalizeWhitespace >> Text.notEmpty)
+        |> Seq.distinctBy _.ToLowerInvariant()
+        |> Seq.truncate maxValues
+        |> Seq.toList
+
+    let private labelText label =
+        match label with
+        | DoclingLabel.Picture -> "picture"
+        | DoclingLabel.Chart -> "chart"
+        | DoclingLabel.Table -> "table"
+        | _ -> label.ToString().ToLowerInvariant()
+
+    let private visualCacheFolder storageRoot =
+        let path = Path.Combine(fsColbertRoot storageRoot, "VisualDescriptionCache")
+        Directory.CreateDirectory path |> ignore
+        path
+
+    let private visualCacheRoot options path =
+        options.cacheStorageRoot
+        |> Option.orElseWith (fun () -> path |> Path.GetFullPath |> Path.GetDirectoryName |> Option.ofObj)
+        |> Option.defaultValue (Path.GetTempPath())
+
+    let private visualCachePath options path key =
+        Path.Combine(visualCacheFolder (visualCacheRoot options path), $"{key}.json")
+
+    let private tryReadVisualDescriptionCache cachePath =
+        try
+            if not (File.Exists cachePath) then
+                None
+            else
+                use document = JsonDocument.Parse(File.ReadAllText cachePath)
+                let root = document.RootElement
+
+                let mutable descriptionProperty = Unchecked.defaultof<JsonElement>
+                let mutable keywordsProperty = Unchecked.defaultof<JsonElement>
+
+                let description =
+                    if
+                        root.TryGetProperty("description", &descriptionProperty)
+                        && descriptionProperty.ValueKind = JsonValueKind.String
+                    then
+                        descriptionProperty.GetString() |> Text.notEmpty
+                    else
+                        None
+
+                let keywords =
+                    if
+                        root.TryGetProperty("keywords", &keywordsProperty)
+                        && keywordsProperty.ValueKind = JsonValueKind.Array
+                    then
+                        keywordsProperty.EnumerateArray()
+                        |> Seq.choose (fun item ->
+                            if item.ValueKind = JsonValueKind.String then
+                                item.GetString() |> Text.notEmpty
+                            else
+                                None)
+                        |> cleanKeywords 16
+                    else
+                        []
+
+                description
+                |> Option.map (fun description ->
+                    { description = description
+                      keywords = keywords })
+        with _ ->
+            None
+
+    let private writeVisualDescriptionCache cachePath result =
+        try
+            let json =
+                JsonSerializer.Serialize(
+                    {| description = result.description
+                       keywords = result.keywords |},
+                    visualDescriptionJsonOptions
+                )
+
+            let tempPath = $"{cachePath}.tmp"
+            File.WriteAllText(tempPath, json)
+
+            if File.Exists cachePath then
+                File.Delete cachePath
+
+            File.Move(tempPath, cachePath)
+        with _ ->
+            ()
+
+    let private topLeftBoxForImage (image: DoclingRgbImage) (bbox: DoclingBoundingBox) =
+        let l, t, r, b =
+            match bbox.coordOrigin with
+            | DoclingCoordinateOrigin.BottomLeft ->
+                bbox.l, float image.height - bbox.t, bbox.r, float image.height - bbox.b
+            | _ -> bbox.l, bbox.t, bbox.r, bbox.b
+
+        let width = max 1.0 (r - l)
+        let height = max 1.0 (b - t)
+        let padding = max 4.0 (0.04 * max width height)
+
+        let clamp (minValue: float) (maxValue: float) (value: float) =
+            Math.Min(maxValue, Math.Max(minValue, value))
+
+        let left = clamp 0.0 (float image.width - 1.0) (l - padding)
+        let top = clamp 0.0 (float image.height - 1.0) (t - padding)
+        let right = clamp (left + 1.0) (float image.width) (r + padding)
+        let bottom = clamp (top + 1.0) (float image.height) (b + padding)
+
+        int (Math.Floor left), int (Math.Floor top), int (Math.Ceiling right), int (Math.Ceiling bottom)
+
+    let private tryCropVisualPng (pageInputs: DoclingPageInput list) (candidate: VisualDescriptionCandidate) =
+        match candidate.prov |> List.tryHead with
+        | None -> Error "visual region has no page provenance"
+        | Some prov ->
+            match pageInputs |> List.tryFind (fun page -> page.pageNo = prov.pageNo) with
+            | None -> Error $"page {prov.pageNo} was not available for visual cropping"
+            | Some page ->
+                try
+                    let left, top, right, bottom = topLeftBoxForImage page.image prov.bbox
+                    let width = right - left
+                    let height = bottom - top
+
+                    if width <= 1 || height <= 1 then
+                        Error "visual crop was empty"
+                    else
+                        use source = toBitmap page.image
+                        use cropped = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque)
+                        use canvas = new SKCanvas(cropped)
+                        canvas.Clear(SKColors.White)
+                        let sourceRect = SKRectI(left, top, right, bottom)
+                        let destinationRect = SKRect(0f, 0f, float32 width, float32 height)
+                        canvas.DrawBitmap(source, sourceRect, destinationRect)
+                        use data = cropped.Encode(SKEncodedImageFormat.Png, 90)
+                        Ok(data.ToArray())
+                with ex ->
+                    Error $"visual crop failed: {ex.Message}"
+
+    let private visualDescriptionCacheKey options path candidate pngBytes =
+        let provText =
+            candidate.prov
+            |> List.map (fun prov ->
+                let bbox = prov.bbox
+
+                $"{prov.pageNo}:{bbox.l:F2}:{bbox.t:F2}:{bbox.r:F2}:{bbox.b:F2}:{bbox.coordOrigin}")
+            |> String.concat "|"
+
+        [ pdfSourceFingerprint path
+          labelText candidate.label
+          provText
+          hashBytes pngBytes
+          options.modelId
+          options.schemaVersion
+          visualDescriptionPromptVersion ]
+        |> String.concat "\n"
+        |> hashText
+
+    let private visualDescriptionPrompt candidate =
+        $"""
+Describe this detected PDF visual region for document retrieval indexing.
+
+Visual kind: {labelText candidate.label}
+
+Return only a JSON object:
+{{"description":"one compact factual description","keywords":["4-8 short retrieval keywords"]}}
+
+Rules:
+- Use only what is visible in the image.
+- Mention the most important labels, axes, entities, relationships, and visible trends when present.
+- Do not speculate about facts that are not visible.
+- Keep the description under 45 words.
+- Keep each keyword under 4 words.
+"""
+
+    let private parseVisualDescriptionResponse (text: string) =
+        let fallback () =
+            let trimmed = if isNull text then "" else text.Trim()
+
+            if
+                trimmed.StartsWith("{", StringComparison.Ordinal)
+                || trimmed.StartsWith("[", StringComparison.Ordinal)
+            then
+                None
+            else
+                text
+                |> Text.normalizeWhitespace
+                |> Text.notEmpty
+                |> Option.map (fun description ->
+                    { description = description
+                      keywords = [] })
+
+        try
+            use document = JsonDocument.Parse text
+            let root = document.RootElement
+
+            if root.ValueKind <> JsonValueKind.Object then
+                fallback ()
+            else
+                let mutable descriptionProperty = Unchecked.defaultof<JsonElement>
+                let mutable keywordsProperty = Unchecked.defaultof<JsonElement>
+
+                let description =
+                    if
+                        root.TryGetProperty("description", &descriptionProperty)
+                        && descriptionProperty.ValueKind = JsonValueKind.String
+                    then
+                        descriptionProperty.GetString() |> Text.normalizeWhitespace |> Text.notEmpty
+                    else
+                        None
+
+                let keywords =
+                    if
+                        root.TryGetProperty("keywords", &keywordsProperty)
+                        && keywordsProperty.ValueKind = JsonValueKind.Array
+                    then
+                        keywordsProperty.EnumerateArray()
+                        |> Seq.choose (fun item ->
+                            if item.ValueKind = JsonValueKind.String then
+                                item.GetString() |> Text.notEmpty
+                            else
+                                None)
+                        |> cleanKeywords 16
+                    else
+                        []
+
+                description
+                |> Option.map (fun description ->
+                    { description = description
+                      keywords = keywords })
+        with _ ->
+            fallback ()
+
+    let private describeVisualWithModel
+        report
+        (path: string)
+        (options: PdfVisualDescriptionOptions)
+        (client: IChatClient)
+        pageInputs
+        candidate
+        cancellationToken
+        =
+        async {
+            match tryCropVisualPng pageInputs candidate with
+            | Error err ->
+                report $"PDF visual description skipped for {Path.GetFileName path}: {err}."
+                return None
+            | Ok pngBytes ->
+                let cacheKey = visualDescriptionCacheKey options path candidate pngBytes
+                let cachePath = visualCachePath options path cacheKey
+
+                match tryReadVisualDescriptionCache cachePath with
+                | Some cached -> return Some(candidate, cached)
+                | None ->
+                    try
+                        let contents = ResizeArray<AIContent>()
+                        contents.Add(TextContent(visualDescriptionPrompt candidate) :> AIContent)
+                        contents.Add(DataContent(ReadOnlyMemory<byte>(pngBytes), "image/png") :> AIContent)
+
+                        let messages = [ ChatMessage(ChatRole.User, contents) ]
+                        let chatOptions = ChatOptions()
+                        chatOptions.MaxOutputTokens <- Nullable options.maxOutputTokens
+                        chatOptions.ResponseFormat <- ChatResponseFormat.Json
+
+                        let! response =
+                            client.GetResponseAsync(messages, chatOptions, cancellationToken)
+                            |> Async.AwaitTask
+
+                        match parseVisualDescriptionResponse response.Text with
+                        | None ->
+                            report
+                                $"PDF visual description returned no usable text for {Path.GetFileName path} {labelText candidate.label}."
+
+                            return None
+                        | Some result ->
+                            writeVisualDescriptionCache cachePath result
+                            return Some(candidate, result)
+                    with
+                    | :? OperationCanceledException -> return raise (OperationCanceledException cancellationToken)
+                    | ex ->
+                        report
+                            $"PDF visual description failed for {Path.GetFileName path} {labelText candidate.label}: {ex.Message}"
+
+                        return None
+        }
+
+    let private tableTextLength (table: DoclingTableItem) =
+        table.data.tableCells
+        |> List.sumBy (fun cell ->
+            if String.IsNullOrWhiteSpace cell.text then
+                0
+            else
+                cell.text.Trim().Length)
+
+    let private visualCandidates (document: DoclingDocument) =
+        let fromPicture (picture: DoclingPictureItem) =
+            match picture.label, picture.prov with
+            | (DoclingLabel.Picture | DoclingLabel.Chart), _ :: _ ->
+                Some
+                    { selfRef = picture.selfRef
+                      parent = picture.parent
+                      label = picture.label
+                      contentLayer = picture.contentLayer
+                      prov = picture.prov
+                      keywords = picture.keywords
+                      sourceId = picture.sourceId
+                      sourceDisplayName = picture.sourceDisplayName }
+            | _ -> None
+
+        let fromSparseTable (table: DoclingTableItem) =
+            match table.prov with
+            | _ :: _ when tableTextLength table < 32 ->
+                Some
+                    { selfRef = table.selfRef
+                      parent = table.parent
+                      label = DoclingLabel.Table
+                      contentLayer = table.contentLayer
+                      prov = table.prov
+                      keywords = table.keywords
+                      sourceId = table.sourceId
+                      sourceDisplayName = table.sourceDisplayName }
+            | _ -> None
+
+        [ yield! document.pictures |> List.choose fromPicture
+          yield! document.tables |> List.choose fromSparseTable ]
+
+    let private syntheticVisualText baseIndex index candidate result =
+        let kind = labelText candidate.label
+
+        let description = result.description |> Text.normalizeWhitespace
+
+        let text = $"[Visual description: {kind}] {description}"
+
+        { selfRef = $"#/texts/{baseIndex + index}"
+          parent = candidate.parent
+          label = DoclingLabel.Text
+          text = text
+          orig = text
+          contentLayer = candidate.contentLayer
+          prov = candidate.prov
+          keywords =
+            seq {
+                yield kind
+                yield "visual"
+                yield! candidate.keywords
+                yield! result.keywords
+            }
+            |> cleanKeywords 24
+          sourceId = candidate.sourceId
+          sourceDisplayName = candidate.sourceDisplayName }
+
+    let private insertVisualTexts
+        (document: DoclingDocument)
+        (items: (VisualDescriptionCandidate * VisualDescriptionResult) list)
+        =
+        if List.isEmpty items then
+            document
+        else
+            let syntheticTexts =
+                items
+                |> List.mapi (fun index (candidate, result) ->
+                    candidate.selfRef, syntheticVisualText document.texts.Length index candidate result)
+
+            let syntheticByParent = syntheticTexts |> Map.ofList
+
+            let bodyChildren, inserted =
+                document.bodyChildren
+                |> List.fold
+                    (fun (children, inserted) child ->
+                        match syntheticByParent |> Map.tryFind child with
+                        | None -> child :: children, inserted
+                        | Some synthetic -> synthetic.selfRef :: child :: children, Set.add synthetic.selfRef inserted)
+                    ([], Set.empty)
+
+            let appended =
+                syntheticTexts
+                |> List.map snd
+                |> List.filter (fun item -> not (Set.contains item.selfRef inserted))
+                |> List.map _.selfRef
+
+            { document with
+                texts = document.texts @ (syntheticTexts |> List.map snd)
+                bodyChildren = (List.rev bodyChildren) @ appended }
+
+    let private enrichDocumentWithVisualDescriptions
+        options
+        report
+        (path: string)
+        pageInputs
+        (document: DoclingDocument)
+        cancellationToken
+        =
+        async {
+            let options = PdfVisualDescriptionOptions.sanitize options
+            throwIfCanceled cancellationToken
+
+            if not options.enabled then
+                return document
+            else
+                match options.client with
+                | None ->
+                    report
+                        $"PDF visual descriptions are enabled for {Path.GetFileName path}, but no visual-description model client is configured; skipping."
+
+                    return document
+                | Some client ->
+                    let candidates = visualCandidates document
+
+                    if List.isEmpty candidates then
+                        return document
+                    else
+                        report
+                            $"PDF visual descriptions: describing {candidates.Length} detected visual region(s) in {Path.GetFileName path} with {options.modelId}."
+
+                        let! described =
+                            candidates
+                            |> AsyncSeq.ofSeq
+                            |> AsyncSeq.mapAsyncParallelThrottled options.parallelism (fun candidate ->
+                                describeVisualWithModel
+                                    report
+                                    path
+                                    options
+                                    client
+                                    pageInputs
+                                    candidate
+                                    cancellationToken)
+                            |> AsyncSeq.toListAsync
+
+                        throwIfCanceled cancellationToken
+
+                        let described = described |> List.choose id
+
+                        if List.isEmpty described then
+                            return document
+                        else
+                            report
+                                $"PDF visual descriptions: added {described.Length} visual description(s) for {Path.GetFileName path}."
+
+                            return insertVisualTexts document described
+        }
+
+    type private RasterizerRegistration =
+        { info: DoclingRasterizerInfo
+          factory: DoclingHybridOptions -> IDoclingPageRasterizer }
+
+    let private missingRasterizerInfo =
+        { id = "none"
+          displayName = "No registered rasterizer" }
+
+    let mutable private rasterizerRegistration: RasterizerRegistration option = None
+
+    let setRasterizerFactoryWithInfo id displayName factory =
+        rasterizerRegistration <-
+            Some
+                { info =
+                    { id = normalizeFingerprintPart "custom" id
+                      displayName = displayName |> Text.notEmpty |> Option.defaultValue "Custom PDF rasterizer" }
+                  factory = factory }
+
+    let currentRasterizerInfo () =
+        rasterizerRegistration
+        |> Option.map _.info
+        |> Option.defaultValue missingRasterizerInfo
+
+    let setRasterizerFactory factory =
+        setRasterizerFactoryWithInfo "custom" "Custom PDF rasterizer" factory
+
+    let clearRasterizerFactory () = rasterizerRegistration <- None
 
     let private createRasterizer options =
-        match rasterizerFactory with
-        | Some factory -> factory options
+        match rasterizerRegistration with
+        | Some registration -> registration.factory options
         | None ->
             { new IDoclingPageRasterizer with
                 member _.RasterizeAsync path =
@@ -479,10 +1042,10 @@ module DoclingHybrid =
               b = clamp image.height b
               coordOrigin = DoclingCoordinateOrigin.TopLeft }
 
-        let boxArea bbox =
+        let boxArea (bbox: DoclingBoundingBox) =
             max 0.0 (bbox.r - bbox.l) * max 0.0 (bbox.b - bbox.t)
 
-        let intersectionOverUnion left right =
+        let intersectionOverUnion (left: DoclingBoundingBox) (right: DoclingBoundingBox) =
             let l = max left.l right.l
             let t = max left.t right.t
             let r = min left.r right.r
@@ -492,16 +1055,16 @@ module DoclingHybrid =
 
             if union <= 0.0 then 0.0 else intersection / union
 
-        let applyNms clusters =
+        let applyNms (clusters: DoclingLayoutCluster list) =
             let sorted = clusters |> List.sortByDescending (fun cluster -> cluster.confidence)
 
-            let rec loop kept remaining =
+            let rec loop (kept: DoclingLayoutCluster list) (remaining: DoclingLayoutCluster list) =
                 match remaining with
                 | [] -> List.rev kept
                 | cluster :: rest ->
                     let shouldKeep =
                         kept
-                        |> List.forall (fun keptCluster ->
+                        |> List.forall (fun (keptCluster: DoclingLayoutCluster) ->
                             let threshold = if keptCluster.label = cluster.label then 0.6 else 0.98
 
                             intersectionOverUnion keptCluster.bbox cluster.bbox < threshold)
@@ -811,6 +1374,24 @@ module DoclingHybrid =
         | "docling-layout-heron" -> Some(heronLayoutProvider ())
         | _ -> None
 
+    let layoutModelFingerprint (options: DoclingHybridOptions) =
+        let provider =
+            options.layoutModelProvider |> Option.defaultWith ppDocLayoutMProvider
+
+        let id = provider.Id |> normalizeFingerprintPart "unknown"
+        $"pdfLayoutModel={id}"
+
+    let rasterizerFingerprint () =
+        let info = currentRasterizerInfo ()
+        let id = info.id |> normalizeFingerprintPart "unknown"
+        $"pdfRasterizer={id}"
+
+    let parserRuntimeFingerprint (options: DoclingHybridOptions) =
+        [ $"pdfLayoutAnalysis={options.enableLayoutAnalysis.ToString().ToLowerInvariant()}"
+          layoutModelFingerprint options
+          rasterizerFingerprint () ]
+        |> String.concat "\n"
+
     let private createLayoutPredictor options report storageRoot cancellationToken =
         let provider =
             options.layoutModelProvider |> Option.defaultWith ppDocLayoutMProvider
@@ -876,6 +1457,16 @@ module DoclingHybrid =
             | Error err -> return Error err
             | Ok(rasterized: DoclingRasterPage list) ->
                 report $"Document structure parser rasterized {rasterized.Length} page(s) for {Path.GetFileName path}."
+
+                let pageSizes =
+                    rasterized
+                    |> List.truncate 12
+                    |> List.map (fun page -> $"{page.pageNo}:{page.image.width}x{page.image.height}")
+                    |> String.concat ", "
+
+                let suffix = if rasterized.Length > 12 then ", ..." else ""
+
+                report $"Document structure raster page sizes for {Path.GetFileName path}: {pageSizes}{suffix}."
 
                 throwIfCanceled cancellationToken
 
@@ -974,6 +1565,7 @@ module DoclingHybrid =
             CancellationToken.None
 
     let private convertPageInputsWithCancellation
+        options
         report
         chunkOptions
         passageSource
@@ -1003,11 +1595,35 @@ module DoclingHybrid =
                     $"Document structure layout conversion timed out for {Path.GetFileName path} after processing budget for {pageInputs.Length} page(s); falling back to legacy PDF parsing."
 
             throwIfCanceled cancellationToken
-            return document |> Result.map (DoclingPassages.toPassages chunkOptions passageSource)
+
+            match document with
+            | Error err -> return Error err
+            | Ok document ->
+                let! document =
+                    enrichDocumentWithVisualDescriptions
+                        options.visualDescriptions
+                        report
+                        path
+                        pageInputs
+                        document
+                        cancellationToken
+
+                throwIfCanceled cancellationToken
+                return document |> DoclingPassages.toPassages chunkOptions passageSource |> Ok
         }
 
-    let private convertPageInputs report chunkOptions passageSource path layoutPredictor figureClassifier pageInputs =
+    let private convertPageInputs
+        options
+        report
+        chunkOptions
+        passageSource
+        path
+        layoutPredictor
+        figureClassifier
+        pageInputs
+        =
         convertPageInputsWithCancellation
+            options
             report
             chunkOptions
             passageSource
@@ -1099,6 +1715,21 @@ module DoclingHybrid =
             else
                 int64 passage.text.Length)
 
+    let private containsVisualDescription (passage: PassageRef) =
+        not (isNull passage.text)
+        && passage.text.Contains("[Visual description:", StringComparison.Ordinal)
+
+    let private appendVisualDescriptionPassages (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
+        let visualPassages =
+            layoutPassages
+            |> List.filter containsVisualDescription
+            |> List.distinctBy _.text
+            |> List.mapi (fun offset passage ->
+                { passage with
+                    index = nativePassages.Length + offset })
+
+        nativePassages @ visualPassages
+
     let private layoutFallbackReason (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
         let layoutChars = passageTextLength layoutPassages
         let nativeChars = passageTextLength nativePassages
@@ -1142,7 +1773,7 @@ module DoclingHybrid =
                         report
                             $"Using document structure native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
-                        Ok nativePassages
+                        Ok(appendVisualDescriptionPassages layoutPassages nativePassages)
                     else
                         report
                             $"Keeping document structure layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
@@ -1189,6 +1820,7 @@ module DoclingHybrid =
                 if options.enableLayoutAnalysis then
                     let! layoutResult =
                         convertPageInputsWithCancellation
+                            options
                             report
                             chunkOptions
                             passageSource
@@ -1240,8 +1872,21 @@ module DoclingHybrid =
         =
         async {
             throwIfCanceled cancellationToken
+
+            let options =
+                { options with
+                    visualDescriptions =
+                        { options.visualDescriptions with
+                            cacheStorageRoot =
+                                options.visualDescriptions.cacheStorageRoot |> Option.orElse (Some storageRoot) } }
+
             let rasterizer = createRasterizer options
             report $"Document structure PDF parser starting for {Path.GetFileName path}."
+            let rasterizerInfo = currentRasterizerInfo ()
+            let layoutFingerprint = layoutModelFingerprint options
+
+            report
+                $"Document structure PDF parser rasterizer: {rasterizerInfo.displayName} ({rasterizerInfo.id}); dpi={max 36 options.rasterDpi}; {layoutFingerprint}."
 
             let ocrProviderResult = tryCreateRapidOcrProvider options storageRoot
 
@@ -1305,6 +1950,7 @@ module DoclingHybrid =
                                         try
                                             let! layoutResult =
                                                 convertPageInputsWithCancellation
+                                                    options
                                                     report
                                                     chunkOptions
                                                     passageSource

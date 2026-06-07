@@ -9,6 +9,7 @@ module KnowledgeSources =
     type QueryType = FsVoice.Retrieval.KnowledgeSources.QueryType
     type Expansion = FsVoice.Retrieval.KnowledgeSources.Expansion
     type KeywordGenerationOptions = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions
+    type PdfVisualDescriptionOptions = FsVoice.Retrieval.PdfVisualDescriptionOptions
     type IndexPreviewVectorSummary = FsVoice.Retrieval.KnowledgeSources.IndexPreviewVectorSummary
     type IndexPreviewRecord = FsVoice.Retrieval.KnowledgeSources.IndexPreviewRecord
     type IndexPreview = FsVoice.Retrieval.KnowledgeSources.IndexPreview
@@ -16,6 +17,10 @@ module KnowledgeSources =
     module KeywordGenerationOptions =
         let defaults = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.defaults
         let disabled = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.disabled
+
+    module PdfVisualDescriptionOptions =
+        let defaults = FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults
+        let disabled = FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
 
     type RetrievalIndex = FsVoice.Retrieval.KnowledgeSources.RetrievalIndex
 
@@ -90,58 +95,118 @@ module KnowledgeSources =
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
-    let configurePdfParser useLayoutAnalysis =
+    let private pdfIngestionOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        visualOptions
+        : FsVoice.Retrieval.KnowledgeSources.PdfIngestionOptions =
+        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+          visualDescriptions =
+            if useHybridPdfParsing && useLayoutAnalysis then
+                visualOptions
+            else
+                FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
+
+    let configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions =
         { FsVoice.Retrieval.DoclingHybrid.defaults with
-            enableLayoutAnalysis = useLayoutAnalysis }
+            enableLayoutAnalysis = useLayoutAnalysis
+            visualDescriptions =
+                if useLayoutAnalysis then
+                    visualOptions
+                else
+                    FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
         |> FsVoice.Retrieval.DoclingHybrid.setDefaultOptions
 
-    let InindexSource
+    let configurePdfParser useLayoutAnalysis =
+        configurePdfParserWithVisualOptions useLayoutAnalysis FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+
+    let InindexSourceWithVisualOptions
         storageRoot
         report
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
         (source: KnowledgeSource)
         =
-        configurePdfParser useLayoutAnalysis
+        configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
 
         source
-        |> FsVoice.Retrieval.KnowledgeSources.InindexSource
+        |> FsVoice.Retrieval.KnowledgeSources.InindexSourceWithOptions
             storageRoot
             report
             keywordOptions
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
 
-    let loadIndex
+    let InindexSource storageRoot report keywordOptions useHybridPdfParsing useLayoutAnalysis source =
+        InindexSourceWithVisualOptions
+            storageRoot
+            report
+            keywordOptions
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            source
+
+    let loadIndexWithVisualOptions
         storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
         (sources: KnowledgeSource list)
         =
         async {
-            configurePdfParser useLayoutAnalysis
+            configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
 
             let! index, errors =
                 sources
-                |> FsVoice.Retrieval.KnowledgeSources.loadIndex
+                |> FsVoice.Retrieval.KnowledgeSources.loadIndexWithOptions
                     storageRoot
                     report
                     keywordOptions
-                    (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+                    (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
                     false
 
             return index, errors
         }
 
-    let loadIndexPreview storageRoot report useHybridPdfParsing useLayoutAnalysis maxRecords source =
-        source
-        |> FsVoice.Retrieval.KnowledgeSources.loadIndexPreview
+    let loadIndex storageRoot report keywordOptions useHybridPdfParsing useLayoutAnalysis sources =
+        loadIndexWithVisualOptions
             storageRoot
             report
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            keywordOptions
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            sources
+
+    let loadIndexPreviewWithVisualOptions
+        storageRoot
+        report
+        visualOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        maxRecords
+        source
+        =
+        source
+        |> FsVoice.Retrieval.KnowledgeSources.loadIndexPreviewWithOptions
+            storageRoot
+            report
+            (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
             maxRecords
+
+    let loadIndexPreview storageRoot report useHybridPdfParsing useLayoutAnalysis maxRecords source =
+        loadIndexPreviewWithVisualOptions
+            storageRoot
+            report
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            maxRecords
+            source
 
     let rank
         (apiKey: string option)

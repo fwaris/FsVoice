@@ -90,6 +90,8 @@ Common options:
 Index-folder options:
   --index-keywords       Generate index-time keyword metadata with OpenAI.
   --keyword-model value  Keyword enrichment model. Defaults to --small-model or gpt-5-nano.
+  --describe-visuals    Generate compact descriptions for detected PDF figures/charts/images.
+  --visual-model value  Visual description model. Defaults to gpt-5-mini.
   --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to heron.
   --layout-plugin path   Trusted .NET assembly containing a document structure layout provider.
   --layout-plugin-type value  Full provider type name in --layout-plugin.
@@ -156,7 +158,8 @@ Index-folder options:
             let smallModel = optionValue "small-model" QaDefaults.nanoModel parsed
             let small = createClient key smallModel
 
-            { queryExpansion = Some small }
+            { queryExpansion = Some small
+              visualDescription = None }
 
     let retrievalMode parsed =
         match
@@ -308,6 +311,22 @@ Index-folder options:
                         modelId = modelId
                         plugInProfile = plugInProfile parsed }
 
+    let private visualDescriptionOptionsForIndexFolder parsed =
+        if not (hasFlag "describe-visuals" parsed) then
+            Ok PdfVisualDescriptionOptions.disabled
+        else
+            match apiKey parsed with
+            | None -> Error "--describe-visuals requires --api-key or OPENAI_API_KEY."
+            | Some key ->
+                let modelId = optionValue "visual-model" "gpt-5-mini" parsed
+
+                Ok
+                    { PdfVisualDescriptionOptions.defaults with
+                        enabled = true
+                        client = Some(createClient key modelId)
+                        modelId = modelId
+                        cacheStorageRoot = Some(storageRoot parsed) }
+
     let private documentBundlePath (outputRoot: string) (relativePath: string) =
         Path.Combine(outputRoot, "documents", relativePath.Replace('/', Path.DirectorySeparatorChar))
 
@@ -332,10 +351,15 @@ Index-folder options:
             elif String.IsNullOrWhiteSpace bundleId then
                 return Error "Missing --bundle-id."
             else
-                match loadLayoutProvider parsed, keywordOptionsForIndexFolder parsed with
-                | Error err, _ -> return Error err
-                | _, Error err -> return Error err
-                | Ok layoutProvider, Ok keywordOptions ->
+                match
+                    loadLayoutProvider parsed,
+                    keywordOptionsForIndexFolder parsed,
+                    visualDescriptionOptionsForIndexFolder parsed
+                with
+                | Error err, _, _ -> return Error err
+                | _, Error err, _ -> return Error err
+                | _, _, Error err -> return Error err
+                | Ok layoutProvider, Ok keywordOptions, Ok visualOptions ->
                     let outputFull = Path.GetFullPath output
                     let outputIsZip = outputFull.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
 
@@ -367,14 +391,18 @@ Index-folder options:
                                     layoutModelProvider = Some layoutProvider }
 
                             report
-                                $"Indexing {sources.Length} document(s) with layout model {layoutProvider.DisplayName}; indexKeywords={keywordOptions.enabled}."
+                                $"Indexing {sources.Length} document(s) with layout model {layoutProvider.DisplayName}; indexKeywords={keywordOptions.enabled}; describeVisuals={visualOptions.enabled}."
+
+                            let pdfOptions =
+                                { KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid with
+                                    visualDescriptions = visualOptions }
 
                             let! retrieval, errors =
-                                KnowledgeSources.loadIndex
+                                KnowledgeSources.loadIndexWithOptions
                                     (storageRoot parsed)
                                     report
                                     keywordOptions
-                                    KnowledgeSources.PdfParsingMode.Hybrid
+                                    pdfOptions
                                     true
                                     sources
 
@@ -425,7 +453,13 @@ Index-folder options:
                                        documentCount = sources.Length
                                        output = outputFull
                                        layoutModel = layoutProvider.Id
-                                       indexKeywords = keywordOptions.enabled |}
+                                       indexKeywords = keywordOptions.enabled
+                                       describeVisuals = visualOptions.enabled
+                                       visualModel =
+                                        if visualOptions.enabled then
+                                            Some visualOptions.modelId
+                                        else
+                                            None |}
 
                                 return Ok()
                         with ex ->

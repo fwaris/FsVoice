@@ -64,6 +64,7 @@ type ModelRole =
     | Answer
     | Keyword
     | QueryExpansion
+    | VisualDescription
 
 [<CLIMutable>]
 type ModelRoleConfig =
@@ -136,8 +137,10 @@ module ModelRole =
         | Answer -> "Answer"
         | Keyword -> "Keyword"
         | QueryExpansion -> "QueryExpansion"
+        | VisualDescription -> "VisualDescription"
 
-    let all = [ Realtime; Transcriber; Answer; Keyword; QueryExpansion ]
+    let all =
+        [ Realtime; Transcriber; Answer; Keyword; QueryExpansion; VisualDescription ]
 
     let tryParse value =
         let normalized =
@@ -455,7 +458,8 @@ module PlugInDefinition =
           Keyword,
           { ModelRoleConfig.create "gpt-5-nano" with
               maxOutputTokens = Some 25000 }
-          QueryExpansion, ModelRoleConfig.create "gpt-5-nano" ]
+          QueryExpansion, ModelRoleConfig.create "gpt-5-nano"
+          VisualDescription, ModelRoleConfig.create "gpt-5-mini" ]
         |> Map.ofList
 
     let defaultPrompts =

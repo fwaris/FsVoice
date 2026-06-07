@@ -1,6 +1,7 @@
 namespace Speak2Docs.WorkFlow
 
 open System
+open System.Diagnostics
 open System.IO
 open System.Threading
 open Speak2Docs
@@ -42,6 +43,21 @@ module OracleAgent =
     let private modelConfig role (plugIn: FsVoice.Ctx.PlugInDefinition) =
         FsVoice.Ctx.PlugInDefinition.model role plugIn
 
+    let private visualDescriptionOptions apiKey flags (plugIn: FsVoice.Ctx.PlugInDefinition) =
+        if
+            not flags.describePdfVisuals
+            || not flags.useHybridPdfParsing
+            || not flags.useLayoutAnalysis
+        then
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+        else
+            let visualModel = modelConfig FsVoice.Ctx.VisualDescription plugIn
+
+            { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
+                enabled = true
+                client = Some(createClient apiKey visualModel.modelId)
+                modelId = visualModel.modelId }
+
     let private createSession (st: State) flags : FsVoice.Ctx.IQaOrchestrator =
         if String.IsNullOrWhiteSpace st.apiKey then
             invalidOp "OpenAI API key is required for oracle QA Responses WebSocket answering."
@@ -50,7 +66,12 @@ module OracleAgent =
             let queryExpansion =
                 createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
 
-            { queryExpansion = Some queryExpansion }
+            { queryExpansion = Some queryExpansion
+              visualDescription =
+                if flags.describePdfVisuals && flags.useHybridPdfParsing && flags.useLayoutAnalysis then
+                    Some(createClient st.apiKey (modelConfig FsVoice.Ctx.VisualDescription st.plugIn).modelId)
+                else
+                    None }
 
         let storageRoot = st.storageRoot
         let answerModel = modelConfig FsVoice.Ctx.Answer st.plugIn
@@ -66,9 +87,11 @@ module OracleAgent =
                 prompts = st.plugIn.prompts
                 modelRoles = st.plugIn.models
                 answerModelId = answerModel.modelId
+                answerTransportMode = Speak2Docs.RuntimeSettings.DefaultOracleAnswerTransportMode
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
+                pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
                 enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
@@ -98,6 +121,7 @@ module OracleAgent =
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
+                pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
                 buildMissingIndexes = false
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -168,7 +192,7 @@ module OracleAgent =
 
             st.bus.PostToAgent(
                 Ag_Log
-                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName}."
+                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName} pdfVisuals:{flags.describePdfVisuals}."
             )
 
             startAnswerTransportPreparation st session
@@ -217,7 +241,20 @@ module OracleAgent =
                       realtimeJudgement = request.realtimeJudgement
                       deadline = Some request.deadline }
 
+                let sw = Stopwatch.StartNew()
+
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"QA request started: turn={request.snapshot.turnId}; question_chars={request.snapshot.text.Length}; timeoutMs={st.plugIn.runtime.functionCallTimeoutMs}; deadline={request.deadline:O}."
+                )
+
                 let! answer = session.AnswerAsync(qaRequest, request.cancellationToken) |> Async.AwaitTask
+                sw.Stop()
+
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"QA request returned: turn={request.snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; answer_chars={answer.answer.Length}."
+                )
 
                 let chunks: SourceChunk list = answer.context
                 let inventory: KnowledgeSource list = answer.inventory

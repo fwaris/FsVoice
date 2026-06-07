@@ -830,7 +830,13 @@ module ResponsesWebSocket =
 
             match message with
             | TextMessage text -> return ResponseStreamEvent.deserialize text |> Some
-            | Closed _ -> return None
+            | Closed close ->
+                let status = close.status |> Option.map string |> Option.defaultValue "n/a"
+                let description = close.description |> Option.defaultValue "n/a"
+
+                return
+                    invalidOp
+                        $"Responses WebSocket closed before a terminal response event: status={status}; description={description}."
         }
 
     let readUntilTerminal connection cancellationToken =

@@ -311,6 +311,42 @@ let ``websocket readText returns close frame`` () =
     }
 
 [<Fact>]
+let ``websocket createAndCollect fails when connection closes before terminal event`` () =
+    task {
+        let request = WebSocketCreateRequest.ofText Models.gpt_5 "Say hello."
+
+        let! message =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        let! _ = receiveUtf8 socket CancellationToken.None
+
+                        do!
+                            socket.CloseOutputAsync(
+                                WebSocketCloseStatus.EndpointUnavailable,
+                                "server closed before terminal",
+                                CancellationToken.None
+                            )
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! ex =
+                                Assert.ThrowsAsync<InvalidOperationException>(fun () ->
+                                    ResponsesWebSocket.createAndCollect connection request CancellationToken.None
+                                    :> Task)
+
+                            return ex.Message
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        Assert.Contains("closed before a terminal response event", message)
+    }
+
+[<Fact>]
 let ``websocket sendEvent serializes concurrent sends`` () =
     task {
         let messageCount = 20

@@ -26,6 +26,9 @@ module internal QaAnswerModel =
     let emptyAnswerFallback =
         "I could not produce an answer from the selected context. Please try again."
 
+    let reliableAnswerFallback =
+        "I could not produce a reliable answer from the available evidence. Please ask a narrower question."
+
     let maxAnswerTokensSettingsGuidance =
         "Disconnect, open Settings, increase Max Answer Tokens, then reconnect and try again."
 
@@ -37,6 +40,7 @@ module internal QaAnswerModel =
 
     let isFallbackAnswer (answer: string) =
         answer = emptyAnswerFallback
+        || answer = reliableAnswerFallback
         || answer.StartsWith("I was unable to obtain", StringComparison.OrdinalIgnoreCase)
 
     let renderObservations (observations: QaToolObservation list) =
@@ -73,6 +77,27 @@ module internal QaAnswerModel =
                 status = Some "completed"
                 role = "assistant"
                 content = [ FsResponses.Content.Output_text { text = answer; annotations = None } ] }
+
+    let finalAnswerSynthesisInstructions =
+        """Final answer synthesis mode.
+Produce the final answer to speak to the user.
+Use only the evidence in the user message: the user question, source context, durable memory, and tool observations.
+Do not call tools.
+Do not describe your reasoning, tool choices, lookup process, or limitations.
+Do not include process phrases such as "I need to", "let me", "I should", or "I can use".
+If the evidence is insufficient, say that plainly and concisely.
+Return only the answer text."""
+
+    let finalAnswerSynthesisUserItem (prompt: AnswerPrompt) (observations: QaToolObservation list) =
+        let toolObservations = renderObservations observations
+
+        let text =
+            $"Original answer evidence before this tool loop:\n{prompt.userPrompt}\n\nAuthoritative gathered tool observations from this answer attempt:\n{toolObservations}\n\nReturn only the final answer."
+
+        FsResponses.IOitem.Message
+            { FsResponses.Message.Default with
+                role = "user"
+                content = [ FsResponses.Content.Input_text {| text = text |} ] }
 
     let renderTemplate replacements (template: string) =
         replacements

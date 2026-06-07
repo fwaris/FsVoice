@@ -100,6 +100,7 @@ type SourceFlags =
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      describePdfVisuals: bool
       answerToolCallLoopLimit: int }
 
 type RealtimeConnectionState =

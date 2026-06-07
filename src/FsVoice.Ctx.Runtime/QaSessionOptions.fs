@@ -5,10 +5,24 @@ open System.Threading.Tasks
 open Microsoft.Extensions.AI
 open FsVoice.Retrieval
 
-type QaModelClients = { queryExpansion: IChatClient option }
+type QaModelClients =
+    { queryExpansion: IChatClient option
+      visualDescription: IChatClient option }
 
 module QaModelClients =
-    let none = { queryExpansion = None }
+    let none =
+        { queryExpansion = None
+          visualDescription = None }
+
+type QaAnswerTransportMode =
+    | PersistentWebSocket
+    | NewWebSocketPerRequest
+
+module QaAnswerTransportMode =
+    let storageName =
+        function
+        | PersistentWebSocket -> "persistent_websocket"
+        | NewWebSocketPerRequest -> "new_websocket_per_request"
 
 type QaSessionOptions =
     { storageRoot: string
@@ -17,6 +31,7 @@ type QaSessionOptions =
       retrievalMode: RetrievalMode
       clients: QaModelClients
       answerResponseWebSocketConfig: FsResponses.ResponseWebSocketConfig
+      answerTransportMode: QaAnswerTransportMode
       answerRequireToolCall: bool
       answerPromptCacheKey: string option
       answerPromptCacheRetention: string option
@@ -27,6 +42,7 @@ type QaSessionOptions =
       keywordModelId: string
       elaborateIndexKeywords: bool
       pdfParsingMode: KnowledgeSources.PdfParsingMode
+      pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
       memoryCandidateChunks: int
       maxContextChunks: int
       memoryService: IMemoryService option
@@ -51,6 +67,7 @@ module QaSessionOptions =
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
           answerResponseWebSocketConfig = answerResponseWebSocketConfig
+          answerTransportMode = PersistentWebSocket
           answerRequireToolCall = false
           answerPromptCacheKey = None
           answerPromptCacheRetention = None
@@ -61,6 +78,7 @@ module QaSessionOptions =
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
           pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
+          pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
           memoryCandidateChunks = QaDefaults.memoryCandidateChunks
           maxContextChunks = QaDefaults.maxContextChunks
           memoryService = None

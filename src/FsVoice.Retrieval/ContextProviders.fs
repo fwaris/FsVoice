@@ -19,6 +19,7 @@ type FsColbertContextProviderOptions =
       keywordModelId: string
       elaborateIndexKeywords: bool
       pdfParsingMode: KnowledgeSources.PdfParsingMode
+      pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
       buildMissingIndexes: bool
       logExpansions: bool
       logChunks: bool
@@ -39,6 +40,7 @@ module FsColbertContextProviderOptions =
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
           pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
+          pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
           buildMissingIndexes = true
           logExpansions = false
           logChunks = false
@@ -76,11 +78,12 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                                 plugInProfile = options.plugInProfile
                                 plugInFingerprint = options.plugInFingerprint }
 
-                        KnowledgeSources.loadIndex
+                        KnowledgeSources.loadIndexWithOptions
                             options.storageRoot
                             options.report
                             keywordOptions
-                            options.pdfParsingMode
+                            { parsingMode = options.pdfParsingMode
+                              visualDescriptions = options.pdfVisualDescriptionOptions }
                             options.buildMissingIndexes
                             sources
 

@@ -116,6 +116,7 @@ module Update =
             yield RuntimeSettings.OpenAiKey, model.openAiKey
             yield RuntimeSettings.LogExpansions, string model.logExpansions
             yield RuntimeSettings.LogChunks, string model.logChunks
+            yield RuntimeSettings.AudioDefaultToSpeaker, string model.audioDefaultToSpeaker
             yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
             yield RuntimeSettings.AnswerReasoningEffort, model.answerReasoningEffort
             yield RuntimeSettings.AnswerToolCallLoopLimit, model.answerToolCallLoopLimit
@@ -123,6 +124,7 @@ module Update =
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
             yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
             yield RuntimeSettings.UseLayoutAnalysis, string model.useLayoutAnalysis
+            yield RuntimeSettings.DescribePdfVisuals, string model.describePdfVisuals
 
             for KeyValue(role, modelId) in model.modelRoleOverrides do
                 yield RuntimeSettings.modelRoleKey role, modelId
@@ -173,6 +175,7 @@ module Update =
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
         Settings.setActivityLogVerbosity model.activityLogVerbosity
+        Settings.setAudioDefaultToSpeaker model.audioDefaultToSpeaker
         Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
         Settings.setAnswerReasoningEffort model.answerReasoningEffort
         Settings.setAnswerToolCallLoopLimit model.answerToolCallLoopLimit
@@ -180,6 +183,7 @@ module Update =
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
         Settings.setUseLayoutAnalysis model.useLayoutAnalysis
+        Settings.setDescribePdfVisuals model.describePdfVisuals
 
         model.plugInSettings
         |> Map.iter (fun key value -> Settings.setPlugInSetting model.activePlugIn.id key value)
@@ -258,6 +262,32 @@ module Update =
                     plugInProfile = plugIn.profile
                     plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn }
 
+    let private visualDescriptionOptions (model: Model) =
+        if
+            not model.describePdfVisuals
+            || not model.useHybridPdfParsing
+            || not model.useLayoutAnalysis
+        then
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+        else
+            let plugIn = composePlugIn model
+
+            let visualModel =
+                FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.VisualDescription plugIn
+
+            model.openAiKey
+            |> Text.notEmpty
+            |> Option.map (fun key ->
+                { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    client = Some(createChatClient key visualModel.modelId)
+                    modelId = visualModel.modelId })
+            |> Option.defaultValue
+                { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    client = None
+                    modelId = visualModel.modelId }
+
     let private withKeywordCancellation token (options: FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions) =
         { options with
             cancellationToken = Some token }
@@ -334,6 +364,7 @@ module Update =
         report
         (cancellationToken: CancellationToken)
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
         (docs: PdfDocumentSource list)
@@ -349,6 +380,7 @@ module Update =
                     PdfLibrary.processDocuments
                         report
                         keywordOptions
+                        visualOptions
                         useHybridPdfParsing
                         useLayoutAnalysis
                         cancellationToken
@@ -424,9 +456,10 @@ module Update =
                         Console.WriteLine msg
 
                     return
-                        KnowledgeSources.loadIndexPreview
+                        KnowledgeSources.loadIndexPreviewWithVisualOptions
                             FileSystem.AppDataDirectory
                             report
+                            (visualDescriptionOptions model)
                             model.useHybridPdfParsing
                             model.useLayoutAnalysis
                             20
@@ -553,9 +586,16 @@ module Update =
 
     let private documentProcessingCommand report (cts: CancellationTokenSource) (model: Model) docs =
         let keywordOptions = keywordOptions model |> withKeywordCancellation cts.Token
+        let visualOptions = visualDescriptionOptions model
 
         Cmd.OfAsync.either
-            (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing model.useLayoutAnalysis)
+            (processDocuments
+                report
+                cts.Token
+                keywordOptions
+                visualOptions
+                model.useHybridPdfParsing
+                model.useLayoutAnalysis)
             docs
             (fun result -> PdfProcessingCompleted(docs, result))
             EventError
@@ -698,6 +738,7 @@ module Update =
 
         let model =
             { currentPage = if Settings.hasAcceptedCurrentTerms () then Main else Terms
+              mainPageSize = None
               mailbox = Channel.CreateBounded<Msg>(100)
               bundle = None
               pendingConnectionId = None
@@ -722,6 +763,7 @@ module Update =
               documentProcessingCancellation = None
               logExpansions = Settings.logExpansions ()
               logChunks = Settings.logChunks ()
+              audioDefaultToSpeaker = Settings.audioDefaultToSpeaker ()
               answerMaxOutputTokens = string (Settings.answerMaxOutputTokens ())
               answerReasoningEffort = Settings.answerReasoningEffort ()
               answerToolCallLoopLimit = string (Settings.answerToolCallLoopLimit ())
@@ -732,6 +774,7 @@ module Update =
               elaborateIndexKeywords = Settings.plugInElaborateIndexKeywords loadedPlugIn.definition.id false
               useHybridPdfParsing = Settings.useHybridPdfParsing ()
               useLayoutAnalysis = Settings.useLayoutAnalysis ()
+              describePdfVisuals = Settings.describePdfVisuals ()
               notification = None
               nextNotificationId = 0
               appTheme = currentAppTheme ()
@@ -742,6 +785,17 @@ module Update =
 
     let update msg model =
         match msg with
+        | MainPageSizeAllocated(width, height) ->
+            let roundedSize =
+                { width = Math.Round(width)
+                  height = Math.Round(height) }
+
+            match model.mainPageSize with
+            | Some current when current = roundedSize -> model, Cmd.none
+            | _ ->
+                { model with
+                    mainPageSize = Some roundedSize },
+                Cmd.none
         | TermsAccepted ->
             Settings.setAcceptedTermsVersion C.TERMS_VERSION
 
@@ -913,6 +967,22 @@ module Update =
 
             saveSettings model
             model, Cmd.none
+        | AudioDefaultToSpeakerToggled value ->
+            match sourceConfigBlocked model "Changing default speaker route" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "speaker" else "receiver/headset"
+
+                let model =
+                    { model with
+                        audioDefaultToSpeaker = value
+                        log = $"Default audio route set to {state}." :: model.log |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                model, Cmd.none
         | UseLexicalFilterToggled value ->
             match sourceConfigBlocked model "Changing lexical filter" with
             | Some msg ->
@@ -972,6 +1042,26 @@ module Update =
                         useLayoutAnalysis = value
                         log =
                             $"Layout analysis {state}. Reprocess documents to rebuild Hybrid parser indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | DescribePdfVisualsToggled value ->
+            match sourceConfigBlocked model "Changing PDF visual descriptions" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        describePdfVisuals = value
+                        log =
+                            $"PDF visual descriptions {state}. Reprocess documents to rebuild indexes with this setting."
                             :: model.log
                             |> List.truncate C.MAX_LOG }
 

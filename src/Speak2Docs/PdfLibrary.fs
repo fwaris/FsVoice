@@ -3,6 +3,7 @@ namespace Speak2Docs
 open System
 open System.IO
 open System.IO.Compression
+open System.Security.Cryptography
 open System.Text.Json
 open System.Threading
 open Speak2Docs.WorkFlow
@@ -91,18 +92,30 @@ module PdfLibrary =
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
-    let private readPassages report useHybridPdfParsing useLayoutAnalysis (doc: PdfDocumentSource) cancellationToken =
+    let private readPassages
+        report
+        visualOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        (doc: PdfDocumentSource)
+        cancellationToken
+        =
         let source: FsVoice.Ctx.KnowledgeSource =
             { FsVoice.Ctx.KnowledgeSource.kind = qaSourceKind doc.kind
               location = doc.storedPath
               enabled = true }
 
-        KnowledgeSources.configurePdfParser useLayoutAnalysis
+        KnowledgeSources.configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
 
-        FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithCancellation
+        FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithOptionsWithCancellation
             FileSystem.AppDataDirectory
             report
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+              visualDescriptions =
+                if useHybridPdfParsing && useLayoutAnalysis then
+                    visualOptions
+                else
+                    FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
             source
             cancellationToken
 
@@ -162,6 +175,37 @@ module PdfLibrary =
                 use target = File.Create path
                 do! source.CopyToAsync(target) |> Async.AwaitTask
                 return true
+        }
+
+    let private hashStream (stream: Stream) =
+        use sha256 = SHA256.Create()
+        sha256.ComputeHash(stream) |> Convert.ToHexString
+
+    let private tryHashFile path =
+        try
+            if File.Exists path then
+                use stream = File.OpenRead path
+                Some(hashStream stream)
+            else
+                None
+        with _ ->
+            None
+
+    let private tryHashPackageFile logicalName =
+        async {
+            match! tryOpenPackageFile logicalName with
+            | None -> return None
+            | Some source ->
+                use source = source
+                return Some(hashStream source)
+        }
+
+    let private copyPackageFileIfChanged logicalName path =
+        async {
+            match! tryHashPackageFile logicalName with
+            | None -> return false
+            | Some packagedHash when tryHashFile path = Some packagedHash -> return false
+            | Some _ -> return! copyPackageFile logicalName path
         }
 
     let private readPrebuiltManifest () =
@@ -470,17 +514,9 @@ module PdfLibrary =
                     let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
                     let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
 
-                    let! documentCopied =
-                        if File.Exists storedPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.documentAsset storedPath
+                    let! documentCopied = copyPackageFileIfChanged asset.documentAsset storedPath
 
-                    let! indexCopied =
-                        if File.Exists indexPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.indexAsset indexPath
+                    let! indexCopied = copyPackageFileIfChanged asset.indexAsset indexPath
 
                     let chunkCount = prebuiltChunkCount indexPath
 
@@ -518,7 +554,7 @@ module PdfLibrary =
                           indexPath = indexPath }
 
                     if documentCopied || indexCopied then
-                        logs.Add $"Installed prebuilt knowledge index: {doc.displayName}."
+                        logs.Add $"Installed or refreshed prebuilt knowledge index: {doc.displayName}."
 
             match bundleManifest with
             | None -> ()
@@ -555,17 +591,9 @@ module PdfLibrary =
                             let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
                             let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
 
-                            let! documentCopied =
-                                if File.Exists storedPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.documentAsset storedPath
+                            let! documentCopied = copyPackageFileIfChanged asset.documentAsset storedPath
 
-                            let! indexCopied =
-                                if File.Exists indexPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.indexAsset indexPath
+                            let! indexCopied = copyPackageFileIfChanged asset.indexAsset indexPath
 
                             let chunkCount = prebuiltChunkCount indexPath
 
@@ -611,7 +639,7 @@ module PdfLibrary =
                                     indexFile = Path.GetFileName indexPath }
 
                             if documentCopied || indexCopied then
-                                logs.Add $"Installed bundled FsColbert index: {doc.displayName}."
+                                logs.Add $"Installed or refreshed bundled FsColbert index: {doc.displayName}."
 
                 if installedBundleSources.Count > 0 then
                     writeInstalledBundleManifest
@@ -771,6 +799,7 @@ module PdfLibrary =
     let processDocument
         report
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
         (cancellationToken: CancellationToken)
@@ -784,7 +813,7 @@ module PdfLibrary =
             cancellationToken.ThrowIfCancellationRequested()
             throwIfKeywordCancellationRequested keywordOptions
 
-            let! result = readPassages report useHybridPdfParsing useLayoutAnalysis doc cancellationToken
+            let! result = readPassages report visualOptions useHybridPdfParsing useLayoutAnalysis doc cancellationToken
             cancellationToken.ThrowIfCancellationRequested()
 
             match result with
@@ -799,11 +828,16 @@ module PdfLibrary =
                       enabled = true }
 
                 match!
-                    FsVoice.Retrieval.KnowledgeSources.InindexPassagesWithCancellation
+                    FsVoice.Retrieval.KnowledgeSources.InindexPassagesWithOptionsWithCancellation
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions
-                        (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+                        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+                          visualDescriptions =
+                            if useHybridPdfParsing && useLayoutAnalysis then
+                                visualOptions
+                            else
+                                FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
                         source
                         passages
                         cancellationToken
@@ -835,6 +869,7 @@ module PdfLibrary =
     let processDocuments
         report
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
         (cancellationToken: CancellationToken)
@@ -854,6 +889,7 @@ module PdfLibrary =
                         processDocument
                             report
                             keywordOptions
+                            visualOptions
                             useHybridPdfParsing
                             useLayoutAnalysis
                             cancellationToken
