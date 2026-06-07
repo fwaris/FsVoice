@@ -55,7 +55,7 @@ ANDROID_APP_ID
 
 The Release iOS configuration disables the Mono interpreter, enables AOT, and disables assembly IL stripping because the current toolchain crashes stripping `FSharp.Core.dll`.
 
-Before App Review, provide reviewer instructions and a test OpenAI API key or another reviewer-access path. Explain that Speak2Docs shows an OpenAI data notice popup before a realtime connection sends microphone audio, transcripts, prompts, or selected document passages to OpenAI. The connection starts only after the user acknowledges the notice; dismissing it cancels the connection. Speak2Docs ships a built-in wearable health anomaly-detection study sample index, licensed under CC BY 4.0, so reviewers can ask document questions immediately after entering the key and acknowledging the notice.
+Before App Review, provide reviewer instructions and a test OpenAI API key or another reviewer-access path. Explain that Speak2Docs shows an OpenAI data notice popup before a realtime connection sends microphone audio, transcripts, prompts, selected document passages, or optional cropped PDF visual regions to OpenAI. The connection starts only after the user acknowledges the notice; dismissing it cancels the connection. Speak2Docs ships a built-in wearable health anomaly-detection study sample index, licensed under CC BY 4.0, so reviewers can ask document questions immediately after entering the key and acknowledging the notice.
 
 ## Mac Catalyst
 
@@ -92,6 +92,6 @@ For Google Play, Android uses the same app identifier as the Apple platforms: `c
 - Google Play Data safety answers match `docs/store-privacy.md`.
 - For a new personal Google Play developer account, run a closed test with at least 12 opted-in testers for 14 continuous days before applying for production access.
 - Reviewer instructions explain that users provide their own OpenAI API key, or include a temporary reviewer key.
-- Reviewer instructions identify OpenAI as the third-party AI provider, list the data sent to OpenAI, and note the in-app OpenAI data notice popup.
+- Reviewer instructions identify OpenAI as the third-party AI provider, list the data sent to OpenAI including optional cropped PDF visual regions when Describe Visuals is enabled, and note the in-app OpenAI data notice popup.
 - App icon, splash screen, screenshots, description, support URL, and contact email are final.
 - Version/build numbers are incremented before every upload.

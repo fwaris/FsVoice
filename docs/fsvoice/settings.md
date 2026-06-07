@@ -8,7 +8,7 @@ Account settings identify the OpenAI account and active behavior profile Speak2D
 
 ### OpenAI key
 
-Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for realtime voice interaction, transcription, answers, query expansion, and optional keyword enrichment. The key is saved with the platform secure-storage mechanism when available.
+Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for realtime voice interaction, transcription, answers, query expansion, optional keyword enrichment, and optional PDF visual descriptions. The key is saved with the platform secure-storage mechanism when available.
 
 Use **Get key** next to the OpenAI key field to open the OpenAI API keys page. Sign in or create an OpenAI account there, create a new secret key, copy it, and paste it into Speak2Docs Settings.
 
@@ -20,7 +20,7 @@ Toggles whether the OpenAI key field is displayed as plain text while you edit i
 
 Shows the active Speak2Docs plugin. A plugin supplies prompts, model defaults, retrieval behavior, optional packaged contexts, optional tools, and any plugin-specific settings. The built-in default is Generic QA.
 
-Before sending microphone audio, transcripts, prompts, selected document passages, or optional keyword-generation text to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app. You can review or revoke this permission from Settings.
+Before sending microphone audio, transcripts, prompts, selected document passages, optional keyword-generation text, or optional PDF visual crops to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app. You can review or revoke this permission from Settings.
 
 To create a key manually:
 
@@ -41,7 +41,7 @@ Good API key practices:
 
 ## Models
 
-Speak2Docs uses separate model roles for realtime voice, transcription, answers, keyword generation, and query expansion. The defaults are selected by the active plugin, and advanced users can override model ids in Settings.
+Speak2Docs uses separate model roles for realtime voice, transcription, answers, keyword generation, query expansion, and optional PDF visual descriptions. The defaults are selected by the active plugin, and advanced users can override model ids in Settings.
 
 Model settings are advanced controls. Change them only when you know which OpenAI model id you want each role to use.
 
@@ -120,6 +120,12 @@ Uses layout analysis during Hybrid parsing. It is on by default when Hybrid pars
 ### Index Keywords
 
 Allows Speak2Docs to generate extra keywords for indexed chunks to improve matching. It is off by default and may use the Keyword model during document processing.
+
+### Describe Visuals
+
+Allows Hybrid PDF parsing with Layout Analysis to crop detected diagrams, charts, images, and sparse visual tables and send those crops to the VisualDescription model for compact retrieval descriptions. It is off by default because it can add processing time, OpenAI API cost, and additional document visual content sent to OpenAI.
+
+This setting affects document processing and reprocessing. Search uses the best available local index for a selected source; turning Describe Visuals on or off should not make an already indexed document disappear from retrieval. Reprocess a PDF when you want its index refreshed with visual descriptions or newer parser metadata.
 
 ## Runtime
 

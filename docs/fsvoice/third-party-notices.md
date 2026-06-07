@@ -18,4 +18,4 @@ Source: https://arxiv.org/abs/2508.03436
 
 PDF: https://arxiv.org/pdf/2508.03436
 
-The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text for offline retrieval inside the app.
+The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text and compact visual-description passages for offline retrieval inside the app.
