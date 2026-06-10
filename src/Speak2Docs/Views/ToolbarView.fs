@@ -64,4 +64,6 @@ module ToolbarView =
                 .centerHorizontal()
                 .centerVertical()
                 .gridColumn (1)
+
+            (ViewControls.iconButton Icons.help (OpenAppLink SettingsHelp)).alignEndHorizontal().gridColumn (2)
         })

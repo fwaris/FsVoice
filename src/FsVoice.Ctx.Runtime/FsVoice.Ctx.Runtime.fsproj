@@ -21,7 +21,6 @@
     <Compile Include="QaAnswerModel.fs" />
     <Compile Include="QaResponseTools.fs" />
     <Compile Include="QaResponses.fs" />
-    <Compile Include="QaResponsesTransport.fs" />
     <Compile Include="QaResponsesAnswer.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>

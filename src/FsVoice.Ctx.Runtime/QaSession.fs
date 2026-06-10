@@ -7,7 +7,7 @@ open System.Threading.Tasks
 open FsVoice.Core
 open FsVoice.Retrieval
 
-type QaSession private (options: QaSessionOptions, transportOverride: QaResponsesTransportOverride option) =
+type QaSession private (options: QaSessionOptions, injectedTransport: FsResponses.IResponsesTransport option) =
     let mutable contextProviders = options.contextProviders
 
     let memoryPath =
@@ -33,7 +33,14 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
     let clamp (maxValue: int) (value: int) = Math.Max(1, Math.Min(maxValue, value))
 
     let transport =
-        QaResponsesTransport(options, sessionCancellation, report, transportOverride)
+        injectedTransport
+        |> Option.defaultWith (fun () ->
+            let transportOptions =
+                { FsResponses.ResponsesTransportOptions.create options.answerResponseWebSocketConfig with
+                    mode = options.answerTransportMode
+                    report = report }
+
+            new FsResponses.ResponsesTransport(transportOptions) :> FsResponses.IResponsesTransport)
 
     let retrieveContext question maxResults cancellationToken =
         async {
@@ -177,8 +184,8 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
     new(options: QaSessionOptions) = QaSession(options, None)
 
-    internal new(options: QaSessionOptions, transportOverride: QaResponsesTransportOverride) =
-        QaSession(options, Some transportOverride)
+    internal new(options: QaSessionOptions, transport: FsResponses.IResponsesTransport) =
+        QaSession(options, Some transport)
 
     member _.ToolCatalog = catalog
 
@@ -286,6 +293,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                     reportTiming $"QA memory started: turn={snapshot.turnId}."
                     let! hits = memoryService.RecallAsync(decision, cancellationToken)
                     sw.Stop()
+
                     reportTiming
                         $"QA memory completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; hits={hits.Length}."
 
@@ -295,6 +303,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
             let sourceTask =
                 task {
                     let sw = Stopwatch.StartNew()
+
                     reportTiming
                         $"QA retrieval started: turn={snapshot.turnId}; candidateChunks={options.memoryCandidateChunks}; providers={contextProviders.Length}."
 
@@ -303,6 +312,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                         |> Async.StartAsTask
 
                     sw.Stop()
+
                     reportTiming
                         $"QA retrieval completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; chunks={chunks.Length}."
 
@@ -314,6 +324,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
             let toolObservations = forgetObservations
 
             let answerSw = Stopwatch.StartNew()
+
             reportTiming
                 $"QA answer started: turn={snapshot.turnId}; model={options.answerModelId}; contextChunks={chunks.Length}; memoryHits={memoryHits.Length}; transportMode={transportMode}."
 
@@ -350,6 +361,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                 }
 
             answerSw.Stop()
+
             reportTiming
                 $"QA answer completed: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; answer_chars={answerResult.answer.Length}; observations={answerResult.observations.Length}; transportMode={transportMode}."
 

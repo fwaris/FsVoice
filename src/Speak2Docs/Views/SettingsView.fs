@@ -1,6 +1,5 @@
 namespace Speak2Docs.Views
 
-open System
 open Fabulous.Maui
 open Speak2Docs
 open Microsoft.Maui
@@ -9,11 +8,6 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module SettingsView =
-    let private runtimeStatusRows =
-        [ "Platform contract", "FsVoice.Platform"
-          "Orchestration", "Speak2Docs.Orchestration"
-          "WebRTC bridge", "FsVoice.Hosting.AspNetCore" ]
-
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
@@ -59,25 +53,6 @@ module SettingsView =
         |> Option.defaultValue ""
         |> AnswerReasoningEffortChanged
 
-    let private facetValue model (field: FsVoice.Ctx.PlugInSettingsField) =
-        model.plugInSettings
-        |> Map.tryFind field.key
-        |> Option.orElse field.defaultValue
-        |> Option.defaultValue ""
-
-    let private parseBool (value: string) =
-        match Boolean.TryParse(value) with
-        | true, parsed -> parsed
-        | false, _ -> false
-
-    let private isBoolFacet (field: FsVoice.Ctx.PlugInSettingsField) =
-        match (defaultArg (Option.ofObj field.kind) "").Trim().ToLowerInvariant() with
-        | "bool"
-        | "boolean"
-        | "toggle"
-        | "switch" -> true
-        | _ -> false
-
     let private sectionTitle text =
         Label(text)
             .font(size = 15., attributes = FontAttributes.Bold)
@@ -94,12 +69,6 @@ module SettingsView =
 
     let private columns =
         [ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ]
-
-    let private accountColumns =
-        [ Dimension.Absolute 112.
-          Dimension.Star
-          Dimension.Absolute 76.
-          Dimension.Absolute 48. ]
 
     let private sectionRows count =
         Dimension.Absolute 34. :: List.init count (fun _ -> Dimension.Absolute 48.)
@@ -120,7 +89,7 @@ module SettingsView =
     let private accountSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(accountColumns, sectionRows 2) {
+            ((Grid(columns, sectionRows 1) {
                 sectionTitle "Account"
 
                 ViewControls.formLabel "OpenAI key" 1
@@ -133,8 +102,6 @@ module SettingsView =
                     .gridColumn(1)
                     .margin (2.)
 
-                Button("Get key", OpenAppLink OpenAiApiKeys).font(size = 13.).gridRow(1).gridColumn(2).margin (2.)
-
                 (ViewControls.compactIconButton
                     (if model.hideSecrets then
                          Icons.visible
@@ -143,17 +110,7 @@ module SettingsView =
                     ToggleSecretVisibility)
                     .isEnabled(canEdit)
                     .gridRow(1)
-                    .gridColumn (3)
-
-                ViewControls.formLabel "PlugIn" 2
-
-                Label($"{model.activePlugIn.displayName} ({model.activePlugIn.id})")
-                    .font(size = 13.)
-                    .centerVertical()
-                    .gridRow(2)
-                    .gridColumn(1)
-                    .gridColumnSpan(3)
-                    .margin (2.)
+                    .gridColumn (2)
             })
                 .padding (10.))
 
@@ -348,31 +305,10 @@ module SettingsView =
             })
                 .padding (10.))
 
-    let private runtimeSection appTheme =
-        sectionBorder
-            appTheme
-            ((Grid(columns, sectionRows runtimeStatusRows.Length) {
-                sectionTitle "Runtime"
-
-                for row, (label, assemblyName) in runtimeStatusRows |> List.indexed do
-                    let row = row + 1
-
-                    ViewControls.formLabel label row
-
-                    Label(assemblyName)
-                        .font(size = 13.)
-                        .centerVertical()
-                        .gridRow(row)
-                        .gridColumn(1)
-                        .gridColumnSpan(2)
-                        .margin (2.)
-            })
-                .padding (10.))
-
     let private linksSection model =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 5) {
+            ((Grid(columns, sectionRows 4) {
                 sectionTitle "Links"
 
                 ViewControls.formLabel "Terms" 1
@@ -402,16 +338,7 @@ module SettingsView =
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Settings" 4
-
-                Button("Help", OpenAppLink SettingsHelp)
-                    .font(size = 13.)
-                    .gridRow(4)
-                    .gridColumn(1)
-                    .gridColumnSpan(2)
-                    .margin (2.)
-
-                ViewControls.formLabel "AI Data" 5
+                ViewControls.formLabel "AI Data" 4
 
                 Button(
                     (if model.openAiDisclosureSuppressed then
@@ -421,41 +348,10 @@ module SettingsView =
                     OpenAiDisclosure_Show ReviewOnly
                 )
                     .font(size = 13.)
-                    .gridRow(5)
+                    .gridRow(4)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
-            })
-                .padding (10.))
-
-    let private plugInSettingsSection model canEdit =
-        sectionBorder
-            model.appTheme
-            ((Grid(columns, sectionRows model.activePlugIn.settingsFacets.Length) {
-                sectionTitle "PlugIn Settings"
-
-                for row, field in model.activePlugIn.settingsFacets |> List.indexed do
-                    let row = row + 1
-
-                    ViewControls.formLabel field.label row
-
-                    if isBoolFacet field then
-                        Switch(
-                            parseBool (facetValue model field),
-                            fun value -> PlugInSettingChanged(field.key, string value)
-                        )
-                            .isEnabled(canEdit)
-                            .gridRow(row)
-                            .gridColumn(1)
-                            .centerVertical ()
-                    else
-                        Entry(facetValue model field, fun value -> PlugInSettingChanged(field.key, value))
-                            .placeholder(field.label)
-                            .isEnabled(canEdit)
-                            .gridRow(row)
-                            .gridColumn(1)
-                            .gridColumnSpan(2)
-                            .margin (2.)
             })
                 .padding (10.))
 
@@ -469,11 +365,7 @@ module SettingsView =
             audioSection model canEdit
             retrievalSection model canEdit
             pdfParsingSection model canEdit
-            runtimeSection model.appTheme
             linksSection model
-
-            if not (List.isEmpty model.activePlugIn.settingsFacets) then
-                plugInSettingsSection model canEdit
         }
 
     let contentPage (model: Model) =

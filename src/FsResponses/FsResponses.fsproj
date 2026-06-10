@@ -13,6 +13,7 @@
     <Compile Include="Log.fs" />
     <Compile Include="FsResponses.fs" />
     <Compile Include="WebSocket.fs" />
+    <Compile Include="ResponsesTransport.fs" />
   </ItemGroup>
 
   <ItemGroup>

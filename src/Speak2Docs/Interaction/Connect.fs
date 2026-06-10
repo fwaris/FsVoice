@@ -42,8 +42,27 @@ module Connect =
         { WebRtcClientConfig.Default with
             IosAudioRoutePolicy = iosAudioRoutePolicy settings }
 
+    let private startupMicrophoneGateEnabled settings =
+#if IOS
+        audioDefaultToSpeaker settings
+#else
+        false
+#endif
+
     let private applyAudioRoute settings =
         Audio.applyDefaultToSpeaker (audioDefaultToSpeaker settings)
+
+    let private trySetMicrophoneEnabled (mailbox: Channel<Msg>) (connection: Connection) enabled reason =
+        try
+            connection.WebRtcClient.SetMicrophoneEnabled enabled
+            log mailbox $"Realtime microphone enabled={enabled} ({reason})."
+        with ex ->
+            log mailbox $"Unable to set realtime microphone enabled={enabled} ({reason}): {ex.Message}"
+
+    let private jsonEventType (json: JsonElement) =
+        match json.TryGetProperty("type") with
+        | true, property when property.ValueKind = JsonValueKind.String -> property.GetString() |> Option.ofObj
+        | _ -> None
 
     let private startClientPump
         (mailbox: Channel<Msg>)
@@ -66,13 +85,27 @@ module Connect =
         (mailbox: Channel<Msg>)
         (connection: Connection)
         (serverEvents: Channel<JsonElement>)
+        startupMicrophoneGate
         token
         =
         async {
+            let mutable startupMicrophoneGateReleased = not startupMicrophoneGate
+
             try
                 do!
                     connection.WebRtcClient.OutputChannel.Reader.ReadAllAsync(token)
                     |> AsyncSeq.iterAsync (fun document ->
+                        if
+                            startupMicrophoneGate
+                            && not startupMicrophoneGateReleased
+                            && (document.RootElement
+                                |> jsonEventType
+                                |> Option.exists ((=) "output_audio_buffer.stopped"))
+                        then
+                            startupMicrophoneGateReleased <- true
+
+                            trySetMicrophoneEnabled mailbox connection true "startup output_audio_buffer.stopped"
+
                         serverEvents.Writer.WriteAsync(document.RootElement.Clone(), token).AsTask()
                         |> Async.AwaitTask)
             with
@@ -169,6 +202,11 @@ module Connect =
                         else
                             applyAudioRoute settings
                             let conn = Connection.createWithConfig (webRtcClientConfig settings)
+                            let startupMicrophoneGate = startupMicrophoneGateEnabled settings
+
+                            if startupMicrophoneGate then
+                                trySetMicrophoneEnabled parms.mailbox conn false "iOS speaker startup guard"
+
                             let cancellation = new CancellationTokenSource()
                             let serverEvents = Channel.CreateUnbounded<JsonElement>()
                             let clientEvents = Channel.CreateUnbounded<JsonElement>()
@@ -200,7 +238,7 @@ module Connect =
                                     Disposables = stateSubscription :: conn.Disposables }
 
                             startClientPump parms.mailbox conn clientEvents cancellation.Token
-                            startServerPump parms.mailbox conn serverEvents cancellation.Token
+                            startServerPump parms.mailbox conn serverEvents startupMicrophoneGate cancellation.Token
                             startHostPump parms.mailbox session cancellation.Token apiKey parms.connectionId conn
 
                             do! session.StartAsync cancellation.Token |> Async.AwaitTask

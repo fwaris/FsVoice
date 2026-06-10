@@ -389,10 +389,20 @@ let private responsesErrorEvent code message =
               ``type`` = Some "server_error"
               param = None } }
 
-type private ResponseRequestPath =
-    | PersistentAnswer
-    | NewAnswer
-    | StatelessMaintenance
+type private ResponseRequestPath = | PersistentAnswer
+
+type private TestResponsesTransport
+    (
+        prepare: CancellationToken -> Task<unit>,
+        runRequest:
+            FsResponses.WebSocketCreateRequest -> CancellationToken -> Task<FsResponses.ResponseStreamEvent list>
+    ) =
+    interface FsResponses.IResponsesTransport with
+        member _.PrepareAsync cancellationToken = prepare cancellationToken
+
+        member _.CreateAndCollectAsync(request, cancellationToken) = runRequest request cancellationToken
+
+        member _.Dispose() = ()
 
 let private testResponseWebSocketConfig =
     FsResponses.ResponseWebSocketConfig.create "test-api-key"
@@ -401,16 +411,18 @@ let private testQaSessionOptions storageRoot =
     QaSessionOptions.create storageRoot testResponseWebSocketConfig
 
 let private responsesTransportOverrideAsync handler =
-    { prepareAnswerConnection = None
-      runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
-      runNewAnswerRequest = None
-      runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
+    new TestResponsesTransport(
+        (fun _ -> task { return () }),
+        (fun request cancellationToken -> handler PersistentAnswer request cancellationToken)
+    )
+    :> FsResponses.IResponsesTransport
 
 let private responsesTransportOverrideWithPrepareAsync prepare handler =
-    { prepareAnswerConnection = Some prepare
-      runAnswerRequest = fun request cancellationToken -> handler PersistentAnswer request cancellationToken
-      runNewAnswerRequest = None
-      runStatelessRequest = fun request cancellationToken -> handler StatelessMaintenance request cancellationToken }
+    new TestResponsesTransport(
+        prepare,
+        (fun request cancellationToken -> handler PersistentAnswer request cancellationToken)
+    )
+    :> FsResponses.IResponsesTransport
 
 let private responsesTransportOverride handler =
     responsesTransportOverrideAsync (fun path request cancellationToken ->
@@ -1052,164 +1064,10 @@ let ``qa session prepares responses websocket before first answer`` () =
     }
 
 [<Fact>]
-let ``qa session shares in flight response websocket preparation`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "memory://fake-websocket-shared-prep"
-              enabled = true }
-
-        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
-        let capturedGate = obj ()
-
-        let prepareStarted =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        let releasePrepare =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        let transport =
-            responsesTransportOverrideWithPrepareAsync
-                (fun cancellationToken ->
-                    task {
-                        prepareStarted.TrySetResult() |> ignore
-                        do! releasePrepare.Task.WaitAsync(cancellationToken)
-                    })
-                (fun _ request cancellationToken ->
-                    task {
-                        do! prepareStarted.Task.WaitAsync(cancellationToken)
-                        do! releasePrepare.Task.WaitAsync(cancellationToken)
-                        lock capturedGate (fun () -> captured.Add request)
-                        return [ responsesCompletedEvent "resp_shared_answer" "shared prepared answer" ]
-                    })
-
-        let options =
-            { testQaSessionOptions (tempStorageRoot ()) with
-                autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ] }
-
-        use session = new QaSession(options, transport)
-
-        let preparer = session :> IQaAnswerTransportPreparer
-        let prepareTask = preparer.PrepareAnswerTransportAsync(CancellationToken.None)
-
-        do! prepareStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
-
-        let request =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "What does the fake context say?"
-              realtimeJudgement = None
-              deadline = None }
-
-        let answerTask = session.AnswerAsync(request, CancellationToken.None)
-        do! Task.Delay 50
-        Assert.Empty(lock capturedGate (fun () -> captured |> Seq.toList))
-        releasePrepare.TrySetResult() |> ignore
-
-        do! prepareTask
-        let! answer = answerTask
-
-        let capturedRequests = lock capturedGate (fun () -> captured |> Seq.toList)
-
-        Assert.Equal("shared prepared answer", answer.answer)
-        Assert.Single(capturedRequests) |> ignore
-        Assert.Equal(None, capturedRequests[0].previous_response_id)
-        Assert.Equal(Some true, capturedRequests[0].generate)
-    }
-
-[<Fact>]
 let ``qa session options default to persistent answer websocket`` () =
     let options = testQaSessionOptions (tempStorageRoot ())
 
     Assert.Equal(QaAnswerTransportMode.PersistentWebSocket, options.answerTransportMode)
-
-[<Fact>]
-let ``qa session persistent answer transport retries once after request exception`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "memory://fake-websocket-persistent-retry"
-              enabled = true }
-
-        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
-        let logs = ResizeArray<string>()
-        let mutable callNumber = 0
-
-        let transport =
-            responsesTransportOverrideAsync (fun _ request _ ->
-                task {
-                    captured.Add request
-                    callNumber <- callNumber + 1
-
-                    match callNumber with
-                    | 1 -> return raise (InvalidOperationException("stale answer websocket"))
-                    | _ -> return [ responsesCompletedEvent "resp_persistent_retry" "recovered persistent answer" ]
-                })
-
-        let options =
-            { testQaSessionOptions (tempStorageRoot ()) with
-                autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ]
-                report = fun msg -> logs.Add msg }
-
-        use session = new QaSession(options, transport)
-
-        let request =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "What does the fake context say?"
-              realtimeJudgement = None
-              deadline = None }
-
-        let! answer = session.AnswerAsync(request, CancellationToken.None)
-
-        Assert.Equal("recovered persistent answer", answer.answer)
-        Assert.Equal(2, captured.Count)
-        Assert.Equal(None, captured[0].previous_response_id)
-        Assert.Equal(None, captured[1].previous_response_id)
-
-        Assert.Contains(
-            logs,
-            fun log -> log.Contains("reconnecting and retrying once", StringComparison.OrdinalIgnoreCase)
-        )
-    }
-
-[<Fact>]
-let ``qa session persistent answer transport does not retry cancellation`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "memory://fake-websocket-persistent-cancel"
-              enabled = true }
-
-        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
-
-        let transport =
-            responsesTransportOverrideAsync (fun _ request _ ->
-                task {
-                    captured.Add request
-                    return raise (OperationCanceledException("answer canceled"))
-                })
-
-        let options =
-            { testQaSessionOptions (tempStorageRoot ()) with
-                autoWriteback = false
-                contextProviders = [ FakeContextProvider(source) ] }
-
-        use session = new QaSession(options, transport)
-
-        let request =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = "What does the fake context say?"
-              realtimeJudgement = None
-              deadline = None }
-
-        do!
-            Assert.ThrowsAnyAsync<OperationCanceledException>(fun () ->
-                session.AnswerAsync(request, CancellationToken.None))
-            :> Task
-
-        Assert.Single(captured) |> ignore
-    }
 
 [<Fact>]
 let ``qa session websocket answer uses previous response id after first turn`` () =
@@ -1262,89 +1120,11 @@ let ``qa session websocket answer uses previous response id after first turn`` (
     }
 
 [<Fact>]
-let ``qa session per request answer transport opens fresh answer path and keeps response history`` () =
+let ``qa session canceled answer releases serialized answer gate`` () =
     task {
         let source =
             { kind = Json
-              location = "memory://fake-websocket-per-request"
-              enabled = true }
-
-        let captured =
-            ResizeArray<ResponseRequestPath * FsResponses.WebSocketCreateRequest>()
-
-        let gate = obj ()
-        let mutable prepareCount = 0
-        let mutable answerNumber = 0
-
-        let transport =
-            { prepareAnswerConnection =
-                Some(fun _ ->
-                    task {
-                        prepareCount <- prepareCount + 1
-                        return ()
-                    })
-              runAnswerRequest =
-                fun request _ ->
-                    task {
-                        lock gate (fun () -> captured.Add(PersistentAnswer, request))
-                        return [ responsesCompletedEvent "resp_persistent" "persistent answer" ]
-                    }
-              runNewAnswerRequest =
-                Some(fun request _ ->
-                    task {
-                        let responseId, text =
-                            lock gate (fun () ->
-                                answerNumber <- answerNumber + 1
-                                captured.Add(NewAnswer, request)
-                                $"resp_per_request_{answerNumber}", $"per request answer {answerNumber}")
-
-                        return [ responsesCompletedEvent responseId text ]
-                    })
-              runStatelessRequest =
-                fun request _ ->
-                    task {
-                        lock gate (fun () -> captured.Add(StatelessMaintenance, request))
-                        return [ responsesCompletedEvent "resp_stateless" "stateless answer" ]
-                    } }
-
-        let options =
-            { testQaSessionOptions (tempStorageRoot ()) with
-                autoWriteback = false
-                answerTransportMode = QaAnswerTransportMode.NewWebSocketPerRequest
-                contextProviders = [ FakeContextProvider(source) ] }
-
-        use session = new QaSession(options, transport)
-
-        let preparer = session :> IQaAnswerTransportPreparer
-        do! preparer.PrepareAnswerTransportAsync(CancellationToken.None)
-
-        let request question =
-            { turnId = Guid.NewGuid().ToString("N")
-              question = question
-              realtimeJudgement = None
-              deadline = None }
-
-        let! first = session.AnswerAsync(request "first question", CancellationToken.None)
-        let! second = session.AnswerAsync(request "second question", CancellationToken.None)
-
-        let capturedRequests = lock gate (fun () -> captured |> Seq.toList)
-
-        Assert.Equal(0, prepareCount)
-        Assert.Equal("per request answer 1", first.answer)
-        Assert.Equal("per request answer 2", second.answer)
-        Assert.Equal<ResponseRequestPath list>([ NewAnswer; NewAnswer ], capturedRequests |> List.map fst)
-        Assert.Equal(None, (snd capturedRequests[0]).previous_response_id)
-        Assert.Equal(Some "resp_per_request_1", (snd capturedRequests[1]).previous_response_id)
-        Assert.Contains("first question", inputTextFromResponseRequest (snd capturedRequests[0]))
-        Assert.Contains("second question", inputTextFromResponseRequest (snd capturedRequests[1]))
-    }
-
-[<Fact>]
-let ``qa session canceled per request answer releases serialized answer gate`` () =
-    task {
-        let source =
-            { kind = Json
-              location = "memory://fake-websocket-per-request-cancel"
+              location = "memory://fake-websocket-answer-cancel"
               enabled = true }
 
         let firstRequestEntered =
@@ -1355,32 +1135,25 @@ let ``qa session canceled per request answer releases serialized answer gate`` (
         let mutable requestNumber = 0
 
         let transport =
-            { prepareAnswerConnection = None
-              runAnswerRequest =
-                fun _ _ -> task { return [ responsesCompletedEvent "resp_persistent" "persistent answer" ] }
-              runNewAnswerRequest =
-                Some(fun _ cancellationToken ->
-                    task {
-                        let current =
-                            lock gate (fun () ->
-                                requestNumber <- requestNumber + 1
-                                requestNumber)
+            responsesTransportOverrideAsync (fun _ _ cancellationToken ->
+                task {
+                    let current =
+                        lock gate (fun () ->
+                            requestNumber <- requestNumber + 1
+                            requestNumber)
 
-                        if current = 1 then
-                            firstRequestEntered.TrySetResult() |> ignore
-                            do! Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
-                            return [ responsesCompletedEvent "resp_never" "never" ]
-                        else
-                            lock gate (fun () -> captured.Add $"request-{current}")
-                            return [ responsesCompletedEvent $"resp_{current}" $"answer {current}" ]
-                    })
-              runStatelessRequest =
-                fun _ _ -> task { return [ responsesCompletedEvent "resp_stateless" "stateless answer" ] } }
+                    if current = 1 then
+                        firstRequestEntered.TrySetResult() |> ignore
+                        do! Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                        return [ responsesCompletedEvent "resp_never" "never" ]
+                    else
+                        lock gate (fun () -> captured.Add $"request-{current}")
+                        return [ responsesCompletedEvent $"resp_{current}" $"answer {current}" ]
+                })
 
         let options =
             { testQaSessionOptions (tempStorageRoot ()) with
                 autoWriteback = false
-                answerTransportMode = QaAnswerTransportMode.NewWebSocketPerRequest
                 contextProviders = [ FakeContextProvider(source) ] }
 
         use session = new QaSession(options, transport)
@@ -5232,12 +5005,76 @@ let private readClientEventUntil (reader: ChannelReader<JsonElement>) predicate 
         return result.Value
     }
 
+let private tryReadClientEventUntil (reader: ChannelReader<JsonElement>) (timeout: TimeSpan) predicate =
+    task {
+        use cts = new CancellationTokenSource(timeout)
+        let mutable result: JsonElement option = None
+
+        try
+            while result.IsNone do
+                let! message = reader.ReadAsync(cts.Token).AsTask()
+
+                if predicate message then
+                    result <- Some message
+        with
+        | :? OperationCanceledException
+        | :? ChannelClosedException -> ()
+
+        return result
+    }
+
 let private hasEventType expected (message: JsonElement) =
     let mutable typeProperty = Unchecked.defaultof<JsonElement>
 
     message.TryGetProperty("type", &typeProperty)
     && typeProperty.ValueKind = JsonValueKind.String
     && typeProperty.GetString() = expected
+
+let private tryProperty (name: string) (element: JsonElement) =
+    let mutable property = Unchecked.defaultof<JsonElement>
+
+    if
+        element.ValueKind = JsonValueKind.Object
+        && element.TryGetProperty(name, &property)
+    then
+        Some property
+    else
+        None
+
+let private trySessionTurnDetection (message: JsonElement) =
+    message
+    |> tryProperty "session"
+    |> Option.bind (tryProperty "audio")
+    |> Option.bind (tryProperty "input")
+    |> Option.bind (tryProperty "turn_detection")
+
+let private trySessionTurnDetectionType message =
+    message
+    |> trySessionTurnDetection
+    |> Option.bind (tryProperty "type")
+    |> Option.bind (fun value ->
+        if value.ValueKind = JsonValueKind.String then
+            Some(value.GetString())
+        else
+            None)
+
+let private isSessionUpdateWithTurnDetection vadType message =
+    hasEventType "session.update" message
+    && trySessionTurnDetectionType message = Some vadType
+
+let private trySessionTurnDetectionInterrupt message =
+    message
+    |> trySessionTurnDetection
+    |> Option.bind (tryProperty "interrupt_response")
+    |> Option.bind (fun value ->
+        if value.ValueKind = JsonValueKind.True || value.ValueKind = JsonValueKind.False then
+            Some(value.GetBoolean())
+        else
+            None)
+
+let private isSessionUpdateWithServerVadInterrupt interruptResponse message =
+    isSessionUpdateWithTurnDetection "server_vad" message
+    && trySessionTurnDetectionInterrupt message = Some interruptResponse
 
 let private demoVoiceContext () : VoiceOrchestrationContext =
     let storageRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
@@ -5290,6 +5127,71 @@ let private readDemoToHostUntil
 
         return result.Value
     }
+
+let private tryReadDemoToHostUntil
+    (session: IVoiceSession<Speak2Docs.WorkFlow.ToHost, Speak2Docs.WorkFlow.FromHost>)
+    (timeout: TimeSpan)
+    (predicate: Speak2Docs.WorkFlow.ToHost -> 'T option)
+    =
+    task {
+        use cts = new CancellationTokenSource(timeout)
+        let mutable result: 'T option = None
+
+        try
+            while result.IsNone do
+                let! message = session.ToHost.ReadAsync(cts.Token).AsTask()
+
+                match predicate message with
+                | Some value -> result <- Some value
+                | None -> ()
+        with
+        | :? OperationCanceledException
+        | :? ChannelClosedException -> ()
+
+        return result
+    }
+
+let private responseWithId id =
+    { Response.Default with
+        id = Include(Some id) }
+
+let private assertServerVadWithInterrupt interruptResponse turnDetection =
+    match turnDetection with
+    | Include(Some(VAD.Server_Vad turnDetection)) ->
+        Assert.True turnDetection.create_response
+        Assert.Equal(interruptResponse, turnDetection.interrupt_response)
+        Assert.Equal(0.7, turnDetection.threshold)
+        Assert.Equal(300, turnDetection.prefix_padding_ms)
+        Assert.Equal(350, turnDetection.silence_duration_ms)
+    | _ -> failwith "Expected realtime server VAD settings."
+
+let private assertServerVad turnDetection =
+    assertServerVadWithInterrupt true turnDetection
+
+let private assertStartupServerVad turnDetection =
+    assertServerVadWithInterrupt false turnDetection
+
+let private assertRealtimeAudioSettings assertTurnDetection (requested: Session) =
+    match requested.audio with
+    | Include(Some audio) ->
+        match audio.input with
+        | Include(Some input) ->
+            match input.noise_reduction with
+            | Include(Some noiseReduction) -> Assert.Equal("near_field", noiseReduction.``type``)
+            | _ -> failwith "Expected realtime input noise reduction."
+
+            assertTurnDetection input.turn_detection
+        | _ -> failwith "Expected realtime audio input settings."
+
+        match audio.output with
+        | Include(Some output) ->
+            Assert.Equal("marin", output.voice)
+
+            match output.speed with
+            | Include(Some speed) -> Assert.Equal(1.0, speed)
+            | _ -> failwith "Expected realtime output speed."
+        | _ -> failwith "Expected realtime audio output settings."
+    | _ -> failwith "Expected realtime audio settings."
 
 [<Fact>]
 let ``Speak2Docs orchestration has no UI or RTOpenAI Api references`` () =
@@ -5375,7 +5277,7 @@ let ``Speak2Docs orchestration disables durable memory`` () =
     }
 
 [<Fact>]
-let ``demo orchestration configures realtime audio for iOS speakerphone barge-in`` () =
+let ``demo orchestration starts realtime audio with protected Server VAD`` () =
     task {
         let settings = demoRuntimeSettings []
         let orchestration = demoOrchestration settings
@@ -5390,24 +5292,287 @@ let ``demo orchestration configures realtime audio for iOS speakerphone barge-in
                 | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
                 | _ -> None)
 
-        match requested.audio with
-        | Include(Some audio) ->
-            match audio.input with
-            | Include(Some input) ->
-                match input.noise_reduction with
-                | Include(Some noiseReduction) -> Assert.Equal("far_field", noiseReduction.``type``)
-                | _ -> failwith "Expected realtime input noise reduction."
+        assertRealtimeAudioSettings assertStartupServerVad requested
 
-                match input.turn_detection with
-                | Include(Some(VAD.Server_Vad turnDetection)) ->
-                    Assert.True turnDetection.create_response
-                    Assert.True turnDetection.interrupt_response
-                    Assert.Equal(0.7, turnDetection.threshold)
-                    Assert.Equal(300, turnDetection.prefix_padding_ms)
-                    Assert.Equal(350, turnDetection.silence_duration_ms)
-                | _ -> failwith "Expected realtime server VAD settings."
-            | _ -> failwith "Expected realtime audio input settings."
-        | _ -> failwith "Expected realtime audio settings."
+        do! session.StopAsync CancellationToken.None
+    }
+
+let private startProtectedStartupGreetingSession () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+        let voiceConnection, serverEvents, clientEvents = demoVoiceConnectionWithChannels ()
+
+        let! session = orchestration.CreateSessionAsync(demoVoiceContext (), voiceConnection, CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        let! requested =
+            readDemoToHostUntil session (function
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | _ -> None)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-created"
+                  ``type`` = EventTypes.SessionCreated
+                  session = requested }
+
+        let! startupUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt false)
+
+        let startupTurnDetection =
+            startupUpdate
+            |> trySessionTurnDetection
+            |> Option.defaultWith (fun () -> failwith "Missing VAD.")
+
+        Assert.Equal(Some false, trySessionTurnDetectionInterrupt startupUpdate)
+        Assert.Equal(JsonValueKind.Object, startupTurnDetection.ValueKind)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-updated"
+                  ``type`` = EventTypes.SessionUpdated
+                  session = requested }
+
+        let! responseCreate = readClientEventUntil clientEvents.Reader (hasEventType "response.create")
+
+        return session, serverEvents, clientEvents, responseCreate
+    }
+
+[<Fact>]
+let ``demo orchestration ignores transcript during protected startup greeting`` () =
+    task {
+        let! session, serverEvents, clientEvents, _ = startProtectedStartupGreetingSession ()
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-created"
+                  ``type`` = EventTypes.ResponseCreated
+                  response = responseWithId "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-speech-started"
+                  ``type`` = EventTypes.InputAudioBufferSpeechStarted
+                  audio_start_ms = 0
+                  item_id = "item-1" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-transcript"
+                  ``type`` = EventTypes.ConversationItemInputAudioTranscriptionCompleted
+                  item_id = "item-1"
+                  content_index = 0
+                  transcript = " hello there "
+                  usage = Usage.Default
+                  logprobs = Skip }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-speech-stopped"
+                  ``type`` = EventTypes.InputAudioBufferSpeechStopped
+                  audio_end_ms = 1000
+                  item_id = "item-1" }
+
+        let! extraUpdate =
+            tryReadClientEventUntil
+                clientEvents.Reader
+                (TimeSpan.FromMilliseconds 500.)
+                (isSessionUpdateWithServerVadInterrupt true)
+
+        Assert.True(extraUpdate.IsNone)
+
+        let! transcript =
+            tryReadDemoToHostUntil session (TimeSpan.FromMilliseconds 500.) (function
+                | Speak2Docs.WorkFlow.TranscriptFinalized snapshot -> Some snapshot
+                | _ -> None)
+
+        Assert.True(transcript.IsNone)
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration enables interrupting Server VAD after protected greeting response done`` () =
+    task {
+        let! session, serverEvents, clientEvents, _ = startProtectedStartupGreetingSession ()
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-created"
+                  ``type`` = EventTypes.ResponseCreated
+                  response = responseWithId "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-done"
+                  ``type`` = EventTypes.ResponseDone
+                  response = responseWithId "resp-greeting" }
+
+        let! serverUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt true)
+
+        let serverTurnDetection =
+            serverUpdate
+            |> trySessionTurnDetection
+            |> Option.defaultWith (fun () -> failwith "Missing VAD.")
+
+        Assert.Equal(0.7, serverTurnDetection.GetProperty("threshold").GetDouble())
+        Assert.Equal(300, serverTurnDetection.GetProperty("prefix_padding_ms").GetInt32())
+        Assert.Equal(350, serverTurnDetection.GetProperty("silence_duration_ms").GetInt32())
+        Assert.True(serverTurnDetection.GetProperty("create_response").GetBoolean())
+        Assert.True(serverTurnDetection.GetProperty("interrupt_response").GetBoolean())
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration waits for protected greeting output stopped before interruption`` () =
+    task {
+        let! session, serverEvents, clientEvents, _ = startProtectedStartupGreetingSession ()
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-created"
+                  ``type`` = EventTypes.ResponseCreated
+                  response = responseWithId "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-output-started"
+                  ``type`` = EventTypes.OutputAudioBufferStarted
+                  response_id = "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-done-before-output-stopped"
+                  ``type`` = EventTypes.ResponseDone
+                  response = responseWithId "resp-greeting" }
+
+        let! earlyUpdate =
+            tryReadClientEventUntil
+                clientEvents.Reader
+                (TimeSpan.FromMilliseconds 500.)
+                (isSessionUpdateWithServerVadInterrupt true)
+
+        Assert.True(earlyUpdate.IsNone)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-output-stopped"
+                  ``type`` = EventTypes.OutputAudioBufferStopped
+                  response_id = "resp-greeting" }
+
+        let! serverUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt true)
+
+        let serverTurnDetection =
+            serverUpdate
+            |> trySessionTurnDetection
+            |> Option.defaultWith (fun () -> failwith "Missing VAD.")
+
+        Assert.True(serverTurnDetection.GetProperty("create_response").GetBoolean())
+        Assert.True(serverTurnDetection.GetProperty("interrupt_response").GetBoolean())
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
+let ``demo orchestration accepts transcript after protected greeting completes`` () =
+    task {
+        let settings = demoRuntimeSettings []
+        let orchestration = demoOrchestration settings
+        let voiceConnection, serverEvents, clientEvents = demoVoiceConnectionWithChannels ()
+
+        let! session = orchestration.CreateSessionAsync(demoVoiceContext (), voiceConnection, CancellationToken.None)
+
+        do! session.StartAsync CancellationToken.None
+
+        let! requested =
+            readDemoToHostUntil session (function
+                | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                | _ -> None)
+
+        assertRealtimeAudioSettings assertStartupServerVad requested
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-created"
+                  ``type`` = EventTypes.SessionCreated
+                  session = requested }
+
+        let! initialUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt false)
+
+        Assert.Equal(Some "server_vad", trySessionTurnDetectionType initialUpdate)
+        Assert.Equal(Some false, trySessionTurnDetectionInterrupt initialUpdate)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-session-updated"
+                  ``type`` = EventTypes.SessionUpdated
+                  session = requested }
+
+        let! _ = readClientEventUntil clientEvents.Reader (hasEventType "response.create")
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-response-created"
+                  ``type`` = EventTypes.ResponseCreated
+                  response = responseWithId "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-output-started"
+                  ``type`` = EventTypes.OutputAudioBufferStarted
+                  response_id = "resp-greeting" }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-output-stopped"
+                  ``type`` = EventTypes.OutputAudioBufferStopped
+                  response_id = "resp-greeting" }
+
+        let! _ = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt true)
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-server-vad-active"
+                  ``type`` = EventTypes.SessionUpdated
+                  session = requested }
+
+        do!
+            writeServerEvent
+                serverEvents.Writer
+                { event_id = "test-transcript"
+                  ``type`` = EventTypes.ConversationItemInputAudioTranscriptionCompleted
+                  item_id = "item-1"
+                  content_index = 0
+                  transcript = " hello there "
+                  usage = Usage.Default
+                  logprobs = Skip }
+
+        let! transcript =
+            readDemoToHostUntil session (function
+                | Speak2Docs.WorkFlow.TranscriptFinalized snapshot -> Some snapshot
+                | _ -> None)
+
+        Assert.Equal("hello there", transcript.text)
 
         do! session.StopAsync CancellationToken.None
     }

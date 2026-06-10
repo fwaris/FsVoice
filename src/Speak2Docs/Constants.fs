@@ -13,7 +13,6 @@ module C =
         "https://fwaris.github.io/docs/fsvoice/third-party-notices.html"
 
     let SETTINGS_HELP_URL = "https://fwaris.github.io/docs/fsvoice/settings.html"
-    let OPENAI_API_KEYS_URL = "https://platform.openai.com/api-keys"
 
     let SETTINGS_OPENAI_KEY = "FsVoice.OpenAIKey"
     let SETTINGS_PDF_LIBRARY = "FsVoice.PdfLibrary"
@@ -22,6 +21,10 @@ module C =
     let SETTINGS_LOG_CHUNKS = "FsVoice.LogChunks"
     let SETTINGS_ACTIVITY_LOG_LEVEL = "FsVoice.ActivityLogLevel"
     let SETTINGS_AUDIO_DEFAULT_TO_SPEAKER = "FsVoice.AudioDefaultToSpeaker"
+
+    let SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED =
+        "FsVoice.IosReceiverAudioRouteMigrated"
+
     let SETTINGS_ANSWER_MAX_OUTPUT_TOKENS = "FsVoice.AnswerMaxOutputTokens"
     let SETTINGS_ANSWER_REASONING_EFFORT = "FsVoice.AnswerReasoningEffort"
     let SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT = "FsVoice.AnswerToolCallLoopLimit"

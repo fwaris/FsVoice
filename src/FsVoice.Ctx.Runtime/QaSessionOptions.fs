@@ -14,15 +14,15 @@ module QaModelClients =
         { queryExpansion = None
           visualDescription = None }
 
-type QaAnswerTransportMode =
-    | PersistentWebSocket
-    | NewWebSocketPerRequest
+type QaAnswerTransportMode = FsResponses.ResponsesTransportMode
 
 module QaAnswerTransportMode =
-    let storageName =
-        function
-        | PersistentWebSocket -> "persistent_websocket"
-        | NewWebSocketPerRequest -> "new_websocket_per_request"
+    let PersistentWebSocket = FsResponses.ResponsesTransportMode.PersistentWebSocket
+
+    let NewWebSocketPerRequest =
+        FsResponses.ResponsesTransportMode.NewWebSocketPerRequest
+
+    let storageName = FsResponses.ResponsesTransportMode.storageName
 
 type QaSessionOptions =
     { storageRoot: string
@@ -31,7 +31,7 @@ type QaSessionOptions =
       retrievalMode: RetrievalMode
       clients: QaModelClients
       answerResponseWebSocketConfig: FsResponses.ResponseWebSocketConfig
-      answerTransportMode: QaAnswerTransportMode
+      answerTransportMode: FsResponses.ResponsesTransportMode
       answerRequireToolCall: bool
       answerPromptCacheKey: string option
       answerPromptCacheRetention: string option
@@ -67,7 +67,7 @@ module QaSessionOptions =
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
           answerResponseWebSocketConfig = answerResponseWebSocketConfig
-          answerTransportMode = PersistentWebSocket
+          answerTransportMode = FsResponses.ResponsesTransportMode.PersistentWebSocket
           answerRequireToolCall = false
           answerPromptCacheKey = None
           answerPromptCacheRetention = None

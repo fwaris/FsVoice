@@ -3,6 +3,7 @@ namespace Speak2Docs
 open System
 open System.IO
 open System.Text.Json
+open Microsoft.Maui.Devices
 open Microsoft.Maui.Storage
 
 module Settings =
@@ -456,6 +457,15 @@ module Settings =
 
     let setActivityLogVerbosity value =
         Preferences.Default.Set(C.SETTINGS_ACTIVITY_LOG_LEVEL, ActivityLog.toStorageValue value)
+
+    let applyPlatformMigrations () =
+        if DeviceInfo.Current.Platform = DevicePlatform.iOS then
+            let migrated =
+                Preferences.Default.Get(C.SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED, false)
+
+            if not migrated then
+                Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, false)
+                Preferences.Default.Set(C.SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED, true)
 
     let defaultAudioDefaultToSpeaker () =
 #if ANDROID

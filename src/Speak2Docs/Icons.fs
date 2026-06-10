@@ -9,6 +9,7 @@ module Icons =
     let settings = "\ue8b8"
     let restore = "\ue8b3"
     let info = "\ue88e"
+    let help = "\ue887"
     let visible = "\ue8f4"
     let visibilityOff = "\ue8f5"
     let checkbox = "\ue834"

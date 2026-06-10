@@ -117,6 +117,7 @@ module Update =
             yield RuntimeSettings.LogExpansions, string model.logExpansions
             yield RuntimeSettings.LogChunks, string model.logChunks
             yield RuntimeSettings.AudioDefaultToSpeaker, string model.audioDefaultToSpeaker
+
             yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
             yield RuntimeSettings.AnswerReasoningEffort, model.answerReasoningEffort
             yield RuntimeSettings.AnswerToolCallLoopLimit, model.answerToolCallLoopLimit
@@ -475,7 +476,6 @@ module Update =
         | PrivacyPolicy -> C.PRIVACY_POLICY_URL
         | ThirdPartyNotices -> C.THIRD_PARTY_NOTICES_URL
         | SettingsHelp -> C.SETTINGS_HELP_URL
-        | OpenAiApiKeys -> C.OPENAI_API_KEYS_URL
 
     let private openAppLink link : Async<Result<unit, exn>> =
         async {
@@ -711,6 +711,7 @@ module Update =
             EventError
 
     let init () =
+        Settings.applyPlatformMigrations ()
         let docs = Settings.pdfLibrary ()
 
         let loadedPlugIn, plugInLogs =

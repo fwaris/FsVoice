@@ -1,109 +1,99 @@
 # Speak2Docs Settings Help
 
-This page explains the controls shown in Speak2Docs Settings. Settings are grouped the same way they appear in the app: Account, Models, Activity, Retrieval, PDF Parsing, Runtime, Links, and PlugIn Settings.
+Settings are locked when Speak2Docs is busy, a realtime connection is starting or active, or a source operation is running. Disconnect or wait for processing to finish before changing them.
 
 ## Account
 
-Account settings identify the OpenAI account and active behavior profile Speak2Docs should use.
+Account settings identify the OpenAI account Speak2Docs should use.
 
 ### OpenAI key
 
-Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for realtime voice interaction, transcription, answers, query expansion, optional keyword enrichment, and optional PDF visual descriptions. The key is saved with the platform secure-storage mechanism when available.
+Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for realtime voice interaction, transcription, answers, query expansion, optional keyword enrichment, and optional PDF visual descriptions.
 
-Use **Get key** next to the OpenAI key field to open the OpenAI API keys page. Sign in or create an OpenAI account there, create a new secret key, copy it, and paste it into Speak2Docs Settings.
+To use Speak2Docs with OpenAI:
+
+1. Go to [platform.openai.com](https://platform.openai.com).
+2. Create an OpenAI account or sign in to an existing account.
+3. Open the OpenAI platform billing area and add a payment method, credits, or other required funding for API usage.
+4. After the account and billing setup are ready, open the [API keys page](https://platform.openai.com/api-keys).
+5. Create a new secret key.
+6. Copy the key and paste it into the OpenAI key field in Speak2Docs Settings.
 
 ### Show or hide key
 
-Toggles whether the OpenAI key field is displayed as plain text while you edit it. This only changes visibility in the Settings screen; it does not change the saved key.
-
-### PlugIn
-
-Shows the active Speak2Docs plugin. A plugin supplies prompts, model defaults, retrieval behavior, optional packaged contexts, optional tools, and any plugin-specific settings. The built-in default is Generic QA.
-
-Before sending microphone audio, transcripts, prompts, selected document passages, optional keyword-generation text, or optional PDF visual crops to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app. You can review or revoke this permission from Settings.
-
-To create a key manually:
-
-1. Sign in to the OpenAI platform at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
-2. Open the API keys page if you are not taken there automatically.
-3. Create a new secret key.
-4. Copy the key and paste it into the OpenAI API key field in Speak2Docs Settings.
-
-Use a separate API key for each app, device, automation, or experiment when practical. This makes it easier to monitor usage, rotate one key without interrupting other workflows, and revoke only the key that is no longer needed.
-
-Good API key practices:
-
-- Keep the key private and do not share it in screenshots, logs, commits, support messages, or public documents.
-- Monitor API usage and billing in the OpenAI platform dashboard.
-- Revoke keys that are no longer needed, exposed, or used on a device you no longer control.
-- Create a fresh key if you are testing a new workflow or giving temporary access for review.
-- Avoid reusing a long-lived personal key for unrelated projects.
+Toggles whether the OpenAI key field is displayed as plain text while you edit it. This only changes visibility in Settings; it does not change the saved key.
 
 ## Models
-
-Speak2Docs uses separate model roles for realtime voice, transcription, answers, keyword generation, query expansion, and optional PDF visual descriptions. The defaults are selected by the active plugin, and advanced users can override model ids in Settings.
 
 Model settings are advanced controls. Change them only when you know which OpenAI model id you want each role to use.
 
 ### Realtime model
 
-Handles low-latency voice conversation and decides when to call the document-answering oracle. The built-in default is `gpt-realtime-2`.
+Handles low-latency voice conversation. The built-in default is `gpt-realtime-2`.
 
 ### Transcriber model
 
-Converts speech to text when transcription is needed. The built-in default is `gpt-4o-mini-transcribe`.
+Converts speech to text when transcription is needed.
 
 ### Answer model
 
-Produces grounded answers from selected sources, tool observations, and the current question. The built-in default is `gpt-5.5`.
+Produces grounded answers from selected sources, tool observations, and the current question.
 
 ### Keyword model
 
-Generates optional index keywords when Index Keywords is enabled. The built-in default is `gpt-5-nano`.
+Generates optional index keywords when Index Keywords is enabled.
 
 ### QueryExpansion model
 
-Rewrites or expands user questions to improve document retrieval. The built-in default is `gpt-5-nano`.
+Rewrites or expands user questions to improve document retrieval.
 
 ### Reasoning Level
 
-Controls answer-model reasoning effort. Low is the default and is usually fastest. Medium or High can be useful for harder synthesis questions, but may increase latency and token usage.
+Controls answer-model reasoning effort. Low is the default and is usually fastest.
 
 ### Max Answer Tokens
 
-Limits the answer model's output length. The default is 2500. Values are normalized between 128 and 32000.
+Limits the answer model's output length. The default is 2500.
 
 ### Tool Rounds
 
-Limits how many function-call rounds the answer model can run for one question. The default is 3. Values are normalized between 1 and 8.
+Limits how many function-call rounds the answer model can run for one question.
 
 ## Activity
 
-Activity settings control how much diagnostic information appears in the in-app activity log.
+Activity settings control how much diagnostic information appears in the activity log.
 
 ### Log Level
 
-Switches between Informational and Verbose activity logging. Informational is the default for normal use. Verbose adds more detail for troubleshooting connection, retrieval, indexing, and answer-generation behavior.
+Switches between Informational and Verbose activity logging. Verbose adds more detail for troubleshooting connection, retrieval, indexing, and answer-generation behavior.
+
+## Audio
+
+Audio settings control the default route used during realtime voice sessions.
+
+### Default Speaker
+
+Toggles whether Speak2Docs defaults voice playback to the device speaker instead of the receiver or connected headset.
 
 ## Retrieval
 
-Retrieval settings control how selected documents are searched before the answer model responds. Indexed retrieval uses persisted local indexes when available, with fallback behavior for source matching. Lexical filtering and keyword indexing can improve source targeting for document questions.
+Retrieval settings control how selected documents are searched before answers.
 
 ### Mode
 
-Switches between FsColbert with fallback and the internal document index. FsColbert with fallback uses persisted local indexes when available and can fall back to the internal index when needed.
+Switches between FsColbert with fallback and the internal document index.
 
 ### Lexical Filter
 
-Helps narrow retrieval to source text that likely matches the question. It is on by default.
+Helps narrow retrieval to source text that likely matches the question.
 
 ### Log Expansions
 
-Adds query-expansion diagnostics to the activity log. Turn this on when troubleshooting why a question did or did not match a document.
+Adds query-expansion diagnostics to the activity log.
 
 ### Log Chunks
 
-Adds retrieved chunk diagnostics to the activity log. Turn this on when checking which source passages are being sent to the answer model.
+Adds retrieved chunk diagnostics to the activity log.
 
 ## PDF Parsing
 
@@ -111,37 +101,19 @@ PDF parsing controls how Speak2Docs extracts text from PDF sources before indexi
 
 ### PDF Parser
 
-Selects Hybrid or Legacy parsing. Hybrid is the default and is intended to produce better structure for indexed PDF content. Legacy parsing is available if a particular PDF behaves poorly with Hybrid parsing.
+Selects Hybrid or Legacy parsing. Hybrid is the default.
 
 ### Layout Analysis
 
-Uses layout analysis during Hybrid parsing. It is on by default when Hybrid parsing is enabled. It can improve document structure handling, but indexing may take longer. This control is disabled when Legacy parsing is selected.
+Uses layout analysis during Hybrid parsing. This can improve structure but may take longer.
 
 ### Index Keywords
 
-Allows Speak2Docs to generate extra keywords for indexed chunks to improve matching. It is off by default and may use the Keyword model during document processing.
+Allows Speak2Docs to generate extra keywords for indexed chunks to improve matching.
 
 ### Describe Visuals
 
-Allows Hybrid PDF parsing with Layout Analysis to crop detected diagrams, charts, images, and sparse visual tables and send those crops to the VisualDescription model for compact retrieval descriptions. It is off by default because it can add processing time, OpenAI API cost, and additional document visual content sent to OpenAI.
-
-This setting affects document processing and reprocessing. Search uses the best available local index for a selected source; turning Describe Visuals on or off should not make an already indexed document disappear from retrieval. Reprocess a PDF when you want its index refreshed with visual descriptions or newer parser metadata.
-
-## Runtime
-
-Runtime rows identify the major assemblies used by the current app build. These rows are informational and are useful when reporting support issues.
-
-### Platform contract
-
-Shows the shared platform-contract assembly used between the host app and orchestration layer.
-
-### Orchestration
-
-Shows the Speak2Docs orchestration assembly that coordinates voice, retrieval, source state, and answer flow.
-
-### WebRTC bridge
-
-Shows the bridge assembly used for realtime connection hosting and WebRTC integration.
+Allows Hybrid PDF parsing with Layout Analysis to describe detected diagrams, charts, images, and sparse visual tables. This can add processing time, OpenAI API cost, and additional document visual content sent to OpenAI.
 
 ## Links
 
@@ -159,46 +131,6 @@ Opens the Speak2Docs Privacy Policy.
 
 Opens third-party notices for libraries and assets included with Speak2Docs.
 
-### Settings
-
-Opens this Settings Help page.
-
 ### AI Data
 
 Opens the OpenAI data-processing notice. If the notice was hidden with "Do not show again," this row shows that the notice is currently hidden before connecting.
-
-## PlugIn Settings
-
-Some plugins can add their own settings. These appear in the PlugIn Settings group only when the active plugin defines them.
-
-### Boolean plugin fields
-
-Plugin fields marked as boolean, bool, toggle, or switch appear as on/off switches.
-
-### Text plugin fields
-
-Other plugin fields appear as text inputs. Their meaning, default value, and validation rules are defined by the active plugin.
-
-## Related Local Preferences
-
-Speak2Docs also stores local preferences that are managed by normal app actions rather than edited directly in the Settings form.
-
-### Document library
-
-Stores the local document-source manifest, including selected sources and processing status.
-
-### Hidden built-in sources
-
-Tracks built-in sample sources that were hidden with Delete. Use the restore control on the main toolbar to show hidden built-in indexes again.
-
-### Accepted terms version
-
-Records the Terms of Use and Privacy Policy version accepted on this device.
-
-### OpenAI data notice preference
-
-Records whether the OpenAI data-processing notice should be shown before connecting, based on the "Do not show again" choice.
-
-## When Settings Are Locked
-
-Some settings are disabled while the app is busy, a realtime connection is active, or a source operation is running. Disconnect or wait for processing to finish before changing model, retrieval, or parsing settings.

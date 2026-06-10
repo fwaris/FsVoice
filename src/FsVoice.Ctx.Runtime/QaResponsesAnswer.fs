@@ -13,7 +13,7 @@ type private AnswerConversationState =
 type internal QaResponsesAnswerer
     (
         options: QaSessionOptions,
-        transport: QaResponsesTransport,
+        transport: FsResponses.IResponsesTransport,
         sessionCancellation: CancellationTokenSource,
         report: string -> unit,
         contextSources: unit -> KnowledgeSource list,
@@ -185,7 +185,7 @@ type internal QaResponsesAnswerer
                     let sw = Stopwatch.StartNew()
 
                     try
-                        let! events = transport.RunAnswerRequest request cancellationToken |> Async.AwaitTask
+                        let! events = transport.CreateAndCollectAsync(request, cancellationToken) |> Async.AwaitTask
                         sw.Stop()
                         reportOpenAiCompaction phase events
 
@@ -349,7 +349,7 @@ type internal QaResponsesAnswerer
 
             let token = linkedCts.Token
             let sw = Stopwatch.StartNew()
-            do! transport.PrepareAnswerConnection token
+            do! transport.PrepareAsync token
             sw.Stop()
 
             reportAnswerTiming

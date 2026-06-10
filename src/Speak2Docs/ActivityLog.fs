@@ -135,6 +135,9 @@ module ActivityLog =
           "Oracle final response:"
           "Oracle response ready:" ]
 
+    let private alwaysVerbosePrefixes =
+        [ "Answer Response timing"; "Answer Responses timing:" ]
+
     let private verbosePrefixes =
         [ "Context ready:"
           "Persisted document library:"
@@ -158,6 +161,7 @@ module ActivityLog =
           "QA answer started:"
           "QA answer completed:"
           "Answer Responses request started:"
+          "Answer Response timing"
           "Answer Responses timing:"
           "QA session configured:"
           "QA source update skipped"
@@ -186,7 +190,9 @@ module ActivityLog =
     let classify text =
         let text = normalize text
 
-        if
+        if startsWithAny alwaysVerbosePrefixes text then
+            Verbose
+        elif
             containsAny
                 [ "failed"
                   "error"
