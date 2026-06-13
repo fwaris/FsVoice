@@ -25,9 +25,13 @@ module C =
     let SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED =
         "FsVoice.IosReceiverAudioRouteMigrated"
 
+    let SETTINGS_IOS_SPEAKER_AUDIO_ROUTE_MIGRATED =
+        "FsVoice.IosSpeakerAudioRouteMigrated"
+
     let SETTINGS_ANSWER_MAX_OUTPUT_TOKENS = "FsVoice.AnswerMaxOutputTokens"
     let SETTINGS_ANSWER_REASONING_EFFORT = "FsVoice.AnswerReasoningEffort"
     let SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT = "FsVoice.AnswerToolCallLoopLimit"
+    let SETTINGS_MAX_CONTEXT_CHUNKS = "FsVoice.MaxContextChunks"
     let SETTINGS_USE_LEXICAL_FILTER = "FsVoice.UseLexicalFilter"
     let SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsVoice.ElaborateIndexKeywords"
     let SETTINGS_USE_HYBRID_PDF_PARSING = "FsVoice.UseHybridPdfParsing"
@@ -42,14 +46,18 @@ module C =
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.5"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-2"
+    let DEFAULT_INDEX_ENRICHMENT_MODEL = "gpt-5-mini"
     let DEFAULT_VISUAL_DESCRIPTION_MODEL = "gpt-5-mini"
-    let DEFAULT_ANSWER_MAX_OUTPUT_TOKENS = 2500
+    let DEFAULT_ANSWER_MAX_OUTPUT_TOKENS = 5000
     let MIN_ANSWER_MAX_OUTPUT_TOKENS = 128
     let MAX_ANSWER_MAX_OUTPUT_TOKENS = 32000
     let DEFAULT_ANSWER_REASONING_EFFORT = "low"
-    let DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT = 3
+    let DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT = 8
     let MIN_ANSWER_TOOL_CALL_LOOP_LIMIT = 1
     let MAX_ANSWER_TOOL_CALL_LOOP_LIMIT = 8
+    let DEFAULT_MAX_CONTEXT_CHUNKS = FsVoice.Ctx.QaDefaults.maxContextChunks
+    let MIN_MAX_CONTEXT_CHUNKS = 1
+    let MAX_MAX_CONTEXT_CHUNKS = 30
     let NANO_MODEL = "gpt-5-nano"
     let REALTIME_MEMORY_TIMEOUT_MS = 1200
     let REALTIME_MEMORY_CANDIDATE_CHUNKS = 14

@@ -106,7 +106,7 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
                 task {
                     let! chunks = retrieveContext question maxResults cancellationToken |> Async.StartAsTask
 
-                    return KnowledgeSources.renderContext chunks
+                    return KnowledgeSources.renderContextWithLimit options.maxContextChunks chunks
                 }
 
             member _.SourceInventoryAsync cancellationToken = contextInventory cancellationToken
@@ -119,7 +119,11 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
 
     let loadToolCatalog () =
         let loaded =
-            QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
+            QaToolLoader.loadWithProvidersAndLimit
+                host
+                options.maxContextChunks
+                options.toolProviderDirectory
+                options.toolProviders
 
         if options.enableDurableMemory then
             loaded

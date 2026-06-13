@@ -23,7 +23,7 @@ module Connect =
         session.SendFromHostAsync(message, token).ContinueWith(ignore) |> ignore
 
     let private platformDefaultToSpeaker =
-#if ANDROID
+#if ANDROID || IOS
         true
 #else
         false

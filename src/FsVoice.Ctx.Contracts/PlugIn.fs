@@ -454,9 +454,9 @@ module PlugInDefinition =
           Transcriber, ModelRoleConfig.create "gpt-4o-mini-transcribe"
           Answer,
           { ModelRoleConfig.create "gpt-5.5" with
-              maxOutputTokens = Some 2500 }
+              maxOutputTokens = Some QaDefaults.answerMaxOutputTokens }
           Keyword,
-          { ModelRoleConfig.create "gpt-5-nano" with
+          { ModelRoleConfig.create QaDefaults.keywordModel with
               maxOutputTokens = Some 25000 }
           QueryExpansion, ModelRoleConfig.create "gpt-5-nano"
           VisualDescription, ModelRoleConfig.create "gpt-5-mini" ]

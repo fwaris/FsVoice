@@ -119,10 +119,11 @@ module SettingsView =
         let reasoningRow = roles.Length + 1
         let tokenRow = roles.Length + 2
         let toolLoopRow = roles.Length + 3
+        let contextChunksRow = roles.Length + 4
 
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows toolLoopRow) {
+            ((Grid(columns, sectionRows contextChunksRow) {
                 sectionTitle "Models"
 
                 for row, role in roles |> List.indexed do
@@ -151,19 +152,29 @@ module SettingsView =
                 ViewControls.formLabel "Max Answer Tokens" tokenRow
 
                 Entry(model.answerMaxOutputTokens, AnswerMaxOutputTokensChanged)
-                    .placeholder("2500")
+                    .placeholder("5000")
                     .isEnabled(canEdit)
                     .gridRow(tokenRow)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Tool Rounds" toolLoopRow
+                ViewControls.formLabel "Max Tool Calls" toolLoopRow
 
                 Entry(model.answerToolCallLoopLimit, AnswerToolCallLoopLimitChanged)
-                    .placeholder("3")
+                    .placeholder("8")
                     .isEnabled(canEdit)
                     .gridRow(toolLoopRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Context Chunks" contextChunksRow
+
+                Entry(model.maxContextChunks, MaxContextChunksChanged)
+                    .placeholder(string C.DEFAULT_MAX_CONTEXT_CHUNKS)
+                    .isEnabled(canEdit)
+                    .gridRow(contextChunksRow)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
@@ -203,7 +214,7 @@ module SettingsView =
                     AudioDefaultToSpeakerToggled
                     canEdit
                     (if model.audioDefaultToSpeaker then
-                         "Speaker"
+                         "Speaker/headset"
                      else
                          "Receiver/headset"))
                     .gridRow(1)
@@ -283,7 +294,7 @@ module SettingsView =
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Index Keywords" 3
+                ViewControls.formLabel "Enrich Keywords" 3
 
                 Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
                     .isEnabled(canEdit)

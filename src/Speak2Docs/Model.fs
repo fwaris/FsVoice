@@ -87,6 +87,7 @@ and Model =
       answerMaxOutputTokens: string
       answerReasoningEffort: string
       answerToolCallLoopLimit: string
+      maxContextChunks: string
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
@@ -148,6 +149,7 @@ and Msg =
     | AnswerMaxOutputTokensChanged of string
     | AnswerReasoningEffortChanged of string
     | AnswerToolCallLoopLimitChanged of string
+    | MaxContextChunksChanged of string
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool

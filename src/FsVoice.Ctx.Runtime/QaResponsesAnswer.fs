@@ -433,7 +433,8 @@ type internal QaResponsesAnswerer
                             return events, answer, toolObservations, responseChainReusable
                     }
 
-                let maxOutputTokens = QaAnswerModel.roleMaxTokens options Answer 2500
+                let maxOutputTokens =
+                    QaAnswerModel.roleMaxTokens options Answer QaDefaults.answerMaxOutputTokens
                 let! events, answer, toolObservations, responseChainReusable = answerAttempt maxOutputTokens false
 
                 if QaResponses.isTokenLimit events then

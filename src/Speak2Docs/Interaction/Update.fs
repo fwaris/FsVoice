@@ -121,6 +121,7 @@ module Update =
             yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
             yield RuntimeSettings.AnswerReasoningEffort, model.answerReasoningEffort
             yield RuntimeSettings.AnswerToolCallLoopLimit, model.answerToolCallLoopLimit
+            yield RuntimeSettings.MaxContextChunks, model.maxContextChunks
             yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
             yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
@@ -180,6 +181,7 @@ module Update =
         Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
         Settings.setAnswerReasoningEffort model.answerReasoningEffort
         Settings.setAnswerToolCallLoopLimit model.answerToolCallLoopLimit
+        Settings.setMaxContextChunks model.maxContextChunks
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing model.useHybridPdfParsing
@@ -768,6 +770,7 @@ module Update =
               answerMaxOutputTokens = string (Settings.answerMaxOutputTokens ())
               answerReasoningEffort = Settings.answerReasoningEffort ()
               answerToolCallLoopLimit = string (Settings.answerToolCallLoopLimit ())
+              maxContextChunks = string (Settings.maxContextChunks ())
               useLexicalFilter =
                 Settings.plugInUseLexicalFilter
                     loadedPlugIn.definition.id
@@ -905,6 +908,13 @@ module Update =
                     answerToolCallLoopLimit = value }
                 |> refreshRuntimeSettings,
                 Cmd.none
+        | MaxContextChunksChanged value ->
+            match sourceConfigBlocked model "Changing context chunk count" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with maxContextChunks = value } |> refreshRuntimeSettings, Cmd.none
         | ModelRoleModelChanged(role, value) ->
             match sourceConfigBlocked model $"Changing {FsVoice.Ctx.ModelRole.storageName role} model" with
             | Some msg ->
@@ -975,7 +985,7 @@ module Update =
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | None ->
-                let state = if value then "speaker" else "receiver/headset"
+                let state = if value then "speaker/headset" else "receiver/headset"
 
                 let model =
                     { model with

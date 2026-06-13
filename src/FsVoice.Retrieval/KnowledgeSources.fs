@@ -79,7 +79,7 @@ module KnowledgeSources =
         let defaults =
             { enabled = true
               client = None
-              modelId = "gpt-5-nano"
+              modelId = FsVoice.Ctx.QaDefaults.keywordModel
               schemaVersion = "passage-keywords-v1"
               batchSize = 4
               parallelism = DEFAULT_KEYWORD_METADATA_PARALLELISM
@@ -2404,8 +2404,6 @@ Passages:
             buildMissingIndexes
             sources
 
-    let private renderedChunkMaxChars = 650
-
     let renderContextWithLimit maxContextChunks (chunks: SourceChunk list) =
         if List.isEmpty chunks then
             "No selected document context was available."
@@ -2413,8 +2411,7 @@ Passages:
             chunks
             |> List.truncate (max 1 maxContextChunks)
             |> List.mapi (fun index (chunk: SourceChunk) ->
-                let body = Text.truncate renderedChunkMaxChars chunk.text
-                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{body}")
+                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{chunk.text}")
             |> String.concat "\n\n"
 
     let renderContext chunks =

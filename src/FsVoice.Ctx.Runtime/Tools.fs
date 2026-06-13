@@ -29,7 +29,9 @@ module ToolArguments =
             | false, _ -> fallback
         | None -> fallback
 
-type private SourceSearchTool(host: IQaToolHost) =
+type private SourceSearchTool(host: IQaToolHost, maxKnowledgeSearchResults: int) =
+    let maxKnowledgeSearchResults = max 1 maxKnowledgeSearchResults |> min 30
+
     interface IQaTool with
         member _.PluginName = "FsVoiceTools"
         member _.Name = "selected_source_search"
@@ -53,7 +55,12 @@ type private SourceSearchTool(host: IQaToolHost) =
         member _.InvokeAsync(args, cancellationToken) =
             task {
                 let question = ToolArguments.tryString "question" args |> Option.defaultValue ""
-                let maxResults = ToolArguments.tryInt "max_results" 6 args |> max 1 |> min 12
+
+                let maxResults =
+                    ToolArguments.tryInt "max_results" maxKnowledgeSearchResults args
+                    |> max 1
+                    |> min maxKnowledgeSearchResults
+
                 let! content = host.SearchKnowledgeAsync(question, maxResults, cancellationToken)
                 return QaToolResult.text content
             }
@@ -105,10 +112,13 @@ type private DurableMemorySearchTool(host: IQaToolHost) =
 module QaToolLoader =
     let contractVersion = 1
 
-    let builtInTools host =
-        [ SourceSearchTool(host) :> IQaTool
+    let builtInToolsWithLimit maxKnowledgeSearchResults host =
+        [ SourceSearchTool(host, maxKnowledgeSearchResults) :> IQaTool
           SourceInventoryTool(host)
           DurableMemorySearchTool(host) ]
+
+    let builtInTools host =
+        builtInToolsWithLimit QaDefaults.maxContextChunks host
 
     let private providerTypes (assembly: Assembly) =
         try
@@ -156,11 +166,16 @@ module QaToolLoader =
 
         List.ofSeq accepted, List.ofSeq logs
 
-    let loadWithProviders host (providerFolder: string option) (extraProviders: IQaToolProvider list) =
+    let loadWithProvidersAndLimit
+        host
+        maxKnowledgeSearchResults
+        (providerFolder: string option)
+        (extraProviders: IQaToolProvider list)
+        =
         let tools = ResizeArray<IQaTool>()
         let logs = ResizeArray<string>()
 
-        builtInTools host |> List.iter tools.Add
+        builtInToolsWithLimit maxKnowledgeSearchResults host |> List.iter tools.Add
 
         for provider in extraProviders do
             try
@@ -195,6 +210,9 @@ module QaToolLoader =
 
         { tools = tools
           logs = List.ofSeq logs }
+
+    let loadWithProviders host providerFolder extraProviders =
+        loadWithProvidersAndLimit host QaDefaults.maxContextChunks providerFolder extraProviders
 
     let load host (providerFolder: string option) =
         loadWithProviders host providerFolder []

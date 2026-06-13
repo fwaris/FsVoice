@@ -373,6 +373,9 @@ module Settings =
         value
         |> clamp C.MIN_ANSWER_TOOL_CALL_LOOP_LIMIT C.MAX_ANSWER_TOOL_CALL_LOOP_LIMIT
 
+    let normalizeMaxContextChunks value =
+        value |> clamp C.MIN_MAX_CONTEXT_CHUNKS C.MAX_MAX_CONTEXT_CHUNKS
+
     let normalizeAnswerReasoningEffort value =
         RuntimeSettings.normalizeAnswerReasoningEffort value
 
@@ -384,6 +387,11 @@ module Settings =
     let private parseAnswerToolCallLoopLimit fallback value =
         match Int32.TryParse(defaultArg (Option.ofObj value) "") with
         | true, parsed -> normalizeAnswerToolCallLoopLimit parsed
+        | false, _ -> fallback
+
+    let private parseMaxContextChunks fallback value =
+        match Int32.TryParse(defaultArg (Option.ofObj value) "") with
+        | true, parsed -> normalizeMaxContextChunks parsed
         | false, _ -> fallback
 
     let private getScopedString (plugInId: string) (suffix: string) (fallback: string) =
@@ -405,6 +413,7 @@ module Settings =
         let fallback =
             match role with
             | FsVoice.Ctx.Answer -> C.DEFAULT_ORACLE_MODEL
+            | FsVoice.Ctx.Keyword -> C.DEFAULT_INDEX_ENRICHMENT_MODEL
             | FsVoice.Ctx.VisualDescription -> C.DEFAULT_VISUAL_DESCRIPTION_MODEL
             | _ -> ""
 
@@ -467,8 +476,15 @@ module Settings =
                 Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, false)
                 Preferences.Default.Set(C.SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED, true)
 
+            let speakerMigrated =
+                Preferences.Default.Get(C.SETTINGS_IOS_SPEAKER_AUDIO_ROUTE_MIGRATED, false)
+
+            if not speakerMigrated then
+                Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, true)
+                Preferences.Default.Set(C.SETTINGS_IOS_SPEAKER_AUDIO_ROUTE_MIGRATED, true)
+
     let defaultAudioDefaultToSpeaker () =
-#if ANDROID
+#if ANDROID || IOS
         true
 #else
         false
@@ -508,6 +524,16 @@ module Settings =
             value |> parseAnswerToolCallLoopLimit C.DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT
 
         Preferences.Default.Set(C.SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT, rounds)
+
+    let maxContextChunks () =
+        let fallback = C.DEFAULT_MAX_CONTEXT_CHUNKS
+
+        Preferences.Default.Get(C.SETTINGS_MAX_CONTEXT_CHUNKS, fallback)
+        |> normalizeMaxContextChunks
+
+    let setMaxContextChunks value =
+        let chunks = value |> parseMaxContextChunks C.DEFAULT_MAX_CONTEXT_CHUNKS
+        Preferences.Default.Set(C.SETTINGS_MAX_CONTEXT_CHUNKS, chunks)
 
     let useLexicalFilter () =
         Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)

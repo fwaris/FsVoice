@@ -69,12 +69,12 @@ Commands:
   index-folder --input docs --output bundle-dir-or.zip --bundle-id id [--bundle-version 1.0.0]
   insuranceqa-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert] [--no-judge]
   insuranceqa-search-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert]
-  insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-nano]
+  insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-mini]
 
 Common options:
   --api-key value          Defaults to OPENAI_API_KEY.
   --answer-model value     Defaults to gpt-5.5.
-  --small-model value      Defaults to gpt-5-nano.
+  --small-model value      Defaults to gpt-5-nano; index elaboration defaults to gpt-5-mini.
   --storage-root path      Defaults to temp/fsvoice-cli.
   --index-path path        Optional persisted FsColbert .fsci file for search eval.
   --answers-source path    Optional JSON/Markdown InsuranceQA answer source to index/evaluate.
@@ -85,11 +85,11 @@ Common options:
   --expansion-replay-path path  Replay saved LLM expansion JSONL for fusion tests.
   --fusion-mode value      Search eval fusion mode: standard|direct-local|direct-llm|rrf|tail.
   --candidate-limit value  Search eval candidate pool size for direct/fusion modes. Defaults to 256.
-  --no-index-elaboration  Do not generate missing index-time keyword metadata with the small model.
+  --no-index-elaboration  Do not generate missing index-time keyword metadata.
 
 Index-folder options:
   --index-keywords       Generate index-time keyword metadata with OpenAI.
-  --keyword-model value  Keyword enrichment model. Defaults to --small-model or gpt-5-nano.
+  --keyword-model value  Keyword enrichment model. Defaults to gpt-5-mini.
   --describe-visuals    Generate compact descriptions for detected PDF figures/charts/images.
   --visual-model value  Visual description model. Defaults to gpt-5-mini.
   --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to heron.
@@ -213,7 +213,7 @@ Index-folder options:
                 clients = clientsFromArgs parsed
                 plugInProfile = plugInProfile parsed
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
-                keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed
+                keywordModelId = optionValue "small-model" QaDefaults.keywordModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
                 enableQueryExpansion = hasFlag "llm-query-expansion" parsed
                 toolProviderDirectory = optionValues "tool-dir" parsed |> List.tryLast
@@ -301,8 +301,7 @@ Index-folder options:
             match apiKey parsed with
             | None -> Error "--index-keywords requires --api-key or OPENAI_API_KEY."
             | Some key ->
-                let modelId =
-                    optionValueAny [ "keyword-model"; "small-model" ] QaDefaults.nanoModel parsed
+                let modelId = optionValue "keyword-model" QaDefaults.keywordModel parsed
 
                 Ok
                     { KnowledgeSources.KeywordGenerationOptions.defaults with
@@ -837,7 +836,7 @@ Index-folder options:
                         { KnowledgeSources.KeywordGenerationOptions.defaults with
                             enabled = not (hasFlag "no-index-elaboration" parsed)
                             client = clients.queryExpansion
-                            modelId = optionValue "small-model" QaDefaults.nanoModel parsed
+                            modelId = optionValue "small-model" QaDefaults.keywordModel parsed
                             plugInProfile = profile }
 
                     return!
@@ -1228,7 +1227,7 @@ Answers:
     let runInsuranceQaElaborateIndex parsed =
         task {
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
-            let model = optionValue "small-model" "gpt-5-nano" parsed
+            let model = optionValue "small-model" QaDefaults.keywordModel parsed
             let profile = plugInProfile parsed
             let batchSize = optionValue "batch-size" "8" parsed |> Int32.Parse
             let parallelism = optionValue "parallelism" "2" parsed |> Int32.Parse

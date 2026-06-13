@@ -41,7 +41,7 @@ Produces grounded answers from selected sources, tool observations, and the curr
 
 ### Keyword model
 
-Generates optional index keywords when Index Keywords is enabled.
+Generates optional enriched keywords when Enrich Keywords is enabled. The built-in default is `gpt-5-mini`.
 
 ### QueryExpansion model
 
@@ -53,11 +53,15 @@ Controls answer-model reasoning effort. Low is the default and is usually fastes
 
 ### Max Answer Tokens
 
-Limits the answer model's output length. The default is 2500.
+Limits the answer model's output length. The default is 5000.
 
-### Tool Rounds
+### Max Tool Calls
 
-Limits how many function-call rounds the answer model can run for one question.
+Limits how many tool-call rounds the answer model can run for one question. The default is 8.
+
+### Context Chunks
+
+Controls how many ranked document chunks Speak2Docs retrieves for an answer and allows into the model context. The default is 12.
 
 ## Activity
 
@@ -73,7 +77,7 @@ Audio settings control the default route used during realtime voice sessions.
 
 ### Default Speaker
 
-Toggles whether Speak2Docs defaults voice playback to the device speaker instead of the receiver or connected headset.
+Toggles whether Speak2Docs defaults voice playback to the device speaker while still preferring a connected headset or Bluetooth route when available.
 
 ## Retrieval
 
@@ -107,9 +111,9 @@ Selects Hybrid or Legacy parsing. Hybrid is the default.
 
 Uses layout analysis during Hybrid parsing. This can improve structure but may take longer.
 
-### Index Keywords
+### Enrich Keywords
 
-Allows Speak2Docs to generate extra keywords for indexed chunks to improve matching.
+Allows Speak2Docs to enrich indexed chunks with extra keywords to improve matching.
 
 ### Describe Visuals
 

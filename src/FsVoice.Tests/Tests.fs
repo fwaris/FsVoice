@@ -879,7 +879,7 @@ let ``generic PlugIn supplies model roles and runtime defaults`` () =
     Assert.Equal("generic", definition.id)
     Assert.Equal("gpt-realtime-2", (PlugInDefinition.model Realtime definition).modelId)
     Assert.Equal("gpt-5.5", (PlugInDefinition.model Answer definition).modelId)
-    Assert.Equal("gpt-5-nano", (PlugInDefinition.model Keyword definition).modelId)
+    Assert.Equal("gpt-5-mini", (PlugInDefinition.model Keyword definition).modelId)
     Assert.False(definition.runtime.enableQueryExpansion)
 
 [<Fact>]
@@ -1876,8 +1876,8 @@ let ``qa session websocket hides transient empty response diagnostics when retry
         Assert.Equal(2, captured.Count)
         Assert.Equal(Some true, captured[0].generate)
         Assert.Equal(Some true, captured[1].generate)
-        Assert.Equal(Some 2500, captured[0].max_output_tokens)
-        Assert.Equal(Some 5000, captured[1].max_output_tokens)
+        Assert.Equal(Some 5000, captured[0].max_output_tokens)
+        Assert.Equal(Some 10000, captured[1].max_output_tokens)
 
         Assert.False(logs |> Seq.exists (fun log -> log.Contains("returned empty text")))
         Assert.False(logs |> Seq.exists (fun log -> log.Contains("retry succeeded")))
@@ -3723,6 +3723,92 @@ let ``tool loader includes current time tool from tools project`` () =
         |> List.exists (fun tool -> tool.PluginName = "FsVoiceTools" && tool.Name = "current_time")
 
     Assert.True(hasCurrentTimeTool)
+
+[<Fact>]
+let ``selected source search tool uses configured context chunk budget`` () =
+    task {
+        let requested = ResizeArray<int>()
+
+        let host =
+            { new IQaToolHost with
+                member _.Report _ = ()
+
+                member _.SearchKnowledgeAsync(_, maxResults, _) =
+                    requested.Add maxResults
+                    Task.FromResult("source context")
+
+                member _.SourceInventoryAsync _ = Task.FromResult("No selected sources.")
+
+                member _.SearchMemoryAsync(_, _, _) = Task.FromResult("No memory context.")
+
+                member _.SearchBlackboardAsync(_, _) =
+                    Task.FromResult("No blackboard context.") }
+
+        let tool =
+            QaToolLoader.builtInToolsWithLimit 7 host
+            |> List.find (fun tool -> tool.Name = "selected_source_search")
+
+        let defaultArgs =
+            Dictionary<string, string>(dict [ "question", "summarize the study datasets" ])
+            :> IReadOnlyDictionary<string, string>
+
+        let cappedArgs =
+            Dictionary<string, string>(dict [ "question", "summarize the study datasets"; "max_results", "20" ])
+            :> IReadOnlyDictionary<string, string>
+
+        let! _ = tool.InvokeAsync(defaultArgs, CancellationToken.None)
+        let! _ = tool.InvokeAsync(cappedArgs, CancellationToken.None)
+
+        Assert.Equal<int list>([ 7; 7 ], requested |> Seq.toList)
+    }
+
+[<Fact>]
+let ``render context preserves full chunk text beyond old prefix limit`` () =
+    let source =
+        { kind = Pdf
+          location = "/tmp/amem.pdf"
+          enabled = true }
+
+    let filler = String.replicate 700 "x"
+
+    let chunk =
+        { source = source
+          index = 4
+          text =
+            $"The study uses the LoCoMo dataset for long-term dialogue evaluation. {filler} Besides, the study uses a new dataset named DialSim for multi-party dialogue evaluation."
+          score = 1.0f }
+
+    let rendered = KnowledgeSources.renderContextWithLimit 1 [ chunk ]
+
+    Assert.Contains("LoCoMo", rendered)
+    Assert.Contains("DialSim", rendered)
+
+[<Fact>]
+let ``render context still limits number of chunks without truncating kept chunk`` () =
+    let source =
+        { kind = Pdf
+          location = "/tmp/amem.pdf"
+          enabled = true }
+
+    let filler = String.replicate 700 "x"
+
+    let firstChunkText =
+        $"First chunk mentions LoCoMo near the start. {filler} DialSim remains in the same retrieved chunk."
+
+    let chunks =
+        [ { source = source
+            index = 1
+            text = firstChunkText
+            score = 1.0f }
+          { source = source
+            index = 2
+            text = "Second chunk should not be rendered."
+            score = 0.5f } ]
+
+    let rendered = KnowledgeSources.renderContextWithLimit 1 chunks
+
+    Assert.Contains(firstChunkText, rendered)
+    Assert.DoesNotContain("Second chunk should not be rendered.", rendered)
 
 [<Fact>]
 let ``rank promotes exact section target over lexical distractors`` () =
@@ -5679,7 +5765,8 @@ let ``runtime settings apply answer model and loop settings`` () =
         demoRuntimeSettings
             [ Speak2Docs.RuntimeSettings.AnswerMaxOutputTokens, "2500"
               Speak2Docs.RuntimeSettings.AnswerReasoningEffort, "high"
-              Speak2Docs.RuntimeSettings.AnswerToolCallLoopLimit, "5" ]
+              Speak2Docs.RuntimeSettings.AnswerToolCallLoopLimit, "5"
+              Speak2Docs.RuntimeSettings.MaxContextChunks, "18" ]
 
     let plugIn =
         FsVoice.Ctx.PlugInDefinition.generic
@@ -5696,6 +5783,8 @@ let ``runtime settings apply answer model and loop settings`` () =
     Assert.Equal(2500, answer.maxOutputTokens |> Option.defaultValue 0)
     Assert.Equal(Some "high", answer.reasoningEffort)
     Assert.Equal(5, flags.answerToolCallLoopLimit)
+    Assert.Equal(18, plugIn.runtime.memoryCandidateChunks)
+    Assert.Equal(18, plugIn.runtime.maxContextChunks)
 
 [<Fact>]
 let ``runtime settings apply Speak2Docs realtime oracle timeout when plugin uses core default`` () =
@@ -5770,6 +5859,13 @@ let ``runtime settings default audio speaker follows platform fallback`` () =
     Assert.False(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker false values)
 
 [<Fact>]
+let ``runtime settings default iOS audio route policy is speakerphone`` () =
+    let settings = demoRuntimeSettings []
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+
+    Assert.Equal("speakerphone", Speak2Docs.RuntimeSettings.iosAudioRoutePolicy values)
+
+[<Fact>]
 let ``runtime settings carry audio default speaker flag`` () =
     let settings =
         demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AudioDefaultToSpeaker, "true" ]
@@ -5777,6 +5873,25 @@ let ``runtime settings carry audio default speaker flag`` () =
     let values = Speak2Docs.RuntimeSettings.snapshot settings
 
     Assert.True(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker false values)
+
+[<Fact>]
+let ``runtime settings explicit receiver flag overrides speaker fallback`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.AudioDefaultToSpeaker, "false" ]
+
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+
+    Assert.False(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker true values)
+
+[<Fact>]
+let ``runtime settings legacy iOS receiver route policy remains receiver`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.IosAudioRoutePolicy, "receiverOrHeadset" ]
+
+    let values = Speak2Docs.RuntimeSettings.snapshot settings
+
+    Assert.Equal("receiverOrHeadset", Speak2Docs.RuntimeSettings.iosAudioRoutePolicy values)
+    Assert.False(Speak2Docs.RuntimeSettings.audioDefaultToSpeaker true values)
 
 [<Fact>]
 let ``runtime settings carry pdf visual description flag`` () =

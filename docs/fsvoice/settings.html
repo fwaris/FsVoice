@@ -234,7 +234,7 @@
           <dd>Produces grounded answers from selected sources, tool observations, and the current question.</dd>
 
           <dt>Keyword model</dt>
-          <dd>Generates optional index keywords when Index Keywords is enabled.</dd>
+          <dd>Generates optional enriched keywords when Enrich Keywords is enabled. The built-in default is <code>gpt-5-mini</code>.</dd>
 
           <dt>QueryExpansion model</dt>
           <dd>Rewrites or expands user questions to improve document retrieval.</dd>
@@ -243,10 +243,16 @@
           <dd>Controls answer-model reasoning effort. Low is the default and is usually fastest.</dd>
 
           <dt>Max Answer Tokens</dt>
-          <dd>Limits the answer model's output length. The default is 2500.</dd>
+          <dd>Limits the answer model's output length. The default is 5000.</dd>
 
-          <dt>Tool Rounds</dt>
-          <dd>Limits how many function-call rounds the answer model can run for one question.</dd>
+          <dt>Max Tool Calls</dt>
+          <dd>Limits how many tool-call rounds the answer model can run for one question. The default is 8.</dd>
+
+          <dt>Context Chunks</dt>
+          <dd>
+            Controls how many ranked document chunks Speak2Docs retrieves for an answer and allows into the
+            model context. The default is 12.
+          </dd>
         </dl>
       </section>
 
@@ -268,8 +274,8 @@
         <dl>
           <dt>Default Speaker</dt>
           <dd>
-            Toggles whether Speak2Docs defaults voice playback to the device speaker instead of the
-            receiver or connected headset.
+            Toggles whether Speak2Docs defaults voice playback to the device speaker while still
+            preferring a connected headset or Bluetooth route when available.
           </dd>
         </dl>
       </section>
@@ -302,8 +308,8 @@
           <dt>Layout Analysis</dt>
           <dd>Uses layout analysis during Hybrid parsing. This can improve structure but may take longer.</dd>
 
-          <dt>Index Keywords</dt>
-          <dd>Allows Speak2Docs to generate extra keywords for indexed chunks to improve matching.</dd>
+          <dt>Enrich Keywords</dt>
+          <dd>Allows Speak2Docs to enrich indexed chunks with extra keywords to improve matching.</dd>
 
           <dt>Describe Visuals</dt>
           <dd>

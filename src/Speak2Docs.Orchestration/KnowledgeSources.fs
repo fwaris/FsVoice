@@ -52,7 +52,7 @@ module KnowledgeSources =
     let loadInternalIndex (sources: KnowledgeSource list) : Async<RetrievalIndex * string list> =
         async { return! FsVoice.Retrieval.KnowledgeSources.loadInternalIndex sources }
 
-    let private defaultKeywordModel = "gpt-5-nano"
+    let private defaultKeywordModel = FsVoice.Ctx.QaDefaults.keywordModel
 
     let private fsColbertRoot storageRoot =
         Path.Combine(storageRoot, "Speak2Docs", "FsColbert")

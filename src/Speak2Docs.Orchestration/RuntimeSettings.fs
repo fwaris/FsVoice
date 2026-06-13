@@ -24,6 +24,9 @@ module RuntimeSettings =
     let AnswerToolCallLoopLimit = "answer.toolCallLoopLimit"
 
     [<Literal>]
+    let MaxContextChunks = "answer.maxContextChunks"
+
+    [<Literal>]
     let AudioDefaultToSpeaker = "audio.defaultToSpeaker"
 
     [<Literal>]
@@ -45,10 +48,10 @@ module RuntimeSettings =
     let IosAudioRoutePolicy = "audio.iosRoutePolicy"
 
     [<Literal>]
-    let DefaultIosAudioRoutePolicy = "receiverOrHeadset"
+    let DefaultIosAudioRoutePolicy = "speakerphone"
 
     [<Literal>]
-    let DefaultAnswerMaxOutputTokens = 2500
+    let DefaultAnswerMaxOutputTokens = 5000
 
     [<Literal>]
     let MinAnswerMaxOutputTokens = 128
@@ -60,7 +63,9 @@ module RuntimeSettings =
     let DefaultAnswerReasoningEffort = "low"
 
     [<Literal>]
-    let DefaultAnswerToolCallLoopLimit = 3
+    let DefaultAnswerToolCallLoopLimit = 8
+
+    let DefaultMaxContextChunks = FsVoice.Ctx.QaDefaults.maxContextChunks
 
     [<Literal>]
     let DefaultRealtimeOracleFunctionCallTimeoutMs = 45000
@@ -73,6 +78,12 @@ module RuntimeSettings =
 
     [<Literal>]
     let MaxAnswerToolCallLoopLimit = 8
+
+    [<Literal>]
+    let MinMaxContextChunks = 1
+
+    [<Literal>]
+    let MaxMaxContextChunks = 30
 
     let empty () : RuntimeSettings = ref Map.empty
 
@@ -129,6 +140,11 @@ module RuntimeSettings =
         |> int AnswerToolCallLoopLimit DefaultAnswerToolCallLoopLimit
         |> clamp MinAnswerToolCallLoopLimit MaxAnswerToolCallLoopLimit
 
+    let maxContextChunks values =
+        values
+        |> int MaxContextChunks DefaultMaxContextChunks
+        |> clamp MinMaxContextChunks MaxMaxContextChunks
+
     let normalizeIosAudioRoutePolicy value =
         match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
         | "speaker"
@@ -136,7 +152,7 @@ module RuntimeSettings =
         | "receiver"
         | "headset"
         | "receiverorheadset"
-        | "receiver-or-headset" -> DefaultIosAudioRoutePolicy
+        | "receiver-or-headset" -> "receiverOrHeadset"
         | _ -> DefaultIosAudioRoutePolicy
 
     let iosAudioRoutePolicy values =
@@ -199,6 +215,7 @@ module RuntimeSettings =
                 definition
 
         let answerModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer definition
+        let maxContextChunks = maxContextChunks values
 
         let functionCallTimeoutMs =
             if
@@ -211,6 +228,8 @@ module RuntimeSettings =
         { definition with
             runtime =
                 { definition.runtime with
+                    memoryCandidateChunks = maxContextChunks
+                    maxContextChunks = maxContextChunks
                     functionCallTimeoutMs = functionCallTimeoutMs }
             models =
                 definition.models
