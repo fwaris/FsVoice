@@ -101,15 +101,11 @@ Adds retrieved chunk diagnostics to the activity log.
 
 ## PDF Parsing
 
-PDF parsing controls how Speak2Docs extracts text from PDF sources before indexing.
-
-### PDF Parser
-
-Selects Hybrid or Legacy parsing. Hybrid is the default.
+PDF parsing always uses the Hybrid parser. These settings control optional Hybrid indexing features.
 
 ### Layout Analysis
 
-Uses layout analysis during Hybrid parsing. This can improve structure but may take longer.
+Uses layout analysis during PDF parsing. This can improve structure but may take longer.
 
 ### Enrich Keywords
 

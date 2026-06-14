@@ -561,11 +561,10 @@ module Settings =
         Preferences.Default.Set(plugInScopedKey plugInId "Runtime.ElaborateIndexKeywords", value)
         setElaborateIndexKeywords value
 
-    let useHybridPdfParsing () =
-        Preferences.Default.Get(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
+    let useHybridPdfParsing () = true
 
-    let setUseHybridPdfParsing value =
-        Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, value)
+    let setUseHybridPdfParsing _ =
+        Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
 
     let useLayoutAnalysis () =
         Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, true)

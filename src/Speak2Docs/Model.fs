@@ -154,7 +154,6 @@ and Msg =
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool
     | ElaborateIndexKeywordsToggled of bool
-    | UseHybridPdfParsingToggled of bool
     | UseLayoutAnalysisToggled of bool
     | DescribePdfVisualsToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

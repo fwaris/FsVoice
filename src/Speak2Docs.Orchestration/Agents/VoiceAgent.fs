@@ -255,18 +255,32 @@ module VoiceAgent =
             session = updateSessionWithTurnDetection config interruptingTurnDetection session }
         |> ClientEvent.SessionUpdate
 
-    let private responseCreateEvent (responseInstructions: string) =
-        let response =
-            { Response.Default with
-                instructions = Include(Some responseInstructions)
-                output_modalities = Include(Some [ "audio" ])
-                tool_choice = Include(Some "none")
-                tools = Include(Some []) }
+    let private startupGreetingResponseMetadata =
+        [ "fsvoice_response_kind", "startup_greeting" ] |> Map.ofList
 
+    let private audioResponse responseInstructions =
+        { Response.Default with
+            instructions = Include(Some responseInstructions)
+            output_modalities = Include(Some [ "audio" ])
+            tool_choice = Include(Some "none")
+            tools = Include(Some []) }
+
+    let private responseCreateEvent response =
         { ResponseCreate.Default with
             event_id = Utils.newId ()
             response = Include(Some response) }
         |> ClientEvent.ResponseCreate
+
+    let private spokenResponseCreateEvent (responseInstructions: string) =
+        responseInstructions |> audioResponse |> responseCreateEvent
+
+    let private startupGreetingResponseCreateEvent (responseInstructions: string) =
+        let response =
+            { audioResponse responseInstructions with
+                conversation = Include(Some "none")
+                metadata = Include(Some startupGreetingResponseMetadata) }
+
+        responseCreateEvent response
 
     let private responseInstructionsForOracleAnswer baseInstructions answer =
         $"{baseInstructions}\n\nOracle answer to speak exactly, without adding facts:\n\n{answer}"
@@ -361,7 +375,7 @@ module VoiceAgent =
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
         | Silent, NoActiveResponse, text :: remaining ->
-            responseCreateEvent (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
+            spokenResponseCreateEvent (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
@@ -387,14 +401,26 @@ module VoiceAgent =
                 else
                     RegularResponse
 
-            responseCreateEvent (responseInstructionsForGreeting st.config.speechResultInstructions greeting)
+            let responseEvent =
+                match responseKind with
+                | StartupGreeting ->
+                    startupGreetingResponseCreateEvent (
+                        responseInstructionsForGreeting st.config.speechResultInstructions greeting
+                    )
+                | RegularResponse ->
+                    spokenResponseCreateEvent (
+                        responseInstructionsForGreeting st.config.speechResultInstructions greeting
+                    )
+
+            responseEvent
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
             match responseKind with
             | StartupGreeting ->
                 st.bus.PostToAgent(
-                    Ag_Log $"Realtime protected startup greeting requested: sources={st.config.initialSourceCount}."
+                    Ag_Log
+                        $"Realtime protected startup greeting requested out-of-band: sources={st.config.initialSourceCount}."
                 )
             | RegularResponse ->
                 st.bus.PostToAgent(Ag_Log $"Realtime greeting requested: sources={st.config.initialSourceCount}.")

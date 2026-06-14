@@ -893,6 +893,7 @@ let ``default realtime prompt is source first for document requests`` () =
     Assert.Contains("summarize the abstract of the paper", instructions)
     Assert.Contains("QUERY_ORACLE", instructions)
     Assert.Contains("needs_external_context = true", instructions)
+    Assert.Contains("never repeat the startup selected-document-count greeting", instructions)
 
 [<Fact>]
 let ``qa session applies custom prompts and answer role options`` () =
@@ -5428,6 +5429,25 @@ let private startProtectedStartupGreetingSession () =
     }
 
 [<Fact>]
+let ``demo orchestration startup greeting response is out of band`` () =
+    task {
+        let! session, _, _, responseCreate = startProtectedStartupGreetingSession ()
+        let response = responseCreate.GetProperty("response")
+
+        Assert.Equal("none", response.GetProperty("conversation").GetString())
+
+        let metadata = response.GetProperty("metadata")
+        Assert.Equal("startup_greeting", metadata.GetProperty("fsvoice_response_kind").GetString())
+
+        Assert.Equal("none", response.GetProperty("tool_choice").GetString())
+        Assert.Equal(JsonValueKind.Array, response.GetProperty("tools").ValueKind)
+        Assert.Empty(response.GetProperty("tools").EnumerateArray())
+        Assert.Contains("Greeting to speak exactly", response.GetProperty("instructions").GetString())
+
+        do! session.StopAsync CancellationToken.None
+    }
+
+[<Fact>]
 let ``demo orchestration ignores transcript during protected startup greeting`` () =
     task {
         let! session, serverEvents, clientEvents, _ = startProtectedStartupGreetingSession ()
@@ -5698,6 +5718,7 @@ let ``demo orchestration greeting response does not create synthetic user input`
         let response = responseCreate.GetProperty("response")
         let mutable inputProperty = Unchecked.defaultof<JsonElement>
 
+        Assert.Equal("none", response.GetProperty("conversation").GetString())
         Assert.False(response.TryGetProperty("input", &inputProperty))
 
         do! session.StopAsync CancellationToken.None
@@ -5849,6 +5870,17 @@ let ``runtime settings default pdf visual descriptions off`` () =
         |> Speak2Docs.RuntimeSettings.sourceFlags
 
     Assert.False flags.describePdfVisuals
+
+[<Fact>]
+let ``runtime settings force hybrid pdf parsing`` () =
+    let settings =
+        demoRuntimeSettings [ Speak2Docs.RuntimeSettings.UseHybridPdfParsing, "false" ]
+
+    let flags =
+        Speak2Docs.RuntimeSettings.snapshot settings
+        |> Speak2Docs.RuntimeSettings.sourceFlags
+
+    Assert.True flags.useHybridPdfParsing
 
 [<Fact>]
 let ``runtime settings default audio speaker follows platform fallback`` () =

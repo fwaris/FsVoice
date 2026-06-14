@@ -124,7 +124,7 @@ module Update =
             yield RuntimeSettings.MaxContextChunks, model.maxContextChunks
             yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
-            yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
+            yield RuntimeSettings.UseHybridPdfParsing, string true
             yield RuntimeSettings.UseLayoutAnalysis, string model.useLayoutAnalysis
             yield RuntimeSettings.DescribePdfVisuals, string model.describePdfVisuals
 
@@ -184,7 +184,7 @@ module Update =
         Settings.setMaxContextChunks model.maxContextChunks
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
-        Settings.setUseHybridPdfParsing model.useHybridPdfParsing
+        Settings.setUseHybridPdfParsing true
         Settings.setUseLayoutAnalysis model.useLayoutAnalysis
         Settings.setDescribePdfVisuals model.describePdfVisuals
 
@@ -266,11 +266,7 @@ module Update =
                     plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn }
 
     let private visualDescriptionOptions (model: Model) =
-        if
-            not model.describePdfVisuals
-            || not model.useHybridPdfParsing
-            || not model.useLayoutAnalysis
-        then
+        if not model.describePdfVisuals || not model.useLayoutAnalysis then
             FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
         else
             let plugIn = composePlugIn model
@@ -368,15 +364,12 @@ module Update =
         (cancellationToken: CancellationToken)
         keywordOptions
         visualOptions
-        useHybridPdfParsing
         useLayoutAnalysis
         (docs: PdfDocumentSource list)
         =
         async {
             try
-                let parserName = if useHybridPdfParsing then "Hybrid" else "Legacy"
-
-                report $"Starting document processing command for {docs.Length} document(s); parser={parserName}."
+                report $"Starting document processing command for {docs.Length} document(s); parser=Hybrid."
                 cancellationToken.ThrowIfCancellationRequested()
 
                 let! outcome =
@@ -384,7 +377,7 @@ module Update =
                         report
                         keywordOptions
                         visualOptions
-                        useHybridPdfParsing
+                        true
                         useLayoutAnalysis
                         cancellationToken
                         docs
@@ -463,7 +456,7 @@ module Update =
                             FileSystem.AppDataDirectory
                             report
                             (visualDescriptionOptions model)
-                            model.useHybridPdfParsing
+                            true
                             model.useLayoutAnalysis
                             20
                             source
@@ -591,13 +584,7 @@ module Update =
         let visualOptions = visualDescriptionOptions model
 
         Cmd.OfAsync.either
-            (processDocuments
-                report
-                cts.Token
-                keywordOptions
-                visualOptions
-                model.useHybridPdfParsing
-                model.useLayoutAnalysis)
+            (processDocuments report cts.Token keywordOptions visualOptions model.useLayoutAnalysis)
             docs
             (fun result -> PdfProcessingCompleted(docs, result))
             EventError
@@ -776,7 +763,7 @@ module Update =
                     loadedPlugIn.definition.id
                     loadedPlugIn.definition.runtime.useLexicalFilter
               elaborateIndexKeywords = Settings.plugInElaborateIndexKeywords loadedPlugIn.definition.id false
-              useHybridPdfParsing = Settings.useHybridPdfParsing ()
+              useHybridPdfParsing = true
               useLayoutAnalysis = Settings.useLayoutAnalysis ()
               describePdfVisuals = Settings.describePdfVisuals ()
               notification = None
@@ -1015,26 +1002,6 @@ module Update =
                 let model =
                     { model with
                         elaborateIndexKeywords = value }
-
-                saveSettings model
-                postSources model
-                model, Cmd.none
-        | UseHybridPdfParsingToggled value ->
-            match sourceConfigBlocked model "Changing PDF parser" with
-            | Some msg ->
-                { model with
-                    log = msg :: model.log |> List.truncate C.MAX_LOG },
-                Cmd.none
-            | None ->
-                let parserName = if value then "Hybrid" else "Legacy"
-
-                let model =
-                    { model with
-                        useHybridPdfParsing = value
-                        log =
-                            $"PDF parser set to {parserName}. Reprocess documents to rebuild indexes with this parser."
-                            :: model.log
-                            |> List.truncate C.MAX_LOG }
 
                 saveSettings model
                 postSources model

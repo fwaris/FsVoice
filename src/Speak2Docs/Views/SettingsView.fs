@@ -267,49 +267,37 @@ module SettingsView =
     let private pdfParsingSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 4) {
+            ((Grid(columns, sectionRows 3) {
                 sectionTitle "PDF Parsing"
 
-                ViewControls.formLabel "PDF Parser" 1
+                ViewControls.formLabel "Layout Analysis" 1
 
                 (switchWithText
-                    model.useHybridPdfParsing
-                    UseHybridPdfParsingToggled
+                    model.useLayoutAnalysis
+                    UseLayoutAnalysisToggled
                     canEdit
-                    (if model.useHybridPdfParsing then "Hybrid" else "Legacy"))
+                    (if model.useLayoutAnalysis then "On - slower" else "Off"))
                     .gridRow(1)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Layout Analysis" 2
-
-                (switchWithText
-                    model.useLayoutAnalysis
-                    UseLayoutAnalysisToggled
-                    (canEdit && model.useHybridPdfParsing)
-                    (if model.useLayoutAnalysis then "On - slower" else "Off"))
-                    .gridRow(2)
-                    .gridColumn(1)
-                    .gridColumnSpan(2)
-                    .margin (2.)
-
-                ViewControls.formLabel "Enrich Keywords" 3
+                ViewControls.formLabel "Enrich Keywords" 2
 
                 Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
                     .isEnabled(canEdit)
-                    .gridRow(3)
+                    .gridRow(2)
                     .gridColumn(1)
                     .centerVertical ()
 
-                ViewControls.formLabel "Describe Visuals" 4
+                ViewControls.formLabel "Describe Visuals" 3
 
                 (switchWithText
                     model.describePdfVisuals
                     DescribePdfVisualsToggled
-                    (canEdit && model.useHybridPdfParsing && model.useLayoutAnalysis)
+                    (canEdit && model.useLayoutAnalysis)
                     (if model.describePdfVisuals then "On - slower" else "Off"))
-                    .gridRow(4)
+                    .gridRow(3)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)

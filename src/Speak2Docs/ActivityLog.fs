@@ -144,6 +144,7 @@ module ActivityLog =
           "Realtime state changed:"
           "Realtime session created"
           "Realtime session updated"
+          "Realtime protected startup greeting requested"
           "Realtime greeting requested:"
           "Realtime response requested"
           "Realtime acknowledged"
