@@ -222,6 +222,8 @@ type FakeContextProvider(source: KnowledgeSource) =
             [ { source = source
                 index = 0
                 sectionPath = []
+                contentRole = SourceContentRole.Unknown
+                pageNumbers = []
                 text = $"Fake context for {request.query}."
                 score = 1.0f } ]
             |> Task.FromResult
@@ -525,6 +527,8 @@ let private keywordPassage (source: KnowledgeSource) index text : FsColbert.Pass
       sourceLocation = source.location
       index = index
       sectionPath = []
+      contentRole = FsColbert.PassageContentRole.Unknown
+      pageNumbers = []
       text = text
       keywords = [] }
 
@@ -750,6 +754,8 @@ let private fakeIndexedPassage (source: KnowledgeSource) index text keywords : F
           sourceLocation = source.location
           index = index
           sectionPath = []
+          contentRole = FsColbert.PassageContentRole.Unknown
+          pageNumbers = []
           text = text
           keywords = keywords }
 
@@ -2181,7 +2187,7 @@ let ``pdf parser index fingerprint includes layout quality revision`` () =
         KnowledgeSources.PdfParsingModes.indexFingerprint KnowledgeSources.PdfParsingMode.HybridWithoutLayout
 
     Assert.Contains("pdfParsingMode=hybrid", hybrid)
-    Assert.Contains("pdfParserQuality=layout-sparse-native-headings-v2", hybrid)
+    Assert.Contains("pdfParserQuality=contextual-retrieval-v1", hybrid)
     Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
 
 [<Fact>]
@@ -2989,6 +2995,8 @@ let ``indexing cancellation is rethrown instead of wrapped as an error`` () =
               sourceLocation = source.location
               index = 0
               sectionPath = []
+              contentRole = FsColbert.PassageContentRole.Unknown
+              pageNumbers = []
               text = "cancel me"
               keywords = [] }
 
@@ -3027,6 +3035,8 @@ let ``docling hybrid fallback uses legacy pdf reader when provider path fails`` 
                       sourceLocation = source.location
                       index = 0
                       sectionPath = []
+                      contentRole = FsColbert.PassageContentRole.Unknown
+                      pageNumbers = []
                       text = "Legacy PdfPig text"
                       keywords = [] }
 
@@ -3063,6 +3073,8 @@ let ``docling hybrid fallback uses legacy pdf reader when hybrid returns one pas
               sourceLocation = source.location
               index = index
               sectionPath = []
+              contentRole = FsColbert.PassageContentRole.Unknown
+              pageNumbers = []
               text = text
               keywords = [] }
 
@@ -3917,6 +3929,8 @@ let ``render context preserves full chunk text beyond old prefix limit`` () =
         { source = source
           index = 4
           sectionPath = []
+          contentRole = SourceContentRole.Unknown
+          pageNumbers = []
           text =
             $"The study uses the LoCoMo dataset for long-term dialogue evaluation. {filler} Besides, the study uses a new dataset named DialSim for multi-party dialogue evaluation."
           score = 1.0f }
@@ -3937,12 +3951,16 @@ let ``render context includes structured section path`` () =
         { source = source
           index = 8
           sectionPath = [ "4 Experiment"; "4.3 Empirical Results" ]
+          contentRole = SourceContentRole.MainBody
+          pageNumbers = [ 6 ]
           text = "DialSim appears in the empirical results discussion."
           score = 1.0f }
 
     let rendered = KnowledgeSources.renderContextWithLimit 1 [ chunk ]
 
+    Assert.Contains("Role: Main body", rendered)
     Assert.Contains("Section: 4 Experiment > 4.3 Empirical Results", rendered)
+    Assert.Contains("Pages: 6", rendered)
     Assert.Contains("DialSim appears", rendered)
 
 [<Fact>]
@@ -3961,11 +3979,15 @@ let ``render context still limits number of chunks without truncating kept chunk
         [ { source = source
             index = 1
             sectionPath = []
+            contentRole = SourceContentRole.Unknown
+            pageNumbers = []
             text = firstChunkText
             score = 1.0f }
           { source = source
             index = 2
             sectionPath = []
+            contentRole = SourceContentRole.Unknown
+            pageNumbers = []
             text = "Second chunk should not be rendered."
             score = 0.5f } ]
 
@@ -3989,11 +4011,15 @@ let ``rank promotes structured section target over lexical distractors`` () =
                     [ { source = source
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
                         index = 2
                         sectionPath = [ "Paper"; "ABSTRACT" ]
+                        contentRole = SourceContentRole.Abstract
+                        pageNumbers = [ 1 ]
                         text = "This paper introduces a retrieval method."
                         score = 0.0f } ] }
 
@@ -4018,12 +4044,16 @@ let ``rank promotes inline section label over checklist mentions`` () =
                     [ { source = source
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.SubmissionChecklist
+                        pageNumbers = [ 20 ]
                         text =
                           "The NeurIPS checklist asks whether claims made in the abstract and introduction reflect the paper. The paper abstract should summarize contributions."
                         score = 0.0f }
                       { source = source
                         index = 2
                         sectionPath = []
+                        contentRole = SourceContentRole.Abstract
+                        pageNumbers = [ 1 ]
                         text =
                           "Abstract While LLM agents can use external tools, they require adaptive memory systems to leverage historical experiences."
                         score = 0.0f } ] }
@@ -4031,6 +4061,82 @@ let ``rank promotes inline section label over checklist mentions`` () =
         let! chunks = KnowledgeSources.rank None false false true ignore "summarize the paper abstract" 1 retrieval
 
         Assert.Equal(2, chunks.Head.index)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``rank promotes front matter over checklist for paper author questions`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/amem.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 50
+                        sectionPath = [ "A-Mem"; "NeurIPS Paper Checklist" ]
+                        contentRole = SourceContentRole.SubmissionChecklist
+                        pageNumbers = [ 24 ]
+                        text =
+                          "NeurIPS Paper Checklist. Guidelines: Authors should answer every question in the paper checklist."
+                        score = 0.0f }
+                      { source = source
+                        index = 0
+                        sectionPath = [ "A-Mem: Agentic Memory for LLM Agents" ]
+                        contentRole = SourceContentRole.FrontMatter
+                        pageNumbers = [ 1 ]
+                        text = "A-Mem: Agentic Memory for LLM Agents. Authors: Wujiang Xu, Zujie Liang, Juntao Tan."
+                        score = 0.0f } ] }
+
+        let! chunks = KnowledgeSources.rank None false false true ignore "who are the authors of this paper" 1 retrieval
+
+        Assert.Equal(0, chunks.Head.index)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``rank still allows explicit checklist retrieval`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/amem.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 0
+                        sectionPath = [ "A-Mem: Agentic Memory for LLM Agents" ]
+                        contentRole = SourceContentRole.FrontMatter
+                        pageNumbers = [ 1 ]
+                        text = "A-Mem: Agentic Memory for LLM Agents. Authors: Wujiang Xu, Zujie Liang, Juntao Tan."
+                        score = 0.0f }
+                      { source = source
+                        index = 50
+                        sectionPath = [ "A-Mem"; "NeurIPS Paper Checklist" ]
+                        contentRole = SourceContentRole.SubmissionChecklist
+                        pageNumbers = [ 24 ]
+                        text = "NeurIPS Paper Checklist. Guidelines: Authors should answer every compliance question."
+                        score = 0.0f } ] }
+
+        let! chunks =
+            KnowledgeSources.rank
+                None
+                false
+                false
+                true
+                ignore
+                "what does the NeurIPS checklist say about authors"
+                1
+                retrieval
+
+        Assert.Equal(50, chunks.Head.index)
     }
     |> Async.RunSynchronously
 
@@ -4049,11 +4155,15 @@ let ``rank corrects misspelled section target before searching`` () =
                     [ { source = source
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
                         index = 2
                         sectionPath = []
+                        contentRole = SourceContentRole.Abstract
+                        pageNumbers = [ 1 ]
                         text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
                         score = 0.0f } ] }
 
@@ -4083,16 +4193,22 @@ let ``rank keeps coverage from each selected source for multi-document questions
                     [ { source = sourceA
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Latency latency latency for source A."
                         score = 0.0f }
                       { source = sourceA
                         index = 2
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Latency latency latency architecture in source A."
                         score = 0.0f }
                       { source = sourceB
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Latency tradeoffs for source B."
                         score = 0.0f } ] }
 
@@ -4127,11 +4243,15 @@ let ``rank returns representative content for broad selected-document summaries`
                     [ { source = sourceA
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Quantum scheduling methods are introduced here."
                         score = 0.0f }
                       { source = sourceB
                         index = 1
                         sectionPath = []
+                        contentRole = SourceContentRole.Unknown
+                        pageNumbers = []
                         text = "Energy market simulations are introduced here."
                         score = 0.0f } ] }
 
@@ -4543,6 +4663,8 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
             { source = source
               index = 7
               sectionPath = []
+              contentRole = SourceContentRole.Unknown
+              pageNumbers = []
               text = "Old source evidence says tenant claims must be filed within thirty days."
               score = 1.0f }
 

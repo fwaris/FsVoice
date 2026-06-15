@@ -21,6 +21,9 @@ module KnowledgeSources =
     [<Literal>]
     let private DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS = 90000
 
+    [<Literal>]
+    let private CONTEXTUAL_RETRIEVAL_VERSION = "contextual-retrieval-v1"
+
     type RetrievalIndex =
         { sources: KnowledgeSource list
           chunks: SourceChunk list
@@ -35,6 +38,8 @@ module KnowledgeSources =
     type IndexPreviewRecord =
         { index: int
           sectionPath: string list
+          contentRole: SourceContentRole
+          pageNumbers: int list
           text: string
           keywords: string list
           terms: string list
@@ -111,7 +116,7 @@ module KnowledgeSources =
             | PdfParsingMode.HybridWithoutLayout -> "hybrid-no-layout"
 
         [<Literal>]
-        let parserQualityVersion = "layout-sparse-native-headings-v2"
+        let parserQualityVersion = "contextual-retrieval-v1"
 
         let indexFingerprint mode =
             [ $"pdfParsingMode={fingerprint mode}"
@@ -302,6 +307,8 @@ module KnowledgeSources =
                                    sourceLocation = passageSource.location
                                    index = index
                                    sectionPath = []
+                                   contentRole = FsColbert.PassageContentRole.Unknown
+                                   pageNumbers = []
                                    text = Text.normalizeWhitespace text
                                    keywords = item.keywords }
                                 : FsColbert.PassageRef))
@@ -390,6 +397,16 @@ module KnowledgeSources =
     let loadPassagesForIndexingWithOptions storageRoot report pdfOptions source =
         loadPassagesForIndexingWithOptionsWithCancellation storageRoot report pdfOptions source CancellationToken.None
 
+    let private sourceContentRole (role: FsColbert.PassageContentRole) =
+        match role with
+        | FsColbert.PassageContentRole.FrontMatter -> SourceContentRole.FrontMatter
+        | FsColbert.PassageContentRole.Abstract -> SourceContentRole.Abstract
+        | FsColbert.PassageContentRole.MainBody -> SourceContentRole.MainBody
+        | FsColbert.PassageContentRole.References -> SourceContentRole.References
+        | FsColbert.PassageContentRole.Appendix -> SourceContentRole.Appendix
+        | FsColbert.PassageContentRole.SubmissionChecklist -> SourceContentRole.SubmissionChecklist
+        | _ -> SourceContentRole.Unknown
+
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
             let! loaded =
@@ -413,6 +430,8 @@ module KnowledgeSources =
                             { source = source
                               index = passage.index
                               sectionPath = passage.sectionPath
+                              contentRole = sourceContentRole passage.contentRole
+                              pageNumbers = passage.pageNumbers
                               text = passage.text
                               score = 0.0f }
                         )
@@ -439,6 +458,8 @@ module KnowledgeSources =
         { source = sourceFromLocation sources hit.reference.sourceLocation
           index = hit.reference.index
           sectionPath = hit.reference.sectionPath
+          contentRole = sourceContentRole hit.reference.contentRole
+          pageNumbers = hit.reference.pageNumbers
           text = hit.reference.text
           score = hit.score }
 
@@ -448,6 +469,8 @@ module KnowledgeSources =
             { source = sourceFromLocation sources passage.reference.sourceLocation
               index = passage.reference.index
               sectionPath = passage.reference.sectionPath
+              contentRole = sourceContentRole passage.reference.contentRole
+              pageNumbers = passage.reference.pageNumbers
               text = passage.reference.text
               score = 0.0f })
 
@@ -460,7 +483,10 @@ module KnowledgeSources =
             chunks
             |> List.choose (fun (chunk: SourceChunk) ->
                 let haystack =
-                    (chunk.sectionPath @ [ chunk.text ])
+                    (chunk.sectionPath
+                     @ [ SourceContentRole.displayName chunk.contentRole
+                         String.concat " " (chunk.pageNumbers |> List.map string)
+                         chunk.text ])
                     |> String.concat "\n"
                     |> fun text -> text.ToLowerInvariant()
 
@@ -534,6 +560,21 @@ module KnowledgeSources =
           "what does this"
           "what do these" ]
 
+    let private checklistTerms =
+        [ "checklist"
+          "disclosure"
+          "guideline"
+          "guidelines"
+          "compliance"
+          "neurips"
+          "question"
+          "answer" ]
+
+    let private authorTitleTerms =
+        [ "author"; "authors"; "wrote"; "written"; "title"; "called" ]
+
+    let private abstractTerms = [ "abstract" ]
+
     let private queryHasAnyTerm (terms: string list) (query: string) =
         let queryTerms = Text.terms query |> Set.ofList
 
@@ -543,6 +584,37 @@ module KnowledgeSources =
         let lower = query.ToLowerInvariant()
 
         phrases |> List.exists (fun phrase -> lower.Contains(phrase))
+
+    let private applyRoleBoost query (chunks: SourceChunk list) =
+        let wantsChecklist =
+            queryHasAnyTerm checklistTerms query
+            || queryHasAnyPhrase [ "paper checklist" ] query
+
+        let wantsAuthors =
+            queryHasAnyTerm authorTitleTerms query
+            || queryHasAnyPhrase [ "who wrote"; "paper title" ] query
+
+        let wantsAbstract = queryHasAnyTerm abstractTerms query
+
+        chunks
+        |> List.map (fun chunk ->
+            let boost =
+                match chunk.contentRole with
+                | SourceContentRole.SubmissionChecklist when wantsChecklist -> 1.25f
+                | SourceContentRole.SubmissionChecklist -> -2.0f
+                | SourceContentRole.FrontMatter when wantsAuthors -> 1.5f
+                | SourceContentRole.Abstract when wantsAbstract -> 1.5f
+                | SourceContentRole.References when queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query ->
+                    0.8f
+                | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query -> 0.8f
+                | _ -> 0.0f
+
+            if boost = 0.0f then
+                chunk
+            else
+                { chunk with
+                    score = chunk.score + boost })
+        |> List.sortByDescending (fun chunk -> chunk.score)
 
     let private needsSourceCoverage (query: string) (queryType: QueryType) (sourceCount: int) =
         sourceCount > 1
@@ -996,6 +1068,7 @@ Query: {query}
                 retrieval.chunks
                 |> rankLexically lexicalQuery lexicalMaxResults
                 |> applySectionBoost sectionName
+                |> applyRoleBoost query
                 |> balanceBySource query queryType maxResults retrieval
 
             match retrieval.encoder, retrieval.colbertIndices with
@@ -1031,6 +1104,7 @@ Query: {query}
                         |> Array.sortByDescending (fun c -> c.score)
                         |> Array.toList
                         |> applySectionBoost sectionName
+                        |> applyRoleBoost query
                         |> balanceBySource query queryType maxResults retrieval
 
                     if logChunks then
@@ -1594,6 +1668,7 @@ Passages:
             |> fun items -> JsonSerializer.Serialize items
 
         [ yield "keywords=enabled"
+          yield $"contextualRetrieval={CONTEXTUAL_RETRIEVAL_VERSION}"
           yield $"keywordModel={options.modelId}"
           yield $"keywordSchema={options.schemaVersion}"
           yield $"plugInProfile={options.plugInProfile.id}"
@@ -1607,6 +1682,7 @@ Passages:
 
     let private disabledKeywordFingerprint =
         [ "keywords=disabled"
+          $"contextualRetrieval={CONTEXTUAL_RETRIEVAL_VERSION}"
           $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
           $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
         |> String.concat "\n"
@@ -2120,6 +2196,8 @@ Passages:
     let private toIndexPreviewRecord (passage: FsColbert.IndexedPassage) =
         { index = passage.reference.index
           sectionPath = passage.reference.sectionPath
+          contentRole = sourceContentRole passage.reference.contentRole
+          pageNumbers = passage.reference.pageNumbers
           text = passage.reference.text
           keywords = passage.reference.keywords |> Option.ofObj |> Option.defaultValue []
           terms = passage.terms |> Set.toList |> List.sort
@@ -2448,6 +2526,27 @@ Passages:
             buildMissingIndexes
             sources
 
+    let private renderPageNumbers pages =
+        pages |> List.map string |> String.concat ", "
+
+    let private renderChunkMetadata (chunk: SourceChunk) =
+        [ match chunk.contentRole with
+          | SourceContentRole.Unknown -> ()
+          | role -> yield $"Role: {SourceContentRole.displayName role}"
+
+          match chunk.sectionPath with
+          | [] -> ()
+          | path ->
+              let sectionPath = String.concat " > " path
+              yield $"Section: {sectionPath}"
+
+          match chunk.pageNumbers with
+          | [] -> ()
+          | pages -> yield $"Pages: {renderPageNumbers pages}" ]
+        |> function
+            | [] -> ""
+            | lines -> String.concat "\n" lines + "\n"
+
     let renderContextWithLimit maxContextChunks (chunks: SourceChunk list) =
         if List.isEmpty chunks then
             "No selected document context was available."
@@ -2455,14 +2554,9 @@ Passages:
             chunks
             |> List.truncate (max 1 maxContextChunks)
             |> List.mapi (fun index (chunk: SourceChunk) ->
-                let section =
-                    match chunk.sectionPath with
-                    | [] -> ""
-                    | path ->
-                        let sectionPath = String.concat " > " path
-                        $"Section: {sectionPath}\n"
+                let metadata = renderChunkMetadata chunk
 
-                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{section}{chunk.text}")
+                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{metadata}{chunk.text}")
             |> String.concat "\n\n"
 
     let renderContext chunks =

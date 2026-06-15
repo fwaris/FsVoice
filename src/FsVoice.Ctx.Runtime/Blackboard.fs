@@ -321,6 +321,8 @@ module BlackboardSemantic =
           sourceLocation = $"blackboard://{record.id}"
           index = index
           sectionPath = []
+          contentRole = FsColbert.PassageContentRole.Unknown
+          pageNumbers = []
           text = record.text
           keywords = [] }
 

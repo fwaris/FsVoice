@@ -21,10 +21,33 @@ type KnowledgeSource =
         | Markdown -> $"Markdown: {this.location}"
         | Json -> $"JSON: {this.location}"
 
+[<RequireQualifiedAccess>]
+type SourceContentRole =
+    | Unknown
+    | FrontMatter
+    | Abstract
+    | MainBody
+    | References
+    | Appendix
+    | SubmissionChecklist
+
+module SourceContentRole =
+    let displayName =
+        function
+        | SourceContentRole.Unknown -> "Unknown"
+        | SourceContentRole.FrontMatter -> "Front matter"
+        | SourceContentRole.Abstract -> "Abstract"
+        | SourceContentRole.MainBody -> "Main body"
+        | SourceContentRole.References -> "References"
+        | SourceContentRole.Appendix -> "Appendix"
+        | SourceContentRole.SubmissionChecklist -> "Submission checklist"
+
 type SourceChunk =
     { source: KnowledgeSource
       index: int
       sectionPath: string list
+      contentRole: SourceContentRole
+      pageNumbers: int list
       text: string
       score: float32 }
 

@@ -433,6 +433,8 @@ module DurableMemory =
                                   sourceLocation = $"memory://{record.memoryId}"
                                   index = index
                                   sectionPath = []
+                                  contentRole = FsColbert.PassageContentRole.Unknown
+                                  pageNumbers = []
                                   text = record.retrieval.indexText
                                   keywords = [] }
 

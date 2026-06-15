@@ -47,6 +47,16 @@ module Program =
         opts.Converters.Add(JsonFSharpConverter())
         opts
 
+    let private sourceContentRole (role: FsColbert.PassageContentRole) =
+        match role with
+        | FsColbert.PassageContentRole.FrontMatter -> SourceContentRole.FrontMatter
+        | FsColbert.PassageContentRole.Abstract -> SourceContentRole.Abstract
+        | FsColbert.PassageContentRole.MainBody -> SourceContentRole.MainBody
+        | FsColbert.PassageContentRole.References -> SourceContentRole.References
+        | FsColbert.PassageContentRole.Appendix -> SourceContentRole.Appendix
+        | FsColbert.PassageContentRole.SubmissionChecklist -> SourceContentRole.SubmissionChecklist
+        | _ -> SourceContentRole.Unknown
+
     let jsonLineOptions =
         let opts = JsonSerializerOptions()
         opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
@@ -800,6 +810,8 @@ Index-folder options:
                     { source = source
                       index = passage.reference.index
                       sectionPath = passage.reference.sectionPath
+                      contentRole = sourceContentRole passage.reference.contentRole
+                      pageNumbers = passage.reference.pageNumbers
                       text = passage.reference.text
                       score = 0.0f })
 
@@ -1398,6 +1410,8 @@ Answers:
                                     { source = source
                                       index = hit.reference.index
                                       sectionPath = hit.reference.sectionPath
+                                      contentRole = sourceContentRole hit.reference.contentRole
+                                      pageNumbers = hit.reference.pageNumbers
                                       text = hit.reference.text
                                       score = hit.score })
                         })

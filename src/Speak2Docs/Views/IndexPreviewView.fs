@@ -44,6 +44,7 @@ module IndexPreviewView =
 
     let private recordView appTheme (record: KnowledgeSources.IndexPreviewRecord) =
         let sectionPathText = String.concat " > " record.sectionPath
+        let pageNumbersText = record.pageNumbers |> List.map string |> String.concat ", "
 
         Border(
             (VStack(spacing = 6.) {
@@ -56,6 +57,12 @@ module IndexPreviewView =
 
                 if not (List.isEmpty record.sectionPath) then
                     mutedLabel appTheme $"Section: {sectionPathText}"
+
+                if record.contentRole <> FsVoice.Ctx.SourceContentRole.Unknown then
+                    mutedLabel appTheme $"Role: {FsVoice.Ctx.SourceContentRole.displayName record.contentRole}"
+
+                if not (List.isEmpty record.pageNumbers) then
+                    mutedLabel appTheme $"Pages: {pageNumbersText}"
 
                 mutedLabel appTheme $"Keywords: {listText record.keywords}"
                 mutedLabel appTheme $"Terms: {listText record.terms}"
