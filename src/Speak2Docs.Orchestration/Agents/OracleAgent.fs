@@ -35,8 +35,6 @@ module OracleAgent =
     let private pdfParsingMode flags =
         if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif flags.useHybridPdfParsing then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 

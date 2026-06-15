@@ -320,6 +320,7 @@ module BlackboardSemantic =
           sourceDisplayName = BlackboardEntryKind.displayName record.kind
           sourceLocation = $"blackboard://{record.id}"
           index = index
+          sectionPath = []
           text = record.text
           keywords = [] }
 

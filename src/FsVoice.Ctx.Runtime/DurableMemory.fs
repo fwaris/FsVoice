@@ -432,6 +432,7 @@ module DurableMemory =
                                   sourceDisplayName = $"{kindName record.kind}: {record.title}"
                                   sourceLocation = $"memory://{record.memoryId}"
                                   index = index
+                                  sectionPath = []
                                   text = record.retrieval.indexText
                                   keywords = [] }
 

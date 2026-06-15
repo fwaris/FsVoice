@@ -24,6 +24,7 @@ type KnowledgeSource =
 type SourceChunk =
     { source: KnowledgeSource
       index: int
+      sectionPath: string list
       text: string
       score: float32 }
 

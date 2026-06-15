@@ -221,6 +221,7 @@ type FakeContextProvider(source: KnowledgeSource) =
         member _.RetrieveAsync(request, _) =
             [ { source = source
                 index = 0
+                sectionPath = []
                 text = $"Fake context for {request.query}."
                 score = 1.0f } ]
             |> Task.FromResult
@@ -523,6 +524,7 @@ let private keywordPassage (source: KnowledgeSource) index text : FsColbert.Pass
       sourceDisplayName = source.DisplayName
       sourceLocation = source.location
       index = index
+      sectionPath = []
       text = text
       keywords = [] }
 
@@ -747,6 +749,7 @@ let private fakeIndexedPassage (source: KnowledgeSource) index text keywords : F
           sourceDisplayName = source.DisplayName
           sourceLocation = source.location
           index = index
+          sectionPath = []
           text = text
           keywords = keywords }
 
@@ -2178,7 +2181,7 @@ let ``pdf parser index fingerprint includes layout quality revision`` () =
         KnowledgeSources.PdfParsingModes.indexFingerprint KnowledgeSources.PdfParsingMode.HybridWithoutLayout
 
     Assert.Contains("pdfParsingMode=hybrid", hybrid)
-    Assert.Contains("pdfParserQuality=layout-sparse-fallback-v1", hybrid)
+    Assert.Contains("pdfParserQuality=layout-sparse-native-headings-v2", hybrid)
     Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
 
 [<Fact>]
@@ -2723,6 +2726,141 @@ let ``docling hybrid provider path falls back to native text when layout collaps
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling native text fallback preserves line heading section paths`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let repeatedText prefix =
+            [ 1..120 ] |> List.map (fun index -> $"{prefix}{index}") |> String.concat " "
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 400.0 }
+                      cells =
+                        [ doclingNativeCell "AI on the Pulse: Real-Time Health Anomaly Detection" 20.0 360.0 380.0 380.0
+                          doclingNativeCell "1 INTRODUCTION" 20.0 330.0 180.0 345.0
+                          doclingNativeCell "opposite column text should not join heading" 260.0 330.0 380.0 345.0
+                          doclingNativeCell (repeatedText "patient") 20.0 300.0 380.0 315.0
+                          doclingNativeCell "4.3 Experimental Setup" 20.0 260.0 220.0 275.0
+                          doclingNativeCell (repeatedText "units") 20.0 230.0 380.0 245.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters = [ doclingCluster 0 FsColbert.DoclingLabel.Text 15.0 15.0 40.0 30.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/native-sections.pdf" "Native Sections" "/tmp/native-sections.pdf"
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                ignore
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/native-sections.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let introductionPath =
+                [ "AI on the Pulse: Real-Time Health Anomaly Detection"; "1 INTRODUCTION" ]
+
+            let setupPath =
+                [ "AI on the Pulse: Real-Time Health Anomaly Detection"
+                  "4.3 Experimental Setup" ]
+
+            Assert.Contains(passages, fun passage -> passage.sectionPath = introductionPath)
+            Assert.Contains(passages, fun passage -> passage.sectionPath = setupPath)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling native text fallback ignores table and plot rows as section headings`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 500 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let repeatedText prefix =
+            [ 1..120 ] |> List.map (fun index -> $"{prefix}{index}") |> String.concat " "
+
+        let title = "A-Mem: Agentic Memory for LLM Agents"
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 500.0 }
+                      cells =
+                        [ doclingNativeCell title 20.0 460.0 380.0 480.0
+                          doclingNativeCell "4 Experiment" 20.0 430.0 150.0 445.0
+                          doclingNativeCell (repeatedText "experiment") 20.0 400.0 380.0 415.0
+                          doclingNativeCell "Method" 20.0 360.0 100.0 375.0
+                          doclingNativeCell "3.2 A-MEM" 20.0 330.0 120.0 345.0
+                          doclingNativeCell "30 A-mem" 20.0 300.0 120.0 315.0
+                          doclingNativeCell "4.3 Empirical Results" 20.0 260.0 220.0 275.0
+                          doclingNativeCell (repeatedText "result") 20.0 230.0 380.0 245.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters = [ doclingCluster 0 FsColbert.DoclingLabel.Text 15.0 15.0 40.0 30.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/native-table-rows.pdf" "Native Table Rows" "/tmp/native-table-rows.pdf"
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                ignore
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/native-table-rows.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            Assert.Contains(passages, fun passage -> passage.sectionPath = [ title; "4 Experiment" ])
+
+            Assert.Contains(
+                passages,
+                fun passage -> passage.sectionPath = [ title; "4 Experiment"; "4.3 Empirical Results" ]
+            )
+
+            Assert.False(
+                passages
+                |> List.exists (fun passage ->
+                    passage.sectionPath
+                    |> List.exists (fun section -> section = "Method" || section = "3.2 A-MEM" || section = "30 A-mem")),
+                "Table and plot labels should remain body text, not section path entries."
+            )
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling hybrid provider path falls back to native text when layout is sparse`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -2850,6 +2988,7 @@ let ``indexing cancellation is rethrown instead of wrapped as an error`` () =
               sourceDisplayName = source.DisplayName
               sourceLocation = source.location
               index = 0
+              sectionPath = []
               text = "cancel me"
               keywords = [] }
 
@@ -2887,6 +3026,7 @@ let ``docling hybrid fallback uses legacy pdf reader when provider path fails`` 
                       sourceDisplayName = source.displayName
                       sourceLocation = source.location
                       index = 0
+                      sectionPath = []
                       text = "Legacy PdfPig text"
                       keywords = [] }
 
@@ -2922,6 +3062,7 @@ let ``docling hybrid fallback uses legacy pdf reader when hybrid returns one pas
               sourceDisplayName = source.displayName
               sourceLocation = source.location
               index = index
+              sectionPath = []
               text = text
               keywords = [] }
 
@@ -3775,6 +3916,7 @@ let ``render context preserves full chunk text beyond old prefix limit`` () =
     let chunk =
         { source = source
           index = 4
+          sectionPath = []
           text =
             $"The study uses the LoCoMo dataset for long-term dialogue evaluation. {filler} Besides, the study uses a new dataset named DialSim for multi-party dialogue evaluation."
           score = 1.0f }
@@ -3783,6 +3925,25 @@ let ``render context preserves full chunk text beyond old prefix limit`` () =
 
     Assert.Contains("LoCoMo", rendered)
     Assert.Contains("DialSim", rendered)
+
+[<Fact>]
+let ``render context includes structured section path`` () =
+    let source =
+        { kind = Pdf
+          location = "/tmp/amem.pdf"
+          enabled = true }
+
+    let chunk =
+        { source = source
+          index = 8
+          sectionPath = [ "4 Experiment"; "4.3 Empirical Results" ]
+          text = "DialSim appears in the empirical results discussion."
+          score = 1.0f }
+
+    let rendered = KnowledgeSources.renderContextWithLimit 1 [ chunk ]
+
+    Assert.Contains("Section: 4 Experiment > 4.3 Empirical Results", rendered)
+    Assert.Contains("DialSim appears", rendered)
 
 [<Fact>]
 let ``render context still limits number of chunks without truncating kept chunk`` () =
@@ -3799,10 +3960,12 @@ let ``render context still limits number of chunks without truncating kept chunk
     let chunks =
         [ { source = source
             index = 1
+            sectionPath = []
             text = firstChunkText
             score = 1.0f }
           { source = source
             index = 2
+            sectionPath = []
             text = "Second chunk should not be rendered."
             score = 0.5f } ]
 
@@ -3812,7 +3975,7 @@ let ``render context still limits number of chunks without truncating kept chunk
     Assert.DoesNotContain("Second chunk should not be rendered.", rendered)
 
 [<Fact>]
-let ``rank promotes exact section target over lexical distractors`` () =
+let ``rank promotes structured section target over lexical distractors`` () =
     async {
         let source =
             { kind = Pdf
@@ -3825,11 +3988,13 @@ let ``rank promotes exact section target over lexical distractors`` () =
                 chunks =
                     [ { source = source
                         index = 1
+                        sectionPath = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
                         index = 2
-                        text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
+                        sectionPath = [ "Paper"; "ABSTRACT" ]
+                        text = "This paper introduces a retrieval method."
                         score = 0.0f } ] }
 
         let! chunks = KnowledgeSources.rank None false false true ignore "Can you summarize the abstract?" 1 retrieval
@@ -3852,11 +4017,13 @@ let ``rank promotes inline section label over checklist mentions`` () =
                 chunks =
                     [ { source = source
                         index = 1
+                        sectionPath = []
                         text =
                           "The NeurIPS checklist asks whether claims made in the abstract and introduction reflect the paper. The paper abstract should summarize contributions."
                         score = 0.0f }
                       { source = source
                         index = 2
+                        sectionPath = []
                         text =
                           "Abstract While LLM agents can use external tools, they require adaptive memory systems to leverage historical experiences."
                         score = 0.0f } ] }
@@ -3881,10 +4048,12 @@ let ``rank corrects misspelled section target before searching`` () =
                 chunks =
                     [ { source = source
                         index = 1
+                        sectionPath = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
                         index = 2
+                        sectionPath = []
                         text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
                         score = 0.0f } ] }
 
@@ -3913,14 +4082,17 @@ let ``rank keeps coverage from each selected source for multi-document questions
                 chunks =
                     [ { source = sourceA
                         index = 1
+                        sectionPath = []
                         text = "Latency latency latency for source A."
                         score = 0.0f }
                       { source = sourceA
                         index = 2
+                        sectionPath = []
                         text = "Latency latency latency architecture in source A."
                         score = 0.0f }
                       { source = sourceB
                         index = 1
+                        sectionPath = []
                         text = "Latency tradeoffs for source B."
                         score = 0.0f } ] }
 
@@ -3954,10 +4126,12 @@ let ``rank returns representative content for broad selected-document summaries`
                 chunks =
                     [ { source = sourceA
                         index = 1
+                        sectionPath = []
                         text = "Quantum scheduling methods are introduced here."
                         score = 0.0f }
                       { source = sourceB
                         index = 1
+                        sectionPath = []
                         text = "Energy market simulations are introduced here."
                         score = 0.0f } ] }
 
@@ -4368,6 +4542,7 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
             oldTurn
             { source = source
               index = 7
+              sectionPath = []
               text = "Old source evidence says tenant claims must be filed within thirty days."
               score = 1.0f }
 

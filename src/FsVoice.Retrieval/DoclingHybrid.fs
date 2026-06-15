@@ -9,6 +9,7 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Text.Json.Serialization
+open System.Text.RegularExpressions
 open System.Threading
 open FSharp.Control
 open FSharp.SystemTextJson
@@ -1643,6 +1644,250 @@ Rules:
         =
         let documentName = Path.GetFileNameWithoutExtension path
 
+        let numberedHeadingPattern =
+            Regex(@"^\s*(\d{1,2}(?:\.\d+)*)\s+(.{2,100})\s*$", RegexOptions.Compiled)
+
+        let appendixHeadingPattern =
+            Regex(@"^\s*([A-Z](?:\.\d+)+)\s+(.{2,100})\s*$", RegexOptions.Compiled)
+
+        let dotLeaderPattern = Regex(@"(?:\.\s*){4,}", RegexOptions.Compiled)
+
+        let decimalMetricPattern = Regex(@"\b\d+\.\d+\b", RegexOptions.Compiled)
+
+        let knownStandaloneHeadingNames =
+            [ "abstract"
+              "acknowledgements"
+              "acknowledgments"
+              "ccs concepts"
+              "conclusion"
+              "conclusion and implications"
+              "conclusions"
+              "discussion"
+              "experimental setup"
+              "genai usage disclosure"
+              "introduction"
+              "methodology"
+              "references"
+              "related work"
+              "results" ]
+            |> Set.ofList
+
+        let nativeHeadingTerms =
+            [ "ablation"
+              "abstract"
+              "acknowledgements"
+              "acknowledgments"
+              "analysis"
+              "appendix"
+              "background"
+              "baseline"
+              "baselines"
+              "conclusion"
+              "conclusions"
+              "construction"
+              "dataset"
+              "discussion"
+              "evaluation"
+              "evolution"
+              "experiment"
+              "experimental"
+              "experiments"
+              "generation"
+              "implementation"
+              "introduction"
+              "limitation"
+              "limitations"
+              "method"
+              "methodology"
+              "metric"
+              "overview"
+              "references"
+              "related"
+              "results"
+              "scaling"
+              "setup"
+              "template"
+              "work" ]
+            |> Set.ofList
+
+        let normalizeLineText (cells: DoclingOcrCell list) =
+            cells
+            |> List.sortBy _.bbox.l
+            |> List.map _.text
+            |> String.concat " "
+            |> Text.normalizeWhitespace
+
+        let toTopLeftCell (pageHeight: float) (cell: DoclingOcrCell) : DoclingOcrCell =
+            { cell with
+                text = Text.normalizeWhitespace cell.text
+                bbox = DoclingGeometry.toTopLeft pageHeight cell.bbox }
+
+        let cellHeight (cell: DoclingOcrCell) =
+            max 1.0 (DoclingGeometry.height cell.bbox)
+
+        let sameLine (line: DoclingOcrCell list) (cell: DoclingOcrCell) =
+            let lineTop = line |> List.averageBy (fun item -> item.bbox.t)
+            let lineHeight = line |> List.averageBy cellHeight
+            abs (cell.bbox.t - lineTop) <= max 3.0 (lineHeight * 0.6)
+
+        let splitWideLineGaps (line: DoclingOcrCell list) : DoclingOcrCell list list =
+            let sorted = line |> List.sortBy _.bbox.l
+            let lineHeight = sorted |> List.averageBy cellHeight
+            let gapThreshold = max 36.0 (lineHeight * 4.0)
+
+            let rec loop
+                (current: DoclingOcrCell list)
+                (groups: DoclingOcrCell list list)
+                (remaining: DoclingOcrCell list)
+                =
+                match current, remaining with
+                | [], [] -> groups
+                | _ :: _, [] -> (List.rev current) :: groups
+                | [], cell :: rest -> loop [ cell ] groups rest
+                | previous :: _, cell :: rest when cell.bbox.l - previous.bbox.r > gapThreshold ->
+                    loop [ cell ] ((List.rev current) :: groups) rest
+                | _, cell :: rest -> loop (cell :: current) groups rest
+
+            loop [] [] sorted |> List.rev
+
+        let groupCellsIntoLines (pageHeight: float) (cells: DoclingOcrCell list) : DoclingOcrCell list list =
+            let rec addCell (cell: DoclingOcrCell) (lines: DoclingOcrCell list list) =
+                match lines with
+                | [] -> [ [ cell ] ]
+                | line :: rest when sameLine line cell -> (cell :: line) :: rest
+                | line :: rest -> line :: addCell cell rest
+
+            cells
+            |> List.choose (fun cell ->
+                let cell = toTopLeftCell pageHeight cell
+
+                if String.IsNullOrWhiteSpace cell.text then
+                    None
+                else
+                    Some cell)
+            |> List.sortBy (fun cell -> cell.bbox.t, cell.bbox.l)
+            |> List.fold (fun lines cell -> addCell cell lines) []
+            |> List.map (List.sortBy _.bbox.l)
+            |> List.collect splitWideLineGaps
+            |> List.filter (fun line -> not (String.IsNullOrWhiteSpace(normalizeLineText line)))
+
+        let lineBox (cells: DoclingOcrCell list) : DoclingBoundingBox =
+            let first = cells |> List.head
+
+            cells
+            |> List.tail
+            |> List.fold
+                (fun bbox (cell: DoclingOcrCell) ->
+                    { bbox with
+                        l = min bbox.l cell.bbox.l
+                        t = min bbox.t cell.bbox.t
+                        r = max bbox.r cell.bbox.r
+                        b = max bbox.b cell.bbox.b })
+                first.bbox
+
+        let normalizedHeadingName (text: string) =
+            FsColbert.DocumentSections.normalizedName text
+
+        let hasNativeHeadingTerm (terms: string list) =
+            terms |> List.exists nativeHeadingTerms.Contains
+
+        let acronymLikeHeading (heading: string) =
+            let letters = heading |> Seq.filter Char.IsLetter |> Seq.toArray
+
+            if letters.Length = 0 then
+                false
+            else
+                let upper = letters |> Array.filter Char.IsUpper |> Array.length
+                float upper / float letters.Length >= 0.8
+
+        let firstNumberWithinReasonableRange (numbering: string) =
+            let firstPart =
+                numbering.Split('.', StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
+
+            match firstPart |> Option.map Int32.TryParse with
+            | Some(true, value) -> value >= 1 && value <= 20
+            | _ -> false
+
+        let validNumberedHeading (numbering: string) (heading: string) =
+            let heading = Text.normalizeWhitespace heading
+            let terms = Text.terms heading
+            let digitCount = heading |> Seq.filter Char.IsDigit |> Seq.length
+            let digitRatio = float digitCount / float (max 1 heading.Length)
+            let hasHeadingTerm = hasNativeHeadingTerm terms
+
+            not (String.IsNullOrWhiteSpace heading)
+            && firstNumberWithinReasonableRange numbering
+            && heading.Length >= 3
+            && heading.Length <= 80
+            && terms.Length >= 1
+            && terms.Length <= 8
+            && digitRatio <= 0.1
+            && not (dotLeaderPattern.IsMatch heading)
+            && not (decimalMetricPattern.IsMatch heading)
+            && (not (acronymLikeHeading heading) || hasHeadingTerm)
+
+        let validAppendixHeading (heading: string) =
+            let heading = Text.normalizeWhitespace heading
+            let terms = Text.terms heading
+            let digitCount = heading |> Seq.filter Char.IsDigit |> Seq.length
+            let digitRatio = float digitCount / float (max 1 heading.Length)
+            let hasHeadingTerm = hasNativeHeadingTerm terms
+
+            not (String.IsNullOrWhiteSpace heading)
+            && heading.Length >= 3
+            && heading.Length <= 80
+            && terms.Length >= 1
+            && terms.Length <= 8
+            && digitRatio <= 0.1
+            && not (dotLeaderPattern.IsMatch heading)
+            && not (decimalMetricPattern.IsMatch heading)
+            && (not (acronymLikeHeading heading) || hasHeadingTerm)
+
+        let privateLineHeading (text: string) =
+            let trimmed = Text.normalizeWhitespace text
+            let normalized = normalizedHeadingName trimmed
+            let terms = Text.terms trimmed
+            let digitCount = trimmed |> Seq.filter Char.IsDigit |> Seq.length
+            let digitRatio = float digitCount / float (max 1 trimmed.Length)
+
+            let numberedMatch = numberedHeadingPattern.Match trimmed
+            let appendixMatch = appendixHeadingPattern.Match trimmed
+
+            trimmed.Length >= 4
+            && trimmed.Length <= 120
+            && terms.Length <= 10
+            && digitRatio <= 0.35
+            && not (dotLeaderPattern.IsMatch trimmed)
+            && (if numberedMatch.Success then
+                    validNumberedHeading numberedMatch.Groups[1].Value numberedMatch.Groups[2].Value
+                elif appendixMatch.Success then
+                    validAppendixHeading appendixMatch.Groups[2].Value
+                else
+                    knownStandaloneHeadingNames.Contains normalized)
+
+        let nativeTitleCandidate (text: string) =
+            let trimmed = Text.normalizeWhitespace text
+
+            let terms = Text.terms trimmed
+
+            trimmed.Length >= 24
+            && trimmed.Length <= 180
+            && terms.Length >= 4
+            && terms.Length <= 24
+            && not (trimmed.StartsWith("arXiv:", StringComparison.OrdinalIgnoreCase))
+            && not (trimmed.Contains("@", StringComparison.Ordinal))
+            && not (trimmed.EndsWith(".", StringComparison.Ordinal))
+            && (trimmed.Contains(":", StringComparison.Ordinal)
+                || trimmed.Contains(" - ", StringComparison.Ordinal))
+
+        let lineLabel (titleAssigned: bool) (pageNo: int) (firstPage: int) (text: string) =
+            if not titleAssigned && pageNo = firstPage && nativeTitleCandidate text then
+                DoclingLabel.Title, true
+            elif privateLineHeading text then
+                DoclingLabel.SectionHeader, titleAssigned
+            else
+                DoclingLabel.Text, titleAssigned
+
         let pages =
             pageInputs
             |> List.map (fun page ->
@@ -1653,40 +1898,45 @@ Rules:
                       height = float page.image.height } })
             |> Map.ofList
 
-        let textItems =
+        let firstPage =
             pageInputs
-            |> List.mapi (fun index page ->
-                let text =
-                    page.ocrCells
-                    |> List.map _.text
-                    |> String.concat "\n"
-                    |> Text.normalizeWhitespace
+            |> List.map _.pageNo
+            |> List.sort
+            |> List.tryHead
+            |> Option.defaultValue 1
 
-                match Text.notEmpty text with
-                | None -> None
-                | Some text ->
-                    let selfRef = $"#/texts/{index}"
+        let textItems =
+            let mutable titleAssigned = false
+            let mutable textIndex = 0
 
-                    Some
-                        { selfRef = selfRef
-                          parent = "#/body"
-                          label = DoclingLabel.Text
-                          text = text
-                          orig = text
-                          contentLayer = DoclingContentLayer.Body
-                          prov =
-                            [ { pageNo = page.pageNo
-                                bbox =
-                                  { l = 0.0
-                                    t = 0.0
-                                    r = float page.image.width
-                                    b = float page.image.height
-                                    coordOrigin = DoclingCoordinateOrigin.TopLeft }
-                                charSpan = None } ]
-                          keywords = []
-                          sourceId = None
-                          sourceDisplayName = None })
-            |> List.choose id
+            [ for page in pageInputs |> List.sortBy _.pageNo do
+                  let pageHeight = float page.image.height
+
+                  for line in groupCellsIntoLines pageHeight page.ocrCells do
+                      let text = normalizeLineText line
+
+                      match Text.notEmpty text with
+                      | None -> ()
+                      | Some text ->
+                          let label, assigned = lineLabel titleAssigned page.pageNo firstPage text
+                          titleAssigned <- assigned
+
+                          let selfRef = $"#/texts/{textIndex}"
+                          textIndex <- textIndex + 1
+
+                          { selfRef = selfRef
+                            parent = "#/body"
+                            label = label
+                            text = text
+                            orig = text
+                            contentLayer = DoclingContentLayer.Body
+                            prov =
+                              [ { pageNo = page.pageNo
+                                  bbox = lineBox line
+                                  charSpan = None } ]
+                            keywords = []
+                            sourceId = None
+                            sourceDisplayName = None } ]
 
         if List.isEmpty textItems then
             Error $"Document structure native-text conversion found no readable text in {Path.GetFileName path}."

@@ -799,6 +799,7 @@ Index-folder options:
                 |> List.map (fun passage ->
                     { source = source
                       index = passage.reference.index
+                      sectionPath = passage.reference.sectionPath
                       text = passage.reference.text
                       score = 0.0f })
 
@@ -1396,6 +1397,7 @@ Answers:
                                 |> List.map (fun hit ->
                                     { source = source
                                       index = hit.reference.index
+                                      sectionPath = hit.reference.sectionPath
                                       text = hit.reference.text
                                       score = hit.score })
                         })

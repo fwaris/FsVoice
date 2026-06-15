@@ -90,8 +90,6 @@ module KnowledgeSources =
     let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif useHybridPdfParsing then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 

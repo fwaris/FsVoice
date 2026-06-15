@@ -34,6 +34,7 @@ module KnowledgeSources =
 
     type IndexPreviewRecord =
         { index: int
+          sectionPath: string list
           text: string
           keywords: string list
           terms: string list
@@ -110,7 +111,7 @@ module KnowledgeSources =
             | PdfParsingMode.HybridWithoutLayout -> "hybrid-no-layout"
 
         [<Literal>]
-        let parserQualityVersion = "layout-sparse-fallback-v1"
+        let parserQualityVersion = "layout-sparse-native-headings-v2"
 
         let indexFingerprint mode =
             [ $"pdfParsingMode={fingerprint mode}"
@@ -300,6 +301,7 @@ module KnowledgeSources =
                                    sourceDisplayName = passageSource.displayName
                                    sourceLocation = passageSource.location
                                    index = index
+                                   sectionPath = []
                                    text = Text.normalizeWhitespace text
                                    keywords = item.keywords }
                                 : FsColbert.PassageRef))
@@ -410,6 +412,7 @@ module KnowledgeSources =
                         chunks.Add(
                             { source = source
                               index = passage.index
+                              sectionPath = passage.sectionPath
                               text = passage.text
                               score = 0.0f }
                         )
@@ -435,6 +438,7 @@ module KnowledgeSources =
     let private hitToChunk sources (hit: FsColbert.SearchHit) =
         { source = sourceFromLocation sources hit.reference.sourceLocation
           index = hit.reference.index
+          sectionPath = hit.reference.sectionPath
           text = hit.reference.text
           score = hit.score }
 
@@ -443,6 +447,7 @@ module KnowledgeSources =
         |> List.map (fun passage ->
             { source = sourceFromLocation sources passage.reference.sourceLocation
               index = passage.reference.index
+              sectionPath = passage.reference.sectionPath
               text = passage.reference.text
               score = 0.0f })
 
@@ -454,7 +459,10 @@ module KnowledgeSources =
         else
             chunks
             |> List.choose (fun (chunk: SourceChunk) ->
-                let haystack = chunk.text.ToLowerInvariant()
+                let haystack =
+                    (chunk.sectionPath @ [ chunk.text ])
+                    |> String.concat "\n"
+                    |> fun text -> text.ToLowerInvariant()
 
                 let score =
                     queryTerms |> Seq.sumBy (fun term -> if haystack.Contains term then 1 else 0)
@@ -615,21 +623,52 @@ module KnowledgeSources =
     let private leadingTerms (text: string) =
         text |> Text.normalizeWhitespace |> Text.terms |> List.truncate 8
 
-    let private sectionAnchorBoost requested text =
-        match FsColbert.DocumentSections.tryGetHeading text with
-        | Some heading when FsColbert.DocumentSections.matches requested heading -> 1.0f
-        | _ ->
-            let requestedTerms = Text.terms requested
+    let private sectionPathHeadings sectionPath =
+        let path =
+            sectionPath
+            |> List.map Text.normalizeWhitespace
+            |> List.filter (String.IsNullOrWhiteSpace >> not)
 
-            let candidateTerms =
-                match leadingTerms text with
-                | "section" :: rest -> rest
-                | terms -> terms
+        [ yield! path
 
-            if startsWithTerms requestedTerms candidateTerms then
-                0.85f
+          if path.Length > 1 then
+              yield String.concat " > " path ]
+
+    let private sectionPathBoost requested sectionPath =
+        sectionPathHeadings sectionPath
+        |> List.tryPick (fun heading ->
+            if FsColbert.DocumentSections.matches requested heading then
+                Some 1.0f
             else
-                0.0f
+                let requestedTerms = Text.terms requested
+                let candidateTerms = Text.terms heading
+
+                if startsWithTerms requestedTerms candidateTerms then
+                    Some 0.85f
+                else
+                    None)
+        |> Option.defaultValue 0.0f
+
+    let private sectionAnchorBoost requested sectionPath text =
+        let pathBoost = sectionPathBoost requested sectionPath
+
+        if pathBoost > 0.0f then
+            pathBoost
+        else
+            match FsColbert.DocumentSections.tryGetHeading text with
+            | Some heading when FsColbert.DocumentSections.matches requested heading -> 1.0f
+            | _ ->
+                let requestedTerms = Text.terms requested
+
+                let candidateTerms =
+                    match leadingTerms text with
+                    | "section" :: rest -> rest
+                    | terms -> terms
+
+                if startsWithTerms requestedTerms candidateTerms then
+                    0.85f
+                else
+                    0.0f
 
     let private applySectionBoost sectionName (chunks: SourceChunk list) =
         match sectionName with
@@ -637,7 +676,7 @@ module KnowledgeSources =
         | Some requested ->
             chunks
             |> List.map (fun chunk ->
-                let boost = sectionAnchorBoost requested chunk.text
+                let boost = sectionAnchorBoost requested chunk.sectionPath chunk.text
 
                 if boost > 0.0f then
                     { chunk with
@@ -649,12 +688,16 @@ module KnowledgeSources =
     let private sectionHeadings (retrieval: RetrievalIndex) =
         seq {
             for chunk in retrieval.chunks do
+                yield! sectionPathHeadings chunk.sectionPath
+
                 match FsColbert.DocumentSections.tryGetHeading chunk.text with
                 | Some heading -> heading
                 | None -> ()
 
             for _, index in retrieval.colbertIndices do
                 for passage in index.passages do
+                    yield! sectionPathHeadings passage.reference.sectionPath
+
                     match FsColbert.DocumentSections.tryGetHeading passage.reference.text with
                     | Some heading -> heading
                     | None -> ()
@@ -2076,6 +2119,7 @@ Passages:
 
     let private toIndexPreviewRecord (passage: FsColbert.IndexedPassage) =
         { index = passage.reference.index
+          sectionPath = passage.reference.sectionPath
           text = passage.reference.text
           keywords = passage.reference.keywords |> Option.ofObj |> Option.defaultValue []
           terms = passage.terms |> Set.toList |> List.sort
@@ -2411,7 +2455,14 @@ Passages:
             chunks
             |> List.truncate (max 1 maxContextChunks)
             |> List.mapi (fun index (chunk: SourceChunk) ->
-                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{chunk.text}")
+                let section =
+                    match chunk.sectionPath with
+                    | [] -> ""
+                    | path ->
+                        let sectionPath = String.concat " > " path
+                        $"Section: {sectionPath}\n"
+
+                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{section}{chunk.text}")
             |> String.concat "\n\n"
 
     let renderContext chunks =

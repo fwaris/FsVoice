@@ -43,6 +43,8 @@ module IndexPreviewView =
         Label(text).font(size = 12.).textColor(Theme.mutedTextColor appTheme).lineBreakMode (LineBreakMode.WordWrap)
 
     let private recordView appTheme (record: KnowledgeSources.IndexPreviewRecord) =
+        let sectionPathText = String.concat " > " record.sectionPath
+
         Border(
             (VStack(spacing = 6.) {
                 Label($"Chunk {record.index}")
@@ -51,6 +53,9 @@ module IndexPreviewView =
                     .lineBreakMode (LineBreakMode.TailTruncation)
 
                 Label(truncateText 900 record.text).font(size = 12.).lineBreakMode (LineBreakMode.WordWrap)
+
+                if not (List.isEmpty record.sectionPath) then
+                    mutedLabel appTheme $"Section: {sectionPathText}"
 
                 mutedLabel appTheme $"Keywords: {listText record.keywords}"
                 mutedLabel appTheme $"Terms: {listText record.terms}"
