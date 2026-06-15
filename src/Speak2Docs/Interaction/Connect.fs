@@ -4,6 +4,7 @@ open System
 open System.Text.Json
 open System.Threading
 open System.Threading.Channels
+open System.Threading.Tasks
 open FSharp.Control
 open FsVoice.Platform
 open Speak2Docs.WorkFlow
@@ -13,6 +14,14 @@ open RTOpenAI.WebRTC
 module Connect =
     let private log (mailbox: Channel<Msg>) text =
         mailbox.Writer.TryWrite(Log_Append text) |> ignore
+
+    // The native WebRTC path can appear connected even when SDP answer creation failed before any server events arrive.
+    let private realtimeServerEventTimeout = TimeSpan.FromSeconds 8.0
+
+    let private realtimeNoServerEventsError =
+        [ "possible OpenAI `insufficient_quota` while creating the realtime SDP answer; "
+          "no realtime server events arrived after connection setup. Check OpenAI billing/quota and realtime model access." ]
+        |> String.concat ""
 
     let private realtimeState (state: RTOpenAI.WebRTC.State) =
         if state.IsConnected then RealtimeConnected
@@ -85,6 +94,7 @@ module Connect =
         (mailbox: Channel<Msg>)
         (connection: Connection)
         (serverEvents: Channel<JsonElement>)
+        (firstServerEvent: TaskCompletionSource<unit>)
         startupMicrophoneGate
         token
         =
@@ -95,6 +105,8 @@ module Connect =
                 do!
                     connection.WebRtcClient.OutputChannel.Reader.ReadAllAsync(token)
                     |> AsyncSeq.iterAsync (fun document ->
+                        firstServerEvent.TrySetResult(()) |> ignore
+
                         if
                             startupMicrophoneGate
                             && not startupMicrophoneGateReleased
@@ -114,6 +126,30 @@ module Connect =
         }
         |> fun work -> Async.Start(work, token)
 
+    let private startRealtimeServerEventWatchdog
+        (mailbox: Channel<Msg>)
+        connectionId
+        (firstServerEvent: Task)
+        (token: CancellationToken)
+        =
+        async {
+            try
+                let delay = Task.Delay(realtimeServerEventTimeout, token)
+                let! completed = Task.WhenAny(firstServerEvent, delay) |> Async.AwaitTask
+
+                if
+                    obj.ReferenceEquals(completed, delay)
+                    && not firstServerEvent.IsCompleted
+                    && not token.IsCancellationRequested
+                then
+                    mailbox.Writer.TryWrite(RealtimeConnectFailed(connectionId, realtimeNoServerEventsError))
+                    |> ignore
+            with
+            | :? OperationCanceledException -> ()
+            | ex -> log mailbox $"Realtime connection watchdog failed: {ex.Message}"
+        }
+        |> fun work -> Async.Start(work, token)
+
     let private connectRealtime
         (mailbox: Channel<Msg>)
         (session: IVoiceSession<ToHost, FromHost>)
@@ -121,6 +157,7 @@ module Connect =
         (apiKey: string)
         (connectionId: string)
         (connection: Connection)
+        (firstServerEvent: Task)
         (realtimeSession: RTOpenAI.Events.Session)
         =
         task {
@@ -133,6 +170,7 @@ module Connect =
                 token.ThrowIfCancellationRequested()
                 do! (Connection.connect ephemeralKey connection).WaitAsync(token)
                 token.ThrowIfCancellationRequested()
+                startRealtimeServerEventWatchdog mailbox connectionId firstServerEvent token
             with ex ->
                 if token.IsCancellationRequested then
                     log mailbox $"Realtime connect canceled for connection {connectionId}."
@@ -151,6 +189,7 @@ module Connect =
         apiKey
         connectionId
         (connection: Connection)
+        (firstServerEvent: Task)
         =
         async {
             let mutable realtimeConnectionRequested = false
@@ -165,7 +204,7 @@ module Connect =
                                 log mailbox "Duplicate realtime connection request ignored."
                             else
                                 realtimeConnectionRequested <- true
-                                connectRealtime mailbox session token apiKey connectionId connection realtimeSession
+                                connectRealtime mailbox session token apiKey connectionId connection firstServerEvent realtimeSession
                         | TranscriptFinalized _ -> ()
                         | OracleResponseReady(_, Some candidate) ->
                             log mailbox $"Oracle final response: {Text.normalizeWhitespace candidate.answer}"
@@ -210,6 +249,7 @@ module Connect =
                             let cancellation = new CancellationTokenSource()
                             let serverEvents = Channel.CreateUnbounded<JsonElement>()
                             let clientEvents = Channel.CreateUnbounded<JsonElement>()
+                            let firstServerEvent = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
                             let voiceConnection =
                                 { VoiceConnection.receiver = serverEvents.Reader
@@ -238,8 +278,22 @@ module Connect =
                                     Disposables = stateSubscription :: conn.Disposables }
 
                             startClientPump parms.mailbox conn clientEvents cancellation.Token
-                            startServerPump parms.mailbox conn serverEvents startupMicrophoneGate cancellation.Token
-                            startHostPump parms.mailbox session cancellation.Token apiKey parms.connectionId conn
+                            startServerPump
+                                parms.mailbox
+                                conn
+                                serverEvents
+                                firstServerEvent
+                                startupMicrophoneGate
+                                cancellation.Token
+
+                            startHostPump
+                                parms.mailbox
+                                session
+                                cancellation.Token
+                                apiKey
+                                parms.connectionId
+                                conn
+                                firstServerEvent.Task
 
                             do! session.StartAsync cancellation.Token |> Async.AwaitTask
 
