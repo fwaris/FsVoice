@@ -323,6 +323,8 @@ module BlackboardSemantic =
           sectionPath = []
           contentRole = FsColbert.PassageContentRole.Unknown
           pageNumbers = []
+          layoutLabels = []
+          captions = []
           text = record.text
           keywords = [] }
 

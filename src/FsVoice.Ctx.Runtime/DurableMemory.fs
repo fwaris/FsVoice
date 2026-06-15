@@ -435,6 +435,8 @@ module DurableMemory =
                                   sectionPath = []
                                   contentRole = FsColbert.PassageContentRole.Unknown
                                   pageNumbers = []
+                                  layoutLabels = []
+                                  captions = []
                                   text = record.retrieval.indexText
                                   keywords = [] }
 

@@ -102,7 +102,7 @@ Index-folder options:
   --keyword-model value  Keyword enrichment model. Defaults to gpt-5-mini.
   --describe-visuals    Generate compact descriptions for detected PDF figures/charts/images.
   --visual-model value  Visual description model. Defaults to gpt-5-mini.
-  --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to heron.
+  --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to pp-doclayout-m.
   --layout-plugin path   Trusted .NET assembly containing a document structure layout provider.
   --layout-plugin-type value  Full provider type name in --layout-plugin.
 """
@@ -298,7 +298,7 @@ Index-folder options:
                 with ex ->
                     Error $"Unable to load layout plugin '{pluginPath}': {ex.Message}"
         | _ ->
-            let modelId = optionValue "layout-model" "heron" parsed
+            let modelId = optionValue "layout-model" "pp-doclayout-m" parsed
 
             match DoclingHybrid.tryBuiltInLayoutProvider modelId with
             | Some provider -> Ok provider
@@ -812,6 +812,8 @@ Index-folder options:
                       sectionPath = passage.reference.sectionPath
                       contentRole = sourceContentRole passage.reference.contentRole
                       pageNumbers = passage.reference.pageNumbers
+                      layoutLabels = passage.reference.layoutLabels
+                      captions = passage.reference.captions
                       text = passage.reference.text
                       score = 0.0f })
 
@@ -1412,6 +1414,8 @@ Answers:
                                       sectionPath = hit.reference.sectionPath
                                       contentRole = sourceContentRole hit.reference.contentRole
                                       pageNumbers = hit.reference.pageNumbers
+                                      layoutLabels = hit.reference.layoutLabels
+                                      captions = hit.reference.captions
                                       text = hit.reference.text
                                       score = hit.score })
                         })

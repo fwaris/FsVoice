@@ -48,6 +48,8 @@ type SourceChunk =
       sectionPath: string list
       contentRole: SourceContentRole
       pageNumbers: int list
+      layoutLabels: string list
+      captions: string list
       text: string
       score: float32 }
 

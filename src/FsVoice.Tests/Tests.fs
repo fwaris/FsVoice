@@ -224,6 +224,8 @@ type FakeContextProvider(source: KnowledgeSource) =
                 sectionPath = []
                 contentRole = SourceContentRole.Unknown
                 pageNumbers = []
+                layoutLabels = []
+                captions = []
                 text = $"Fake context for {request.query}."
                 score = 1.0f } ]
             |> Task.FromResult
@@ -529,6 +531,8 @@ let private keywordPassage (source: KnowledgeSource) index text : FsColbert.Pass
       sectionPath = []
       contentRole = FsColbert.PassageContentRole.Unknown
       pageNumbers = []
+      layoutLabels = []
+      captions = []
       text = text
       keywords = [] }
 
@@ -756,6 +760,8 @@ let private fakeIndexedPassage (source: KnowledgeSource) index text keywords : F
           sectionPath = []
           contentRole = FsColbert.PassageContentRole.Unknown
           pageNumbers = []
+          layoutLabels = []
+          captions = []
           text = text
           keywords = keywords }
 
@@ -2187,7 +2193,7 @@ let ``pdf parser index fingerprint includes layout quality revision`` () =
         KnowledgeSources.PdfParsingModes.indexFingerprint KnowledgeSources.PdfParsingMode.HybridWithoutLayout
 
     Assert.Contains("pdfParsingMode=hybrid", hybrid)
-    Assert.Contains("pdfParserQuality=contextual-retrieval-v1", hybrid)
+    Assert.Contains("pdfParserQuality=contextual-retrieval-v2-layout-overlay-v1", hybrid)
     Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
 
 [<Fact>]
@@ -2732,6 +2738,160 @@ let ``docling hybrid provider path falls back to native text when layout collaps
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling native text fallback keeps layout metadata overlay`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 500 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let repeatedText prefix =
+            [ 1..170 ] |> List.map (fun index -> $"{prefix}{index}") |> String.concat " "
+
+        let caption = "Figure 2: DialSim interaction workflow."
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 500.0 }
+                      cells =
+                        [ doclingNativeCell "Confidential" 20.0 480.0 140.0 490.0
+                          doclingNativeCell "4 Experiment" 20.0 430.0 160.0 445.0
+                          doclingNativeCell caption 20.0 390.0 260.0 405.0
+                          doclingNativeCell (repeatedText "experiment") 20.0 330.0 380.0 350.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters =
+                      [ doclingCluster 0 FsColbert.DoclingLabel.PageHeader 15.0 5.0 180.0 25.0
+                        doclingCluster 1 FsColbert.DoclingLabel.SectionHeader 15.0 50.0 180.0 75.0
+                        doclingCluster 2 FsColbert.DoclingLabel.Caption 15.0 90.0 300.0 115.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/layout-overlay.pdf" "Layout Overlay" "/tmp/layout-overlay.pdf"
+
+        let reports = ResizeArray<string>()
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                reports.Add
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/layout-overlay.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage =
+                passages |> List.find (fun passage -> passage.text.Contains("experiment1"))
+
+            Assert.Contains(reports, fun message -> message.Contains("Using document structure native-text conversion"))
+            Assert.Contains("section_header", passage.layoutLabels)
+            Assert.Contains("caption", passage.layoutLabels)
+            Assert.DoesNotContain("page_header", passage.layoutLabels)
+            Assert.Contains(caption, passage.captions)
+            Assert.Contains(caption, passage.keywords)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid drops neurips checklist section and resumes at later section`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 500 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 500.0 }
+                      cells =
+                        [ doclingNativeCell "A-Mem: Agentic Memory for LLM Agents" 20.0 460.0 380.0 480.0
+                          doclingNativeCell "1 Introduction" 20.0 420.0 180.0 440.0
+                          doclingNativeCell "The main paper content should remain indexed." 20.0 390.0 380.0 410.0
+                          doclingNativeCell "NeurIPS Paper Checklist" 20.0 330.0 260.0 350.0
+                          doclingNativeCell
+                              "Question: Do the main claims match the abstract? Answer: [Yes]."
+                              20.0
+                              300.0
+                              380.0
+                              320.0
+                          doclingNativeCell "2. Limitations" 20.0 270.0 180.0 290.0
+                          doclingNativeCell "Checklist limitation answer should be removed." 20.0 245.0 380.0 265.0
+                          doclingNativeCell "References" 20.0 230.0 180.0 250.0
+                          doclingNativeCell "Smith et al. Retrieval systems." 20.0 200.0 380.0 220.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters =
+                      [ doclingCluster 0 FsColbert.DoclingLabel.Title 15.0 15.0 390.0 45.0
+                        doclingCluster 1 FsColbert.DoclingLabel.SectionHeader 15.0 55.0 190.0 85.0
+                        doclingCluster 2 FsColbert.DoclingLabel.Text 15.0 85.0 390.0 115.0
+                        doclingCluster 3 FsColbert.DoclingLabel.SectionHeader 15.0 145.0 300.0 175.0
+                        doclingCluster 4 FsColbert.DoclingLabel.Text 15.0 175.0 390.0 205.0
+                        doclingCluster 5 FsColbert.DoclingLabel.SectionHeader 15.0 210.0 200.0 240.0
+                        doclingCluster 6 FsColbert.DoclingLabel.Text 15.0 235.0 390.0 260.0
+                        doclingCluster 7 FsColbert.DoclingLabel.SectionHeader 15.0 250.0 190.0 280.0
+                        doclingCluster 8 FsColbert.DoclingLabel.Text 15.0 280.0 390.0 310.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/checklist-drop.pdf" "Checklist Drop" "/tmp/checklist-drop.pdf"
+
+        let reports = ResizeArray<string>()
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                reports.Add
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/checklist-drop.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                None
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let allText = passages |> List.map _.text |> String.concat "\n"
+
+            Assert.Contains("main paper content", allText)
+            Assert.Contains("Smith et al.", allText)
+            Assert.DoesNotContain("Question: Do the main claims", allText)
+            Assert.DoesNotContain("Checklist limitation answer", allText)
+
+            Assert.DoesNotContain(
+                passages,
+                fun passage ->
+                    passage.sectionPath
+                    |> List.exists (fun section ->
+                        FsColbert.DocumentSections.normalizedName section = "neurips paper checklist")
+            )
+
+            Assert.Contains(reports, fun message -> message.Contains("Dropped"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling native text fallback preserves line heading section paths`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -2997,6 +3157,8 @@ let ``indexing cancellation is rethrown instead of wrapped as an error`` () =
               sectionPath = []
               contentRole = FsColbert.PassageContentRole.Unknown
               pageNumbers = []
+              layoutLabels = []
+              captions = []
               text = "cancel me"
               keywords = [] }
 
@@ -3037,6 +3199,8 @@ let ``docling hybrid fallback uses legacy pdf reader when provider path fails`` 
                       sectionPath = []
                       contentRole = FsColbert.PassageContentRole.Unknown
                       pageNumbers = []
+                      layoutLabels = []
+                      captions = []
                       text = "Legacy PdfPig text"
                       keywords = [] }
 
@@ -3075,6 +3239,8 @@ let ``docling hybrid fallback uses legacy pdf reader when hybrid returns one pas
               sectionPath = []
               contentRole = FsColbert.PassageContentRole.Unknown
               pageNumbers = []
+              layoutLabels = []
+              captions = []
               text = text
               keywords = [] }
 
@@ -3931,6 +4097,8 @@ let ``render context preserves full chunk text beyond old prefix limit`` () =
           sectionPath = []
           contentRole = SourceContentRole.Unknown
           pageNumbers = []
+          layoutLabels = []
+          captions = []
           text =
             $"The study uses the LoCoMo dataset for long-term dialogue evaluation. {filler} Besides, the study uses a new dataset named DialSim for multi-party dialogue evaluation."
           score = 1.0f }
@@ -3953,6 +4121,8 @@ let ``render context includes structured section path`` () =
           sectionPath = [ "4 Experiment"; "4.3 Empirical Results" ]
           contentRole = SourceContentRole.MainBody
           pageNumbers = [ 6 ]
+          layoutLabels = [ "caption" ]
+          captions = [ "Table 1: Dataset statistics for LoCoMo and DialSim." ]
           text = "DialSim appears in the empirical results discussion."
           score = 1.0f }
 
@@ -3961,6 +4131,7 @@ let ``render context includes structured section path`` () =
     Assert.Contains("Role: Main body", rendered)
     Assert.Contains("Section: 4 Experiment > 4.3 Empirical Results", rendered)
     Assert.Contains("Pages: 6", rendered)
+    Assert.Contains("Captions: Table 1: Dataset statistics for LoCoMo and DialSim.", rendered)
     Assert.Contains("DialSim appears", rendered)
 
 [<Fact>]
@@ -3981,6 +4152,8 @@ let ``render context still limits number of chunks without truncating kept chunk
             sectionPath = []
             contentRole = SourceContentRole.Unknown
             pageNumbers = []
+            layoutLabels = []
+            captions = []
             text = firstChunkText
             score = 1.0f }
           { source = source
@@ -3988,6 +4161,8 @@ let ``render context still limits number of chunks without truncating kept chunk
             sectionPath = []
             contentRole = SourceContentRole.Unknown
             pageNumbers = []
+            layoutLabels = []
+            captions = []
             text = "Second chunk should not be rendered."
             score = 0.5f } ]
 
@@ -4013,6 +4188,8 @@ let ``rank promotes structured section target over lexical distractors`` () =
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
@@ -4020,6 +4197,8 @@ let ``rank promotes structured section target over lexical distractors`` () =
                         sectionPath = [ "Paper"; "ABSTRACT" ]
                         contentRole = SourceContentRole.Abstract
                         pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
                         text = "This paper introduces a retrieval method."
                         score = 0.0f } ] }
 
@@ -4046,6 +4225,8 @@ let ``rank promotes inline section label over checklist mentions`` () =
                         sectionPath = []
                         contentRole = SourceContentRole.SubmissionChecklist
                         pageNumbers = [ 20 ]
+                        layoutLabels = []
+                        captions = []
                         text =
                           "The NeurIPS checklist asks whether claims made in the abstract and introduction reflect the paper. The paper abstract should summarize contributions."
                         score = 0.0f }
@@ -4054,6 +4235,8 @@ let ``rank promotes inline section label over checklist mentions`` () =
                         sectionPath = []
                         contentRole = SourceContentRole.Abstract
                         pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
                         text =
                           "Abstract While LLM agents can use external tools, they require adaptive memory systems to leverage historical experiences."
                         score = 0.0f } ] }
@@ -4081,6 +4264,8 @@ let ``rank promotes front matter over checklist for paper author questions`` () 
                         sectionPath = [ "A-Mem"; "NeurIPS Paper Checklist" ]
                         contentRole = SourceContentRole.SubmissionChecklist
                         pageNumbers = [ 24 ]
+                        layoutLabels = []
+                        captions = []
                         text =
                           "NeurIPS Paper Checklist. Guidelines: Authors should answer every question in the paper checklist."
                         score = 0.0f }
@@ -4089,7 +4274,47 @@ let ``rank promotes front matter over checklist for paper author questions`` () 
                         sectionPath = [ "A-Mem: Agentic Memory for LLM Agents" ]
                         contentRole = SourceContentRole.FrontMatter
                         pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
                         text = "A-Mem: Agentic Memory for LLM Agents. Authors: Wujiang Xu, Zujie Liang, Juntao Tan."
+                        score = 0.0f } ] }
+
+        let! chunks = KnowledgeSources.rank None false false true ignore "who are the authors of this paper" 1 retrieval
+
+        Assert.Equal(0, chunks.Head.index)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``rank promotes front matter over checklist-shaped main body for paper author questions`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/amem.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 95
+                        sectionPath = [ "A-Mem"; "B.4 Examples of Q/A with A-MEM" ]
+                        contentRole = SourceContentRole.MainBody
+                        pageNumbers = [ 23 ]
+                        layoutLabels = []
+                        captions = []
+                        text =
+                          "The answer NA means that the paper has no limitation. The authors are encouraged to create a separate Limitations section."
+                        score = 0.0f }
+                      { source = source
+                        index = 0
+                        sectionPath = [ "A-Mem: Agentic Memory for LLM Agents" ]
+                        contentRole = SourceContentRole.FrontMatter
+                        pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
+                        text = "A-Mem: Agentic Memory for LLM Agents. Anonymous Authors."
                         score = 0.0f } ] }
 
         let! chunks = KnowledgeSources.rank None false false true ignore "who are the authors of this paper" 1 retrieval
@@ -4115,6 +4340,8 @@ let ``rank still allows explicit checklist retrieval`` () =
                         sectionPath = [ "A-Mem: Agentic Memory for LLM Agents" ]
                         contentRole = SourceContentRole.FrontMatter
                         pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
                         text = "A-Mem: Agentic Memory for LLM Agents. Authors: Wujiang Xu, Zujie Liang, Juntao Tan."
                         score = 0.0f }
                       { source = source
@@ -4122,6 +4349,8 @@ let ``rank still allows explicit checklist retrieval`` () =
                         sectionPath = [ "A-Mem"; "NeurIPS Paper Checklist" ]
                         contentRole = SourceContentRole.SubmissionChecklist
                         pageNumbers = [ 24 ]
+                        layoutLabels = []
+                        captions = []
                         text = "NeurIPS Paper Checklist. Guidelines: Authors should answer every compliance question."
                         score = 0.0f } ] }
 
@@ -4157,6 +4386,8 @@ let ``rank corrects misspelled section target before searching`` () =
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
                         score = 0.0f }
                       { source = source
@@ -4164,6 +4395,8 @@ let ``rank corrects misspelled section target before searching`` () =
                         sectionPath = []
                         contentRole = SourceContentRole.Abstract
                         pageNumbers = [ 1 ]
+                        layoutLabels = []
+                        captions = []
                         text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
                         score = 0.0f } ] }
 
@@ -4195,6 +4428,8 @@ let ``rank keeps coverage from each selected source for multi-document questions
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Latency latency latency for source A."
                         score = 0.0f }
                       { source = sourceA
@@ -4202,6 +4437,8 @@ let ``rank keeps coverage from each selected source for multi-document questions
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Latency latency latency architecture in source A."
                         score = 0.0f }
                       { source = sourceB
@@ -4209,6 +4446,8 @@ let ``rank keeps coverage from each selected source for multi-document questions
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Latency tradeoffs for source B."
                         score = 0.0f } ] }
 
@@ -4245,6 +4484,8 @@ let ``rank returns representative content for broad selected-document summaries`
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Quantum scheduling methods are introduced here."
                         score = 0.0f }
                       { source = sourceB
@@ -4252,6 +4493,8 @@ let ``rank returns representative content for broad selected-document summaries`
                         sectionPath = []
                         contentRole = SourceContentRole.Unknown
                         pageNumbers = []
+                        layoutLabels = []
+                        captions = []
                         text = "Energy market simulations are introduced here."
                         score = 0.0f } ] }
 
@@ -4665,6 +4908,8 @@ let ``blackboard pruning selection summarizes eligible old records and drops tra
               sectionPath = []
               contentRole = SourceContentRole.Unknown
               pageNumbers = []
+              layoutLabels = []
+              captions = []
               text = "Old source evidence says tenant claims must be filed within thirty days."
               score = 1.0f }
 

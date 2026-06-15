@@ -22,7 +22,7 @@ module KnowledgeSources =
     let private DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS = 90000
 
     [<Literal>]
-    let private CONTEXTUAL_RETRIEVAL_VERSION = "contextual-retrieval-v1"
+    let private CONTEXTUAL_RETRIEVAL_VERSION = "contextual-retrieval-v2-layout-overlay-v1"
 
     type RetrievalIndex =
         { sources: KnowledgeSource list
@@ -40,6 +40,8 @@ module KnowledgeSources =
           sectionPath: string list
           contentRole: SourceContentRole
           pageNumbers: int list
+          layoutLabels: string list
+          captions: string list
           text: string
           keywords: string list
           terms: string list
@@ -116,7 +118,7 @@ module KnowledgeSources =
             | PdfParsingMode.HybridWithoutLayout -> "hybrid-no-layout"
 
         [<Literal>]
-        let parserQualityVersion = "contextual-retrieval-v1"
+        let parserQualityVersion = "contextual-retrieval-v2-layout-overlay-v1"
 
         let indexFingerprint mode =
             [ $"pdfParsingMode={fingerprint mode}"
@@ -309,6 +311,8 @@ module KnowledgeSources =
                                    sectionPath = []
                                    contentRole = FsColbert.PassageContentRole.Unknown
                                    pageNumbers = []
+                                   layoutLabels = []
+                                   captions = []
                                    text = Text.normalizeWhitespace text
                                    keywords = item.keywords }
                                 : FsColbert.PassageRef))
@@ -432,6 +436,8 @@ module KnowledgeSources =
                               sectionPath = passage.sectionPath
                               contentRole = sourceContentRole passage.contentRole
                               pageNumbers = passage.pageNumbers
+                              layoutLabels = passage.layoutLabels
+                              captions = passage.captions
                               text = passage.text
                               score = 0.0f }
                         )
@@ -460,6 +466,8 @@ module KnowledgeSources =
           sectionPath = hit.reference.sectionPath
           contentRole = sourceContentRole hit.reference.contentRole
           pageNumbers = hit.reference.pageNumbers
+          layoutLabels = hit.reference.layoutLabels
+          captions = hit.reference.captions
           text = hit.reference.text
           score = hit.score }
 
@@ -471,6 +479,8 @@ module KnowledgeSources =
               sectionPath = passage.reference.sectionPath
               contentRole = sourceContentRole passage.reference.contentRole
               pageNumbers = passage.reference.pageNumbers
+              layoutLabels = passage.reference.layoutLabels
+              captions = passage.reference.captions
               text = passage.reference.text
               score = 0.0f })
 
@@ -486,6 +496,8 @@ module KnowledgeSources =
                     (chunk.sectionPath
                      @ [ SourceContentRole.displayName chunk.contentRole
                          String.concat " " (chunk.pageNumbers |> List.map string)
+                         String.concat " " chunk.layoutLabels
+                         String.concat " " chunk.captions
                          chunk.text ])
                     |> String.concat "\n"
                     |> fun text -> text.ToLowerInvariant()
@@ -585,29 +597,75 @@ module KnowledgeSources =
 
         phrases |> List.exists (fun phrase -> lower.Contains(phrase))
 
+    let private wantsChecklistQuery query =
+        queryHasAnyTerm checklistTerms query
+        || queryHasAnyPhrase [ "paper checklist" ] query
+
+    let private wantsAuthorsQuery query =
+        queryHasAnyTerm authorTitleTerms query
+        || queryHasAnyPhrase [ "who wrote"; "paper title" ] query
+
+    let private wantsAbstractQuery query = queryHasAnyTerm abstractTerms query
+
+    let private looksLikeChecklistText (text: string) =
+        let lower = Text.normalizeWhitespace text |> fun value -> value.ToLowerInvariant()
+
+        [ "neurips paper checklist"
+          "paper checklist"
+          "question: do the main claims"
+          "answer: [na]"
+          "answer: [yes]"
+          "answer: [no]"
+          "the answer na means"
+          "the answer yes means"
+          "the answer no means"
+          "guidelines:"
+          "justification:"
+          "authors should"
+          "authors are encouraged"
+          "the authors are encouraged"
+          "do not remove the checklist"
+          "desk rejected"
+          "at submission time"
+          "genai usage disclosure" ]
+        |> List.exists (fun marker -> lower.Contains(marker))
+
+    let private looksLikeChecklistChunk (chunk: SourceChunk) =
+        chunk.contentRole = SourceContentRole.SubmissionChecklist
+        || looksLikeChecklistText chunk.text
+        || (chunk.sectionPath
+            |> List.exists (fun section ->
+                let normalized = Text.normalizeWhitespace section |> fun value -> value.ToLowerInvariant()
+                normalized = "neurips paper checklist" || normalized = "genai usage disclosure"))
+
+    let private roleAwareRawMaxResults query maxResults =
+        if wantsAuthorsQuery query || wantsAbstractQuery query || wantsChecklistQuery query then
+            max maxResults 64
+        else
+            maxResults
+
     let private applyRoleBoost query (chunks: SourceChunk list) =
-        let wantsChecklist =
-            queryHasAnyTerm checklistTerms query
-            || queryHasAnyPhrase [ "paper checklist" ] query
-
-        let wantsAuthors =
-            queryHasAnyTerm authorTitleTerms query
-            || queryHasAnyPhrase [ "who wrote"; "paper title" ] query
-
-        let wantsAbstract = queryHasAnyTerm abstractTerms query
+        let wantsChecklist = wantsChecklistQuery query
+        let wantsAuthors = wantsAuthorsQuery query
+        let wantsAbstract = wantsAbstractQuery query
 
         chunks
         |> List.map (fun chunk ->
             let boost =
-                match chunk.contentRole with
-                | SourceContentRole.SubmissionChecklist when wantsChecklist -> 1.25f
-                | SourceContentRole.SubmissionChecklist -> -2.0f
-                | SourceContentRole.FrontMatter when wantsAuthors -> 1.5f
-                | SourceContentRole.Abstract when wantsAbstract -> 1.5f
-                | SourceContentRole.References when queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query ->
-                    0.8f
-                | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query -> 0.8f
-                | _ -> 0.0f
+                if looksLikeChecklistChunk chunk then
+                    if wantsChecklist then
+                        1.25f
+                    else
+                        -2.0f
+                else
+                    match chunk.contentRole with
+                    | SourceContentRole.FrontMatter when wantsAuthors -> 1.5f
+                    | SourceContentRole.Abstract when wantsAbstract -> 1.5f
+                    | SourceContentRole.References when queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query ->
+                        0.8f
+                    | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query ->
+                        0.8f
+                    | _ -> 0.0f
 
             if boost = 0.0f then
                 chunk
@@ -1063,7 +1121,7 @@ Query: {query}
                 let lexicalMaxResults =
                     match queryType with
                     | QueryType.SectionRetrieval -> max maxResults 20
-                    | _ -> maxResults
+                    | _ -> roleAwareRawMaxResults query maxResults
 
                 retrieval.chunks
                 |> rankLexically lexicalQuery lexicalMaxResults
@@ -1079,7 +1137,7 @@ Query: {query}
                     let rawMaxResults =
                         match queryType with
                         | QueryType.SectionRetrieval -> max maxResults 20
-                        | _ -> maxResults
+                        | _ -> roleAwareRawMaxResults query maxResults
 
                     let options =
                         let tunedCandidateLimit = max FsColbert.SearchOptions.defaults.candidateLimit 256
@@ -2198,6 +2256,8 @@ Passages:
           sectionPath = passage.reference.sectionPath
           contentRole = sourceContentRole passage.reference.contentRole
           pageNumbers = passage.reference.pageNumbers
+          layoutLabels = passage.reference.layoutLabels
+          captions = passage.reference.captions
           text = passage.reference.text
           keywords = passage.reference.keywords |> Option.ofObj |> Option.defaultValue []
           terms = passage.terms |> Set.toList |> List.sort
@@ -2529,6 +2589,13 @@ Passages:
     let private renderPageNumbers pages =
         pages |> List.map string |> String.concat ", "
 
+    let private renderCaptions captions =
+        captions
+        |> List.choose Text.notEmpty
+        |> List.distinctBy _.ToLowerInvariant()
+        |> List.truncate 3
+        |> String.concat " | "
+
     let private renderChunkMetadata (chunk: SourceChunk) =
         [ match chunk.contentRole with
           | SourceContentRole.Unknown -> ()
@@ -2542,7 +2609,12 @@ Passages:
 
           match chunk.pageNumbers with
           | [] -> ()
-          | pages -> yield $"Pages: {renderPageNumbers pages}" ]
+          | pages -> yield $"Pages: {renderPageNumbers pages}"
+
+          let captions = renderCaptions chunk.captions
+
+          if not (String.IsNullOrWhiteSpace captions) then
+              yield $"Captions: {captions}" ]
         |> function
             | [] -> ""
             | lines -> String.concat "\n" lines + "\n"

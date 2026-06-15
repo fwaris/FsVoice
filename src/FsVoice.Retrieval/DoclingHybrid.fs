@@ -1667,6 +1667,7 @@ Rules:
               "genai usage disclosure"
               "introduction"
               "methodology"
+              "neurips paper checklist"
               "references"
               "related work"
               "results" ]
@@ -1980,6 +1981,216 @@ Rules:
 
         nativePassages @ visualPassages
 
+    let private distinctNonEmpty values =
+        values
+        |> List.choose (fun value ->
+            value
+            |> Text.normalizeWhitespace
+            |> Option.ofObj
+            |> Option.filter (String.IsNullOrWhiteSpace >> not))
+        |> List.distinctBy _.ToLowerInvariant()
+
+    let private isIgnoredLayoutLabel (label: string) =
+        match (defaultArg (Option.ofObj label) "").Trim().ToLowerInvariant() with
+        | ""
+        | "text"
+        | "paragraph"
+        | "page_header"
+        | "page_footer" -> true
+        | _ -> false
+
+    let private layoutKeywordTerms labels captions =
+        distinctNonEmpty
+            [ yield! labels
+              yield! (labels |> List.map (fun label -> label.Replace("_", " ")))
+              yield! captions ]
+
+    let private pagesOverlap left right =
+        match left, right with
+        | [], _
+        | _, [] -> false
+        | _ ->
+            let right = Set.ofList right
+            left |> List.exists right.Contains
+
+    let private normalizedSectionName value =
+        FsColbert.DocumentSections.normalizedName value
+
+    let private isNeuripsChecklistName value =
+        String.Equals(normalizedSectionName value, "neurips paper checklist", StringComparison.Ordinal)
+
+    let private sectionPathContainsChecklist sectionPath =
+        sectionPath |> List.exists isNeuripsChecklistName
+
+    let private firstNonEmptyLine text =
+        (defaultArg (Option.ofObj text) "")
+            .Replace("\r\n", "\n")
+            .Split('\n', StringSplitOptions.TrimEntries ||| StringSplitOptions.RemoveEmptyEntries)
+        |> Array.tryHead
+
+    let private textStartsChecklistHeader text =
+        firstNonEmptyLine text
+        |> Option.exists (fun line ->
+            isNeuripsChecklistName line
+            || line.Contains("NeurIPS Paper Checklist", StringComparison.OrdinalIgnoreCase))
+
+    let private passageHasChecklistHeader (passage: PassageRef) =
+        sectionPathContainsChecklist passage.sectionPath || textStartsChecklistHeader passage.text
+
+    let private normalizedLastSection sectionPath =
+        sectionPath |> List.tryLast |> Option.map normalizedSectionName |> Option.defaultValue ""
+
+    let private checklistInternalSectionNames =
+        [ "answer: [yes]"
+          "answer: [no]"
+          "answer: [na]"
+          "broader impacts"
+          "claims"
+          "code of ethics"
+          "crowdsourcing and research with human subjects"
+          "experimental result reproducibility"
+          "experimental setting/details"
+          "experiments compute resources"
+          "experiments statistical significance"
+          "guidelines"
+          "justification"
+          "limitations"
+          "licenses for existing assets"
+          "new assets"
+          "open access to data and code"
+          "safeguards"
+          "theory assumptions and proofs" ]
+        |> Set.ofList
+
+    let private clearResumeSectionNames =
+        [ "acknowledgements"
+          "acknowledgments"
+          "appendix"
+          "bibliography"
+          "genai usage disclosure"
+          "references"
+          "supplementary material" ]
+        |> Set.ofList
+
+    let private looksLikeChecklistInternalSection sectionPath =
+        let name = normalizedLastSection sectionPath
+
+        checklistInternalSectionNames.Contains name
+        || name.StartsWith("answer", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("question", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("guidelines", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("justification", StringComparison.OrdinalIgnoreCase)
+
+    let private isClearResumeSection sectionPath =
+        let name = normalizedLastSection sectionPath
+
+        clearResumeSectionNames.Contains name
+        || name.StartsWith("appendix", StringComparison.OrdinalIgnoreCase)
+
+    let private pickLayoutSectionPath (nativePassage: PassageRef) (layoutCandidates: PassageRef list) =
+        let allowChecklistPath =
+            passageHasChecklistHeader nativePassage
+            || sectionPathContainsChecklist nativePassage.sectionPath
+
+        layoutCandidates
+        |> List.choose (fun passage ->
+            match passage.sectionPath with
+            | [] -> None
+            | path when allowChecklistPath || not (sectionPathContainsChecklist path) -> Some path
+            | _ -> None)
+        |> List.sortByDescending List.length
+        |> List.tryHead
+
+    let private enrichNativePassagesWithLayout
+        (layoutPassages: PassageRef list)
+        (nativePassages: PassageRef list)
+        =
+        nativePassages
+        |> List.map (fun nativePassage ->
+            let layoutCandidates =
+                layoutPassages
+                |> List.filter (fun layoutPassage -> pagesOverlap nativePassage.pageNumbers layoutPassage.pageNumbers)
+
+            if List.isEmpty layoutCandidates then
+                nativePassage
+            else
+                let layoutLabels =
+                    layoutCandidates
+                    |> List.collect _.layoutLabels
+                    |> List.filter (isIgnoredLayoutLabel >> not)
+                    |> distinctNonEmpty
+
+                let captions =
+                    layoutCandidates |> List.collect _.captions |> distinctNonEmpty |> List.truncate 8
+
+                let sectionPath =
+                    match pickLayoutSectionPath nativePassage layoutCandidates with
+                    | Some layoutPath
+                        when List.isEmpty nativePassage.sectionPath
+                             || List.length layoutPath > List.length nativePassage.sectionPath ->
+                        layoutPath
+                    | Some layoutPath when passageHasChecklistHeader nativePassage -> layoutPath
+                    | _ -> nativePassage.sectionPath
+
+                let keywords =
+                    nativePassage.keywords
+                    @ layoutKeywordTerms layoutLabels captions
+                    |> distinctNonEmpty
+
+                { nativePassage with
+                    sectionPath = sectionPath
+                    contentRole = FsColbert.DocumentContentRoles.infer sectionPath nativePassage.text
+                    layoutLabels =
+                        nativePassage.layoutLabels
+                        @ layoutLabels
+                        |> distinctNonEmpty
+                    captions =
+                        nativePassage.captions
+                        @ captions
+                        |> distinctNonEmpty
+                        |> List.truncate 8
+                    keywords = keywords })
+
+    let private shouldResumeAfterChecklist markerSectionPath (passage: PassageRef) =
+        not (passageHasChecklistHeader passage)
+        && not (sectionPathContainsChecklist passage.sectionPath)
+        && not (looksLikeChecklistInternalSection passage.sectionPath)
+        && isClearResumeSection passage.sectionPath
+        && match markerSectionPath, passage.sectionPath with
+           | Some markerPath, path when not (List.isEmpty path) -> path <> markerPath
+           | None, path -> not (List.isEmpty path)
+           | _ -> false
+
+    let private dropNeuripsChecklistSection (passages: PassageRef list) =
+        let rec loop droppingMarkerPath kept remaining =
+            match remaining with
+            | [] -> List.rev kept
+            | passage :: rest ->
+                match droppingMarkerPath with
+                | None ->
+                    if passageHasChecklistHeader passage then
+                        loop (Some passage.sectionPath) kept rest
+                    else
+                        loop None (passage :: kept) rest
+                | Some markerPath ->
+                    if shouldResumeAfterChecklist (Some markerPath) passage then
+                        loop None (passage :: kept) rest
+                    else
+                        loop (Some markerPath) kept rest
+
+        loop None [] passages
+        |> List.mapi (fun index passage -> { passage with index = index })
+
+    let private dropChecklistAndReport report fileName label passages =
+        let kept = dropNeuripsChecklistSection passages
+        let dropped = passages.Length - kept.Length
+
+        if dropped > 0 then
+            report
+                $"Dropped {dropped} {label} passage(s) under NeurIPS Paper Checklist for {fileName}."
+
+        kept
+
     let private layoutFallbackReason (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
         let layoutChars = passageTextLength layoutPassages
         let nativeChars = passageTextLength nativePassages
@@ -2015,8 +2226,11 @@ Rules:
 
             match convertNativeTextOnly false report chunkOptions passageSource path pageInputs with
             | Ok nativePassages ->
+                let nativePassages =
+                    enrichNativePassagesWithLayout layoutPassages nativePassages
+
                 match layoutFallbackReason layoutPassages nativePassages with
-                | None -> Ok layoutPassages
+                | None -> Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
                 | Some reason ->
                     report $"{reason} for {fileName}; checking native-text conversion."
 
@@ -2027,18 +2241,20 @@ Rules:
                         report
                             $"Using document structure native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
-                        Ok(appendVisualDescriptionPassages layoutPassages nativePassages)
+                        appendVisualDescriptionPassages layoutPassages nativePassages
+                        |> dropChecklistAndReport report fileName "native-text"
+                        |> Ok
                     else
                         report
                             $"Keeping document structure layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
-                        Ok layoutPassages
+                        Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
             | Error nativeError ->
                 if layoutPassages.Length <= 1 then
                     report
                         $"Document structure native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
 
-                Ok layoutPassages
+                Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
 
     let readPdfPassagesWithProvidersAndCancellation
         options
