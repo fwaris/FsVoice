@@ -822,6 +822,56 @@ let ``picked source files reject unsupported extensions`` () =
     Assert.False(Speak2Docs.PickedSourceFiles.isIndexBundle "index.fsci")
 
 [<Fact>]
+let ``activity log classifies response identifiers as verbose`` () =
+    Assert.Equal(
+        Speak2Docs.ActivityLogVerbosity.Verbose,
+        Speak2Docs.ActivityLog.classify "Realtime response created: response_id=resp_abc123."
+    )
+
+    Assert.Equal(
+        Speak2Docs.ActivityLogVerbosity.Verbose,
+        Speak2Docs.ActivityLog.classify "Realtime response done: response_id=resp_abc123; audioStarted=True."
+    )
+
+[<Fact>]
+let ``activity log classifies server vad lifecycle messages as verbose`` () =
+    Assert.Equal(
+        Speak2Docs.ActivityLogVerbosity.Verbose,
+        Speak2Docs.ActivityLog.classify "Realtime startup Server VAD is non-interrupting for the protected greeting."
+    )
+
+    Assert.Equal(
+        Speak2Docs.ActivityLogVerbosity.Verbose,
+        Speak2Docs.ActivityLog.classify
+            "Startup greeting finished via output_audio_buffer.stopped; realtime Server VAD interruption requested."
+    )
+
+    Assert.Equal(Speak2Docs.ActivityLogVerbosity.Verbose, Speak2Docs.ActivityLog.classify "Realtime Server VAD active.")
+
+[<Fact>]
+let ``activity log keeps user visible failures informational`` () =
+    Assert.Equal(
+        Speak2Docs.ActivityLogVerbosity.Informational,
+        Speak2Docs.ActivityLog.classify "Realtime connection failed: server_vad unavailable."
+    )
+
+[<Fact>]
+let ``activity log bounded file text trims old lines`` () =
+    let existing =
+        [ 1..20 ]
+        |> List.map (sprintf "line-%02d")
+        |> String.concat "\n"
+        |> fun text -> text + "\n"
+
+    let appended = "new-line\n"
+    let result = Speak2Docs.ActivityLog.boundedFileText 60 30 existing appended
+
+    Assert.True(Encoding.UTF8.GetByteCount(result) <= 60)
+    Assert.EndsWith(appended, result)
+    Assert.DoesNotContain("line-01", result)
+    Assert.Contains("line-20", result)
+
+[<Fact>]
 let ``ready built-in documents can be selected`` () =
     let builtInDoc: Speak2Docs.PdfDocumentSource =
         { id = "prebuilt-example"

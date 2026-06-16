@@ -3,6 +3,7 @@ namespace Speak2Docs
 open System
 open System.Diagnostics
 open System.IO
+open System.Text
 open System.Threading
 open System.Threading.Channels
 open FSharp.Control
@@ -25,6 +26,8 @@ module Update =
     let private maxLogFontSize = 22.
     let private logFontStep = 1.
     let private notificationDurationMs = 3500
+    let private activityLogFileMaxBytes = 1024 * 1024
+    let private activityLogFileTrimBytes = 512 * 1024
 
     let private clampLogFontSize value =
         min maxLogFontSize (max minLogFontSize value)
@@ -39,7 +42,27 @@ module Update =
             Directory.CreateDirectory(folder) |> ignore
             let path = Path.Combine(folder, "activity-log.txt")
             let line = $"{DateTimeOffset.Now:O} {text}{Environment.NewLine}"
-            File.AppendAllText(path, line)
+            let lineBytes = Encoding.UTF8.GetByteCount line
+
+            let withinLimit =
+                if File.Exists path then
+                    FileInfo(path).Length + int64 lineBytes <= int64 activityLogFileMaxBytes
+                else
+                    lineBytes <= activityLogFileMaxBytes
+
+            if withinLimit then
+                File.AppendAllText(path, line, Encoding.UTF8)
+            else
+                let existing =
+                    if File.Exists path then
+                        File.ReadAllText(path, Encoding.UTF8)
+                    else
+                        ""
+
+                let bounded =
+                    ActivityLog.boundedFileText activityLogFileMaxBytes activityLogFileTrimBytes existing line
+
+                File.WriteAllText(path, bounded, Encoding.UTF8)
         with _ ->
             ()
 
