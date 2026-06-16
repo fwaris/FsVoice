@@ -18,7 +18,6 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.SystemTextJson" />
-    <PackageReference Include="FSharp.Control.Websockets.TPL" />
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
   </ItemGroup>

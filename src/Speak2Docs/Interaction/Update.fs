@@ -2,6 +2,7 @@ namespace Speak2Docs
 
 open System
 open System.Diagnostics
+open System.IO
 open System.Threading
 open System.Threading.Channels
 open FSharp.Control
@@ -27,6 +28,20 @@ module Update =
 
     let private clampLogFontSize value =
         min maxLogFontSize (max minLogFontSize value)
+
+    let private mirrorActivityLogToDiagnostics text =
+        Debug.WriteLine text
+        Console.WriteLine text
+
+    let private appendActivityLogToFile text =
+        try
+            let folder = Path.Combine(FileSystem.AppDataDirectory, C.PRODUCT_NAME)
+            Directory.CreateDirectory(folder) |> ignore
+            let path = Path.Combine(folder, "activity-log.txt")
+            let line = $"{DateTimeOffset.Now:O} {text}{Environment.NewLine}"
+            File.AppendAllText(path, line)
+        with _ ->
+            ()
 
     let private expireNotification id =
         async {
@@ -1609,6 +1624,9 @@ module Update =
         | WebRTC_StateChanged(connectionId, state) -> handleRealtimeStateChanged connectionId state model
         | RealtimeConnectFailed(connectionId, error) -> cleanupFailedRealtimeConnection connectionId error model
         | Log_Append text ->
+            mirrorActivityLogToDiagnostics text
+            appendActivityLogToFile text
+
             { model with
                 log = text :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none

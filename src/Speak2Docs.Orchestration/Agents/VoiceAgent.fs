@@ -442,6 +442,9 @@ module VoiceAgent =
         | Include(Some value) when not (String.IsNullOrWhiteSpace value) -> Some value
         | _ -> None
 
+    let private responseIdText responseId =
+        responseId |> Option.defaultValue "<pending>"
+
     let private matchesResponseId eventResponseId active =
         match active.id, eventResponseId with
         | Some expected, Some actual -> String.Equals(expected, actual, StringComparison.Ordinal)
@@ -793,11 +796,11 @@ module VoiceAgent =
                           outputAudioStarted = false }
 
                 if active.kind = StartupGreeting then
-                    let responseIdText = responseId |> Option.defaultValue "<pending>"
-
                     st.bus.PostToAgent(
-                        Ag_Log $"Realtime protected startup greeting active: response_id={responseIdText}."
+                        Ag_Log $"Realtime protected startup greeting active: response_id={responseIdText responseId}."
                     )
+                else
+                    st.bus.PostToAgent(Ag_Log $"Realtime response created: response_id={responseIdText responseId}.")
 
                 return
                     { st with
@@ -815,12 +818,33 @@ module VoiceAgent =
                                 ActiveResponse
                                     { active with
                                         outputAudioStarted = true } }
-                | _ -> return st
+                | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when
+                        active.kind = RegularResponse && matchesResponseId (Some ev.response_id) active
+                        ->
+                        st.bus.PostToAgent(Ag_Log $"Realtime response audio started: response_id={ev.response_id}.")
+
+                        return
+                            { st with
+                                responseCreatedState =
+                                    ActiveResponse
+                                        { active with
+                                            id = active.id |> Option.orElse (Some ev.response_id)
+                                            outputAudioStarted = true } }
+                    | _ -> return st
             | ServerEvent.OutputAudioBufferStopped ev ->
                 match protectedStartupGreeting st with
                 | Some active when matchesResponseId (Some ev.response_id) active ->
                     return st |> completeStartupGreetingProtection "output_audio_buffer.stopped"
-                | _ -> return st
+                | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when
+                        active.kind = RegularResponse && matchesResponseId (Some ev.response_id) active
+                        ->
+                        st.bus.PostToAgent(Ag_Log $"Realtime response audio stopped: response_id={ev.response_id}.")
+                        return st
+                    | _ -> return st
             | ServerEvent.ResponseOutputItemDone responseItem ->
                 match responseItem.item with
                 | Function_call fc -> return dispatchToolCall st fc
@@ -833,6 +857,14 @@ module VoiceAgent =
                 | Some active when matchesResponseId responseId active ->
                     return st |> completeStartupGreetingProtection "response.done"
                 | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when active.kind = RegularResponse && matchesResponseId responseId active ->
+                        st.bus.PostToAgent(
+                            Ag_Log
+                                $"Realtime response done: response_id={responseIdText responseId}; audioStarted={active.outputAudioStarted}."
+                        )
+                    | _ -> ()
+
                     return
                         { st with
                             responseCreatedState = NoActiveResponse }

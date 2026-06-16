@@ -1,7 +1,9 @@
 namespace FsResponses
 
 open System
+open System.Diagnostics
 open System.Net.WebSockets
+open System.Runtime.CompilerServices
 open System.Threading
 open System.Threading.Tasks
 
@@ -19,6 +21,7 @@ type ResponsesTransportOptions =
     { webSocketConfig: ResponseWebSocketConfig
       mode: ResponsesTransportMode
       maxRequestRetries: int
+      responseEventIdleTimeout: TimeSpan option
       report: string -> unit }
 
 module ResponsesTransportOptions =
@@ -26,6 +29,7 @@ module ResponsesTransportOptions =
         { webSocketConfig = webSocketConfig
           mode = PersistentWebSocket
           maxRequestRetries = 1
+          responseEventIdleTimeout = Some(TimeSpan.FromSeconds 15.0)
           report = ignore }
 
 type IResponsesTransport =
@@ -40,11 +44,35 @@ type ResponsesTransport(options: ResponsesTransportOptions) =
     let config = options.webSocketConfig
     let mutable connection: ResponseWebSocket option = None
     let mutable connectionTask: Task<ResponseWebSocket> option = None
+    let mutable nextRequestId = 0L
+
+    let report message =
+        try
+            options.report $"Answer Responses transport: {message}"
+        with _ ->
+            ()
+
+    let connectionId (connection: ResponseWebSocket) =
+        RuntimeHelpers.GetHashCode(connection.socket)
+
+    let socketState (connection: ResponseWebSocket) = string connection.socket.State
+
+    let requestSummary (request: WebSocketCreateRequest) =
+        let previousResponseId =
+            request.previous_response_id |> Option.defaultValue "<none>"
+
+        let toolCount = request.tools |> Option.map List.length |> Option.defaultValue 0
+
+        let maxOutputTokens =
+            request.max_output_tokens |> Option.map string |> Option.defaultValue "n/a"
+
+        $"requestId={Interlocked.Increment(&nextRequestId)}; model={request.model}; previousResponseId={previousResponseId}; inputItems={request.input.Length}; tools={toolCount}; maxOutputTokens={maxOutputTokens}"
 
     let connectionIsOpen (connection: ResponseWebSocket) =
         connection.socket.State = WebSocketState.Open
 
     let startConnection cancellationToken =
+        report $"connection-open-start; endpoint={config.endpoint}."
         let task = ResponsesWebSocket.connect config cancellationToken
         connectionTask <- Some task
         task
@@ -68,17 +96,28 @@ type ResponsesTransport(options: ResponsesTransportOptions) =
             let connectionOrTask =
                 lock connectionGate (fun () ->
                     match connection with
-                    | Some current when connectionIsOpen current -> Choice1Of2 current
+                    | Some current when connectionIsOpen current ->
+                        report
+                            $"connection-reuse; connectionId={connectionId current}; socketState={socketState current}."
+
+                        Choice1Of2 current
                     | Some current ->
+                        report
+                            $"connection-stale-dispose; connectionId={connectionId current}; socketState={socketState current}."
+
                         ResponsesWebSocket.dispose current
                         connection <- None
 
                         match connectionTask with
-                        | Some task -> Choice2Of2 task
+                        | Some task ->
+                            report "connection-await-pending."
+                            Choice2Of2 task
                         | None -> startConnection cancellationToken |> Choice2Of2
                     | None ->
                         match connectionTask with
-                        | Some task -> Choice2Of2 task
+                        | Some task ->
+                            report "connection-await-pending."
+                            Choice2Of2 task
                         | None -> startConnection cancellationToken |> Choice2Of2)
 
             match connectionOrTask with
@@ -95,25 +134,69 @@ type ResponsesTransport(options: ResponsesTransportOptions) =
                             connectionTask <- None
                         | _ -> ())
 
+                    report
+                        $"connection-open-completed; connectionId={connectionId openedConnection}; socketState={socketState openedConnection}."
+
                     return openedConnection
                 with ex ->
                     abandonConnectionTask pendingConnection
+                    report $"connection-open-failed; error={ex.GetType().Name}: {ex.Message}."
                     return raise ex
         }
 
     let runPersistentAttempt request cancellationToken =
         task {
+            let summary = requestSummary request
+            let sw = Stopwatch.StartNew()
+            report $"request-live-connection-start; mode=persistent_websocket; {summary}."
             let! current = liveConnection cancellationToken
 
             try
-                return! ResponsesWebSocket.createAndCollect current request cancellationToken
+                report
+                    $"request-live-connection-ready; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; connectionId={connectionId current}; socketState={socketState current}; {summary}."
+
+                let trace message =
+                    report $"request-trace; connectionId={connectionId current}; {summary}; {message}"
+
+                return!
+                    ResponsesWebSocket.createAndCollectWithTrace
+                        options.responseEventIdleTimeout
+                        trace
+                        current
+                        request
+                        cancellationToken
             with ex ->
+                report
+                    $"request-abandoning-connection; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; connectionId={connectionId current}; socketState={socketState current}; {summary}; error={ex.GetType().Name}: {ex.Message}."
+
                 clearConnection current
                 return raise ex
         }
 
     let runNewConnectionAttempt request cancellationToken =
-        ResponsesWebSocket.createWithNewConnection config request cancellationToken
+        task {
+            let summary = requestSummary request
+            let sw = Stopwatch.StartNew()
+            report $"request-new-connection-start; mode=new_websocket_per_request; {summary}."
+            let! current = ResponsesWebSocket.connect config cancellationToken
+
+            try
+                report
+                    $"request-new-connection-ready; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; connectionId={connectionId current}; socketState={socketState current}; {summary}."
+
+                let trace message =
+                    report $"request-trace; connectionId={connectionId current}; {summary}; {message}"
+
+                return!
+                    ResponsesWebSocket.createAndCollectWithTrace
+                        options.responseEventIdleTimeout
+                        trace
+                        current
+                        request
+                        cancellationToken
+            finally
+                ResponsesWebSocket.dispose current
+        }
 
     let runAttempt request cancellationToken =
         match options.mode with
@@ -150,7 +233,9 @@ type ResponsesTransport(options: ResponsesTransportOptions) =
             match options.mode with
             | NewWebSocketPerRequest -> return ()
             | PersistentWebSocket ->
+                report "prepare-start; mode=persistent_websocket."
                 let! _ = liveConnection cancellationToken
+                report "prepare-completed; mode=persistent_websocket."
                 return ()
         }
 
@@ -159,11 +244,27 @@ type ResponsesTransport(options: ResponsesTransportOptions) =
             match options.mode with
             | NewWebSocketPerRequest -> return! runWithRetry request cancellationToken
             | PersistentWebSocket ->
-                do! requestGate.WaitAsync cancellationToken
+                let gateSw = Stopwatch.StartNew()
+                report "request-gate-wait-start; mode=persistent_websocket."
+
+                try
+                    do! requestGate.WaitAsync cancellationToken
+                    gateSw.Stop()
+
+                    report
+                        $"request-gate-acquired; elapsed={gateSw.Elapsed.TotalMilliseconds:F0}ms; mode=persistent_websocket."
+                with :? OperationCanceledException as ex ->
+                    gateSw.Stop()
+
+                    report
+                        $"request-gate-canceled; elapsed={gateSw.Elapsed.TotalMilliseconds:F0}ms; mode=persistent_websocket; error={ex.Message}."
+
+                    raise ex
 
                 try
                     return! runWithRetry request cancellationToken
                 finally
+                    report "request-gate-release; mode=persistent_websocket."
                     requestGate.Release() |> ignore
         }
 
