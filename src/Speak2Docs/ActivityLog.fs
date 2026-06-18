@@ -251,6 +251,7 @@ module ActivityLog =
         [ "response_id=resp_"
           "Server VAD active"
           "Server VAD interruption requested"
+          "Server VAD is interruptible"
           "Server VAD is non-interrupting"
           "protected greeting Server VAD active" ]
 

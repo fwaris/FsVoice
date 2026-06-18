@@ -1,5 +1,6 @@
 namespace Speak2Docs.WorkFlow
 
+open System.Threading.Tasks
 open System.Threading.Channels
 open FSharp.Control
 open RTFlow
@@ -26,7 +27,14 @@ module HostAgent =
             return st
         }
 
-    let start toHost bus =
+    let startWithReady (ready: TaskCompletionSource<unit>) toHost bus =
         let st0 = { toHost = toHost; bus = bus }
 
-        bus.AgentBus.RunAsync("host", st0, update) |> FlowUtils.catch bus.PostToFlow
+        bus.AgentBus.RunWithReadyAsync("host", ready, st0, update)
+        |> FlowUtils.catch bus.PostToFlow
+
+    let start toHost bus =
+        let ready =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        startWithReady ready toHost bus

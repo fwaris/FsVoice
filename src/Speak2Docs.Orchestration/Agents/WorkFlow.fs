@@ -1,6 +1,7 @@
 namespace Speak2Docs.WorkFlow
 
 open System.Threading
+open System.Threading.Tasks
 open System.Threading.Channels
 open Speak2Docs
 open FsVoice.Platform
@@ -20,11 +21,20 @@ module StateMachine =
           sources: KnowledgeSource list
           flags: SourceFlags }
 
+    let private newAgentReadySignal () =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
     let private startAgents ss =
         async {
-            HostAgent.start ss.toHost ss.bus
+            let hostReady = newAgentReadySignal ()
+            let oracleReady = newAgentReadySignal ()
+            let voiceReady = newAgentReadySignal ()
+            let startupGate = newAgentReadySignal ()
 
-            OracleAgent.start
+            HostAgent.startWithReady hostReady ss.toHost ss.bus
+
+            OracleAgent.startWithReady
+                oracleReady
                 ss.storageRoot
                 ss.apiKey
                 ss.plugIn
@@ -35,7 +45,14 @@ module StateMachine =
                 ss.flags
                 ss.bus
 
-            VoiceAgent.start ss.plugIn ss.sources.Length ss.voiceConnection ss.bus
+            VoiceAgent.startWithReady voiceReady startupGate.Task ss.plugIn ss.sources.Length ss.voiceConnection ss.bus
+
+            do!
+                [| hostReady.Task :> Task; oracleReady.Task :> Task; voiceReady.Task :> Task |]
+                |> Task.WhenAll
+                |> Async.AwaitTask
+
+            startupGate.SetResult()
         }
 
     let rec private terminate isAbnormal ss =

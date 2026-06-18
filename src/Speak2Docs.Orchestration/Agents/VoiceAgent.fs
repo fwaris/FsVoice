@@ -139,7 +139,7 @@ module VoiceAgent =
                silence_duration_ms = 350
                threshold = 0.7 |}
 
-    let private startupTurnDetection = Some(serverTurnDetection false)
+    let private startupTurnDetection = Some(serverTurnDetection true)
 
     let private interruptingTurnDetection = Some(serverTurnDetection true)
 
@@ -753,7 +753,7 @@ module VoiceAgent =
             | ServerEvent.SessionCreated s when not st.initialized ->
                 sessionUpdateEvent st.config s.session |> enqueueClientEvent st
 
-                st.bus.PostToAgent(Ag_Log "Realtime startup Server VAD is non-interrupting for the protected greeting.")
+                st.bus.PostToAgent(Ag_Log "Realtime startup Server VAD is interruptible and listening.")
 
                 st.bus.PostToAgent(Ag_Log "Realtime session created.")
 
@@ -767,7 +767,7 @@ module VoiceAgent =
                 let st =
                     match st.vadPhase with
                     | StartupGreetingProtected ->
-                        st.bus.PostToAgent(Ag_Log "Realtime startup protected greeting Server VAD active.")
+                        st.bus.PostToAgent(Ag_Log "Realtime startup greeting Server VAD active.")
                         st
                     | ServerVadSwitchRequested ->
                         st.bus.PostToAgent(Ag_Log "Realtime Server VAD active.")
@@ -870,57 +870,36 @@ module VoiceAgent =
                             responseCreatedState = NoActiveResponse }
                         |> tryScheduleAudio
             | ServerEvent.InputAudioBufferSpeechStarted _ ->
-                if startupProtectionActive st then
-                    st.bus.PostToAgent(Ag_Log "Ignoring startup input while protected greeting active: speech_started.")
-                    return st
-                else
-                    return
-                        { st with
-                            userSpeechState = Speaking
-                            lastFinalUserTranscript = None
-                            pendingGreeting = None }
+                return
+                    { st with
+                        userSpeechState = Speaking
+                        lastFinalUserTranscript = None
+                        pendingGreeting = None }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
-                if startupProtectionActive st then
-                    st.bus.PostToAgent(Ag_Log "Ignoring startup input while protected greeting active: speech_stopped.")
-                    return st
-                else
-                    return { st with userSpeechState = Silent } |> tryScheduleAudio
+                return { st with userSpeechState = Silent } |> tryScheduleAudio
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
-                if startupProtectionActive st then
-                    return st
-                else
-                    let previous =
-                        st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
+                let previous =
+                    st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
 
-                    let text = previous + ev.delta
-                    let revision, _ = makeTranscriptSnapshot st ev.item_id text false
+                let text = previous + ev.delta
+                let revision, _ = makeTranscriptSnapshot st ev.item_id text false
 
-                    return
-                        { st with
-                            revision = revision
-                            transcriptByItem = st.transcriptByItem |> Map.add ev.item_id text }
+                return
+                    { st with
+                        revision = revision
+                        transcriptByItem = st.transcriptByItem |> Map.add ev.item_id text }
             | ServerEvent.ConversationItemInputAudioTranscriptionCompleted ev ->
                 let text = Speak2Docs.Text.normalizeWhitespace ev.transcript
 
-                if startupProtectionActive st then
-                    st.bus.PostToAgent(
-                        Ag_Log
-                            $"Ignoring startup transcript while protected greeting active: transcript_chars={text.Length}."
-                    )
+                st.bus.PostToAgent(Ag_Log $"User: {text}")
+                let revision, snapshot = makeTranscriptSnapshot st ev.item_id text true
+                st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
 
-                    return
-                        { st with
-                            transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
-                else
-                    st.bus.PostToAgent(Ag_Log $"User: {text}")
-                    let revision, snapshot = makeTranscriptSnapshot st ev.item_id text true
-                    st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
-
-                    return
-                        { st with
-                            revision = revision
-                            lastFinalUserTranscript = Some snapshot
-                            transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
+                return
+                    { st with
+                        revision = revision
+                        lastFinalUserTranscript = Some snapshot
+                        transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
             | ServerEvent.Error e ->
                 if not (isActiveResponseInProgressError e.error.message) then
                     st.bus.PostToAgent(Ag_Log $"Realtime API error: {e.error.message}")
@@ -969,7 +948,7 @@ module VoiceAgent =
                 | AwaitToolCall toolCall -> runAwaitedToolCall bus toolCall |> Async.Start
             })
 
-    let private startAgent config outputQueue (bus: WBus<FlowMsg, AgentMsg>) =
+    let private startAgent (ready: TaskCompletionSource<unit>) config outputQueue (bus: WBus<FlowMsg, AgentMsg>) =
         let st =
             { initialized = false
               config = config
@@ -988,17 +967,25 @@ module VoiceAgent =
               outputQueue = outputQueue
               bus = bus }
 
-        bus.AgentBus.RunAsync("voice", st, update)
+        bus.AgentBus.RunWithReadyAsync("voice", ready, st, update)
 
-    let start plugIn initialSourceCount voiceConnection bus =
+    let startWithReady
+        (ready: TaskCompletionSource<unit>)
+        (startupGate: Task)
+        plugIn
+        initialSourceCount
+        voiceConnection
+        bus
+        =
         let outputQueue = AsyncPriorityQueue<Q>()
         let config = plugInConfig initialSourceCount plugIn
 
         async {
             let! outputPump = Async.StartChild(startOutputPump voiceConnection bus outputQueue)
-            let! voiceAgent = Async.StartChild(startAgent config outputQueue bus)
+            let! voiceAgent = Async.StartChild(startAgent ready config outputQueue bus)
 
             try
+                do! startupGate |> Async.AwaitTask
                 do! startRealtime config voiceConnection bus
             finally
                 outputQueue.Complete()
@@ -1007,3 +994,9 @@ module VoiceAgent =
             do! outputPump
         }
         |> FlowUtils.catch bus.PostToFlow
+
+    let start plugIn initialSourceCount voiceConnection bus =
+        let ready =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        startWithReady ready Task.CompletedTask plugIn initialSourceCount voiceConnection bus

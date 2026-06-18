@@ -837,7 +837,7 @@ let ``activity log classifies response identifiers as verbose`` () =
 let ``activity log classifies server vad lifecycle messages as verbose`` () =
     Assert.Equal(
         Speak2Docs.ActivityLogVerbosity.Verbose,
-        Speak2Docs.ActivityLog.classify "Realtime startup Server VAD is non-interrupting for the protected greeting."
+        Speak2Docs.ActivityLog.classify "Realtime startup Server VAD is interruptible and listening."
     )
 
     Assert.Equal(
@@ -5848,7 +5848,7 @@ let private assertServerVad turnDetection =
     assertServerVadWithInterrupt true turnDetection
 
 let private assertStartupServerVad turnDetection =
-    assertServerVadWithInterrupt false turnDetection
+    assertServerVadWithInterrupt true turnDetection
 
 let private assertRealtimeAudioSettings assertTurnDetection (requested: Session) =
     match requested.audio with
@@ -5905,6 +5905,28 @@ let ``demo orchestration start requests realtime connection`` () =
     }
 
 [<Fact>]
+let ``demo orchestration reliably requests realtime connection on repeated startup`` () =
+    task {
+        for iteration in 1..20 do
+            let settings = demoRuntimeSettings []
+            let orchestration = demoOrchestration settings
+
+            let! session =
+                orchestration.CreateSessionAsync(demoVoiceContext (), demoVoiceConnection (), CancellationToken.None)
+
+            do! session.StartAsync CancellationToken.None
+
+            let! requested =
+                tryReadDemoToHostUntil session (TimeSpan.FromSeconds 2.) (function
+                    | Speak2Docs.WorkFlow.RequestRealtimeConnection realtimeSession -> Some realtimeSession
+                    | _ -> None)
+
+            do! session.StopAsync CancellationToken.None
+
+            Assert.True(requested.IsSome, $"Expected realtime connection request on startup iteration {iteration}.")
+    }
+
+[<Fact>]
 let ``Speak2Docs orchestration disables durable memory`` () =
     task {
         let storageRoot = tempStorageRoot ()
@@ -5956,7 +5978,7 @@ let ``Speak2Docs orchestration disables durable memory`` () =
     }
 
 [<Fact>]
-let ``demo orchestration starts realtime audio with protected Server VAD`` () =
+let ``demo orchestration starts realtime audio with interruptible Server VAD`` () =
     task {
         let settings = demoRuntimeSettings []
         let orchestration = demoOrchestration settings
@@ -5998,14 +6020,14 @@ let private startProtectedStartupGreetingSession () =
                   ``type`` = EventTypes.SessionCreated
                   session = requested }
 
-        let! startupUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt false)
+        let! startupUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt true)
 
         let startupTurnDetection =
             startupUpdate
             |> trySessionTurnDetection
             |> Option.defaultWith (fun () -> failwith "Missing VAD.")
 
-        Assert.Equal(Some false, trySessionTurnDetectionInterrupt startupUpdate)
+        Assert.Equal(Some true, trySessionTurnDetectionInterrupt startupUpdate)
         Assert.Equal(JsonValueKind.Object, startupTurnDetection.ValueKind)
 
         do!
@@ -6040,7 +6062,7 @@ let ``demo orchestration startup greeting response is out of band`` () =
     }
 
 [<Fact>]
-let ``demo orchestration ignores transcript during protected startup greeting`` () =
+let ``demo orchestration accepts transcript during startup greeting`` () =
     task {
         let! session, serverEvents, clientEvents, _ = startProtectedStartupGreetingSession ()
 
@@ -6091,7 +6113,11 @@ let ``demo orchestration ignores transcript during protected startup greeting`` 
                 | Speak2Docs.WorkFlow.TranscriptFinalized snapshot -> Some snapshot
                 | _ -> None)
 
-        Assert.True(transcript.IsNone)
+        let transcript =
+            transcript
+            |> Option.defaultWith (fun () -> failwith "Expected startup transcript.")
+
+        Assert.Equal("hello there", transcript.text)
 
         do! session.StopAsync CancellationToken.None
     }
@@ -6210,10 +6236,10 @@ let ``demo orchestration accepts transcript after protected greeting completes``
                   ``type`` = EventTypes.SessionCreated
                   session = requested }
 
-        let! initialUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt false)
+        let! initialUpdate = readClientEventUntil clientEvents.Reader (isSessionUpdateWithServerVadInterrupt true)
 
         Assert.Equal(Some "server_vad", trySessionTurnDetectionType initialUpdate)
-        Assert.Equal(Some false, trySessionTurnDetectionInterrupt initialUpdate)
+        Assert.Equal(Some true, trySessionTurnDetectionInterrupt initialUpdate)
 
         do!
             writeServerEvent

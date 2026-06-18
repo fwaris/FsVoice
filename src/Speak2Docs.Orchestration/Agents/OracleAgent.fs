@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Threading
+open System.Threading.Tasks
 open Speak2Docs
 open Microsoft.Extensions.AI
 open OpenAI.Chat
@@ -332,7 +333,18 @@ module OracleAgent =
             | _ -> return st
         }
 
-    let start storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus =
+    let startWithReady
+        (ready: TaskCompletionSource<unit>)
+        storageRoot
+        apiKey
+        plugIn
+        qaPlugIn
+        plugInSettings
+        retrievalMode
+        sources
+        flags
+        bus
+        =
         let st0 =
             { bus = bus
               storageRoot = storageRoot
@@ -345,4 +357,11 @@ module OracleAgent =
               sources = sources
               flags = flags }
 
-        bus.AgentBus.RunAsync("qa", st0, update) |> FlowUtils.catch bus.PostToFlow
+        bus.AgentBus.RunWithReadyAsync("qa", ready, st0, update)
+        |> FlowUtils.catch bus.PostToFlow
+
+    let start storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus =
+        let ready =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        startWithReady ready storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus
