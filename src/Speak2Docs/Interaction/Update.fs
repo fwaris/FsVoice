@@ -456,8 +456,9 @@ module Update =
     let private installPrebuiltDocuments docs =
         async {
             try
+                let! modelLogs = PdfLibrary.installPackagedFsColbertModel ()
                 let! installed, logs = PdfLibrary.installPrebuiltDocuments docs
-                return Ok(installed, logs)
+                return Ok(installed, modelLogs @ logs)
             with ex ->
                 return Error ex
         }

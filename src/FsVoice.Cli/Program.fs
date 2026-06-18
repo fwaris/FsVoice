@@ -784,16 +784,32 @@ Index-folder options:
                     return None
         }
 
+    let private fsColbertModelFolder parsed =
+        Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private fsColbertLegacyModelFolder parsed =
+        Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models")
+
+    let private fsColbertPackagedModelFolder () =
+        Path.Combine(AppContext.BaseDirectory, "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private fsColbertModelCandidateFolders parsed =
+        [ fsColbertModelFolder parsed
+          fsColbertLegacyModelFolder parsed
+          fsColbertPackagedModelFolder () ]
+        |> List.distinctBy (fun path -> Path.GetFullPath(path).ToLowerInvariant())
+
     let loadFsColbertEncoder parsed =
         async {
             use client = new HttpClient()
 
-            let modelFolder = Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models")
+            let modelFolder = fsColbertModelFolder parsed
 
             let! files =
-                FsColbert.ModelCatalog.ensureDownloadedAsync
+                FsColbert.ModelCatalog.ensureAvailableAsync
                     client
                     modelFolder
+                    (fsColbertModelCandidateFolders parsed)
                     FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
             return FsColbert.OnnxColbertEncoder.Load files

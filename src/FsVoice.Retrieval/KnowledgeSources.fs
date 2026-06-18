@@ -1220,6 +1220,13 @@ Query: {query}
     let private modelFolder storageRoot =
         Path.Combine(fsColbertRoot storageRoot, "Models", "mxbai-edge-colbert")
 
+    let private packagedModelFolder () =
+        Path.Combine(AppContext.BaseDirectory, "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private modelCandidateFolders storageRoot =
+        [ modelFolder storageRoot; packagedModelFolder () ]
+        |> List.distinctBy (fun path -> Path.GetFullPath(path).ToLowerInvariant())
+
     let private indexFolder storageRoot =
         let path = Path.Combine(fsColbertRoot storageRoot, "Indexes")
         Directory.CreateDirectory path |> ignore
@@ -2337,10 +2344,13 @@ Passages:
             | None ->
                 use client = new HttpClient()
 
+                let folder = modelFolder storageRoot
+
                 let! files =
-                    FsColbert.ModelCatalog.ensureDownloadedAsync
+                    FsColbert.ModelCatalog.ensureAvailableAsync
                         client
-                        (modelFolder storageRoot)
+                        folder
+                        (modelCandidateFolders storageRoot)
                         FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
                 let encoder = FsColbert.OnnxColbertEncoder.Load files

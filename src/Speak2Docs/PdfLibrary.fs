@@ -36,6 +36,11 @@ module PdfLibrary =
 
     let private prebuiltBundleManifestAsset = "FsColbertIndexes/index-bundle.json"
 
+    let private fsColbertModelAssetFolder = "FsColbert/Models/mxbai-edge-colbert"
+
+    let private fsColbertModelFiles =
+        [ "model_int8.onnx"; "tokenizer.json"; "onnx_config.json" ]
+
     let private sanitizeFileName (name: string) =
         let invalid = Path.GetInvalidFileNameChars() |> Set.ofArray
 
@@ -204,6 +209,27 @@ module PdfLibrary =
             | None -> return false
             | Some packagedHash when tryHashFile path = Some packagedHash -> return false
             | Some _ -> return! copyPackageFile logicalName path
+        }
+
+    let installPackagedFsColbertModel () =
+        async {
+            let modelFolder =
+                Path.Combine(FileSystem.AppDataDirectory, "FsVoice", "FsColbert", "Models", "mxbai-edge-colbert")
+
+            let! copied =
+                fsColbertModelFiles
+                |> List.map (fun fileName ->
+                    copyPackageFileIfChanged
+                        $"{fsColbertModelAssetFolder}/{fileName}"
+                        (Path.Combine(modelFolder, fileName)))
+                |> Async.Parallel
+
+            let copiedCount = copied |> Array.filter id |> Array.length
+
+            if copiedCount > 0 then
+                return [ $"Installed or refreshed packaged FsColbert model asset(s): {copiedCount} file(s)." ]
+            else
+                return []
         }
 
     let private readPrebuiltManifest () =
