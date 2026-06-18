@@ -24,5 +24,6 @@ module App =
 
             (Application() { Window(page model) })
                 .userAppTheme(AppTheme.Unspecified)
+                .onResume(AppResumed)
                 .onRequestedThemeChanged (ThemeChanged)
         }

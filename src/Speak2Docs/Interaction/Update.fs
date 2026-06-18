@@ -127,6 +127,22 @@ module Update =
         || model.pendingConnectionId.IsSome
         || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
 
+    let private setKeepScreenOn enabled =
+        let apply () =
+            try
+                if DeviceDisplay.Current.KeepScreenOn <> enabled then
+                    DeviceDisplay.Current.KeepScreenOn <- enabled
+            with ex ->
+                Debug.WriteLine($"Unable to set screen-awake state: {ex.Message}")
+
+        if MainThread.IsMainThread then
+            apply ()
+        else
+            MainThread.BeginInvokeOnMainThread(Action(apply))
+
+    let private syncKeepScreenOn model =
+        setKeepScreenOn (model.isBusy || isRealtimeActive model)
+
     let private canMutateDocuments model =
         not model.isBusy && not (isRealtimeActive model)
 
@@ -236,6 +252,14 @@ module Update =
             | Error error -> $"Document library manifest was not saved: {error}"
 
         saveLog :: log |> List.truncate C.MAX_LOG
+
+    let private savePdfLibraryForWakeRecovery docs =
+        try
+            match Settings.setPdfLibrary docs with
+            | Ok _ -> ()
+            | Error error -> Debug.WriteLine($"Document library wake-recovery manifest was not saved: {error}")
+        with ex ->
+            Debug.WriteLine($"Document library wake-recovery manifest was not saved: {ex.Message}")
 
     let private mergePrebuiltInstallResult (current: PdfDocumentSource list) (installed: PdfDocumentSource list) =
         let currentById = current |> List.map (fun doc -> doc.id, doc) |> Map.ofList
@@ -602,6 +626,30 @@ module Update =
             | Ready
             | Failed -> doc)
 
+    let private documentsForProcessingOutcome processedDocs outcome docs =
+        match outcome with
+        | Completed results ->
+            docs
+            |> applyProcessingResults processedDocs results
+            |> failProcessingDocuments processedDocs "Document processing completed without a result. Tap retry."
+        | Canceled results ->
+            docs
+            |> applyProcessingResults processedDocs results
+            |> failProcessingDocuments processedDocs "Document processing canceled. Tap retry."
+
+    let private processingErrorMessage (ex: exn) =
+        match ex with
+        | :? OperationCanceledException -> "Document processing canceled."
+        | _ -> $"Document processing failed: {ex.Message}"
+
+    let private persistProcessingResultForWakeRecovery processedDocs result docs =
+        let docs =
+            match result with
+            | Ok outcome -> documentsForProcessingOutcome processedDocs outcome docs
+            | Error ex -> failProcessingDocuments processedDocs (processingErrorMessage ex) docs
+
+        savePdfLibraryForWakeRecovery docs
+
     let private retryDocs ids (docs: PdfDocumentSource list) : PdfDocumentSource list =
         docs
         |> List.map (fun doc ->
@@ -617,15 +665,64 @@ module Update =
     let private disposeDocumentProcessingCancellation (model: Model) =
         model.documentProcessingCancellation |> Option.iter _.Dispose()
 
+    let private hasInProgressDocuments docs =
+        docs
+        |> List.exists (fun doc ->
+            match doc.status with
+            | Queued
+            | Processing -> true
+            | Ready
+            | Failed -> false)
+
+    let private refreshPdfLibraryAfterAppResume model =
+        let preserveInProgress = model.documentProcessingCancellation.IsSome
+
+        let docs =
+            if preserveInProgress then
+                Settings.pdfLibraryForActiveSession ()
+            else
+                Settings.pdfLibrary ()
+
+        let processingSettled = preserveInProgress && not (hasInProgressDocuments docs)
+        let changed = docs <> model.pdfDocuments || processingSettled
+
+        if not changed then
+            model, false
+        else
+            if processingSettled then
+                disposeDocumentProcessingCancellation model
+
+            let logMessage =
+                if processingSettled then
+                    $"Recovered completed PDF processing after app resume: {docs.Length} document(s)."
+                else
+                    $"Refreshed document library after app resume: {docs.Length} document(s)."
+
+            { model with
+                pdfDocuments = docs
+                isBusy = if processingSettled then false else model.isBusy
+                documentProcessingCancellation =
+                    if processingSettled then
+                        None
+                    else
+                        model.documentProcessingCancellation
+                log = logMessage :: model.log |> List.truncate C.MAX_LOG },
+            true
+
     let private documentProcessingCommand report (cts: CancellationTokenSource) (model: Model) docs =
         let keywordOptions = keywordOptions model |> withKeywordCancellation cts.Token
         let visualOptions = visualDescriptionOptions model
 
-        Cmd.OfAsync.either
-            (processDocuments report cts.Token keywordOptions visualOptions model.useLayoutAnalysis)
-            docs
-            (fun result -> PdfProcessingCompleted(docs, result))
-            EventError
+        let processAndPersist docs =
+            async {
+                let! result =
+                    processDocuments report cts.Token keywordOptions visualOptions model.useLayoutAnalysis docs
+
+                persistProcessingResultForWakeRecovery docs result model.pdfDocuments
+                return result
+            }
+
+        Cmd.OfAsync.either processAndPersist docs (fun result -> PdfProcessingCompleted(docs, result)) EventError
 
     let private stopBundleCommand (bundle: ConnectionBundle) =
         Cmd.OfAsync.either Connect.stop bundle (fun result -> StopCompleted(bundle.id, result)) EventError
@@ -739,6 +836,7 @@ module Update =
 
     let init () =
         Settings.applyPlatformMigrations ()
+        setKeepScreenOn false
         let docs = Settings.pdfLibrary ()
 
         let loadedPlugIn, plugInLogs =
@@ -812,7 +910,7 @@ module Update =
 
         model, Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
-    let update msg model =
+    let private updateCore msg model =
         match msg with
         | MainPageSizeAllocated(width, height) ->
             let roundedSize =
@@ -1183,11 +1281,6 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Ok(Completed results)) ->
             disposeDocumentProcessingCancellation model
 
-            let pdfDocuments =
-                model.pdfDocuments
-                |> applyProcessingResults processedDocs results
-                |> failProcessingDocuments processedDocs "Document processing completed without a result. Tap retry."
-
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
             let failedCount = results.Length - readyCount
 
@@ -1198,7 +1291,7 @@ module Update =
 
             let model =
                 { model with
-                    pdfDocuments = pdfDocuments
+                    pdfDocuments = documentsForProcessingOutcome processedDocs (Completed results) model.pdfDocuments
                     isBusy = false
                     documentProcessingCancellation = None
                     log = log }
@@ -1212,11 +1305,6 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Ok(Canceled results)) ->
             disposeDocumentProcessingCancellation model
 
-            let pdfDocuments =
-                model.pdfDocuments
-                |> applyProcessingResults processedDocs results
-                |> failProcessingDocuments processedDocs "Document processing canceled. Tap retry."
-
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
 
             let log =
@@ -1226,7 +1314,7 @@ module Update =
 
             let model =
                 { model with
-                    pdfDocuments = pdfDocuments
+                    pdfDocuments = documentsForProcessingOutcome processedDocs (Canceled results) model.pdfDocuments
                     isBusy = false
                     documentProcessingCancellation = None
                     log = log }
@@ -1242,17 +1330,7 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Error ex) ->
             disposeDocumentProcessingCancellation model
 
-            let canceled =
-                match ex with
-                | :? OperationCanceledException -> true
-                | _ -> false
-
-            let error =
-                if canceled then
-                    "Document processing canceled."
-                else
-                    $"Document processing failed: {ex.Message}"
-
+            let error = processingErrorMessage ex
             let pdfDocuments = failProcessingDocuments processedDocs error model.pdfDocuments
 
             let log = error :: model.log |> List.truncate C.MAX_LOG
@@ -1668,6 +1746,13 @@ module Update =
             | Some _
             | None -> model, Cmd.none
         | ThemeChanged appTheme -> { model with appTheme = appTheme }, Cmd.none
+        | AppResumed ->
+            let model, changed = refreshPdfLibraryAfterAppResume model
+
+            if changed then
+                postSources model
+
+            model, Cmd.none
         | EventError ex ->
             disposeDocumentProcessingCancellation model
 
@@ -1676,6 +1761,11 @@ module Update =
                 documentProcessingCancellation = None
                 log = ex.Message :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
+
+    let update msg model =
+        let model, cmd = updateCore msg model
+        syncKeepScreenOn model
+        model, cmd
 
     let subscribeMailbox model =
         let background dispatch =

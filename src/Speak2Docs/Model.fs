@@ -145,6 +145,7 @@ and Msg =
     | AudioDefaultToSpeakerToggled of bool
     | NotificationExpired of int
     | ThemeChanged of AppTheme
+    | AppResumed
     | EventError of exn
     | AnswerMaxOutputTokensChanged of string
     | AnswerReasoningEffortChanged of string

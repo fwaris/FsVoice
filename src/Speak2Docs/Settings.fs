@@ -85,11 +85,13 @@ module Settings =
         && Text.notEmpty dto.displayName |> Option.isSome
         && Text.notEmpty dto.storedPath |> Option.isSome
 
-    let private ofDto (dto: PdfDocumentDto) : PdfDocumentSource =
+    let private ofDto preserveInProgress (dto: PdfDocumentDto) : PdfDocumentSource =
         let status = statusFromString dto.status
 
         let status, selected, error =
             match status with
+            | Processing
+            | Queued when preserveInProgress -> status, false, Text.notEmpty dto.error
             | Processing
             | Queued -> Failed, false, Some "Processing was interrupted. Tap retry."
             | Ready -> Ready, dto.selected, Text.notEmpty dto.error
@@ -171,7 +173,7 @@ module Settings =
     let clearSuppressOpenAiDataDisclosureVersion () =
         Preferences.Default.Remove(C.SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION)
 
-    let private deserializePdfLibrary json =
+    let private deserializePdfLibrary preserveInProgress json =
         if String.IsNullOrWhiteSpace json then
             None
         else
@@ -180,7 +182,7 @@ module Settings =
                 |> Option.ofObj
                 |> Option.bind (fun dtos ->
                     if dtos |> Array.forall isValidDto then
-                        Some(dtos |> Array.toList |> List.map ofDto)
+                        Some(dtos |> Array.toList |> List.map (ofDto preserveInProgress))
                     else
                         None)
             with _ ->
@@ -198,12 +200,12 @@ module Settings =
             with _ ->
                 Set.empty
 
-    let private tryReadPdfLibraryFile () =
+    let private tryReadPdfLibraryFile preserveInProgress =
         try
             let path = pdfLibraryPath ()
 
             if File.Exists path then
-                File.ReadAllText path |> deserializePdfLibrary
+                File.ReadAllText path |> deserializePdfLibrary preserveInProgress
             else
                 None
         with _ ->
@@ -301,13 +303,13 @@ module Settings =
         with _ ->
             []
 
-    let pdfLibrary () : PdfDocumentSource list =
-        match tryReadPdfLibraryFile () with
+    let private loadPdfLibrary preserveInProgress : PdfDocumentSource list =
+        match tryReadPdfLibraryFile preserveInProgress with
         | Some docs -> docs
         | None ->
             let json = Preferences.Default.Get(C.SETTINGS_PDF_LIBRARY, "")
 
-            match deserializePdfLibrary json with
+            match deserializePdfLibrary preserveInProgress json with
             | Some docs ->
                 tryWritePdfLibraryFile json |> ignore
                 docs
@@ -319,6 +321,10 @@ module Settings =
                     tryWritePdfLibraryFile json |> ignore
 
                 docs
+
+    let pdfLibrary () : PdfDocumentSource list = loadPdfLibrary false
+
+    let pdfLibraryForActiveSession () : PdfDocumentSource list = loadPdfLibrary true
 
     let setPdfLibrary (docs: PdfDocumentSource list) : Result<string, string> =
         let json = docs |> List.map toDto |> List.toArray |> JsonSerializer.Serialize
