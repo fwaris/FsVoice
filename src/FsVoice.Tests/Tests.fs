@@ -2225,6 +2225,193 @@ let ``docling hybrid page input builder skips ocr when native pdf text is suffic
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling hybrid page input builder still ocrs sparse native pdf text`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [] }
+
+                return Ok [ nativePage ]
+            }
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "OCR fallback text with readable words" 20.0 80.0 180.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                ignore
+                "/tmp/sparse.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+            Assert.Equal<string list>([ "OCR fallback text with readable words" ], input.ocrCells |> List.map _.text)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder auto ocrs garbled native pdf text`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let garbledText =
+            String(Array.create 12 '\uE000')
+            + " "
+            + String(Array.create 4 '\uFFFD')
+            + " "
+            + String(Array.create 12 '\u25A0')
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell garbledText 10.0 145.0 190.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let reports = ResizeArray<string>()
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "Readable OCR fallback text with normal words" 20.0 80.0 220.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    enableAutoOpticalParsing = true }
+                reports.Add
+                "/tmp/garbled.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+
+            Assert.Equal<string list>(
+                [ "Readable OCR fallback text with normal words" ],
+                input.ocrCells |> List.map _.text
+            )
+
+            Assert.Contains(reports, fun message -> message.Contains("Auto OCR fallback page 1"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder keeps garbled native pdf text when auto ocr is disabled`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let garbledText =
+            String(Array.create 12 '\uE000')
+            + " "
+            + String(Array.create 4 '\uFFFD')
+            + " "
+            + String(Array.create 12 '\u25A0')
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell garbledText 10.0 145.0 190.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "Readable OCR fallback text with normal words" 20.0 80.0 220.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    enableAutoOpticalParsing = false }
+                ignore
+                "/tmp/garbled-auto-disabled.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(0, ocr.Calls)
+            Assert.Equal<string list>([ garbledText ], input.ocrCells |> List.map _.text)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder rejects auto ocr when ocr text quality is worse`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let garbledText =
+            String(Array.create 12 '\uE000')
+            + " "
+            + String(Array.create 4 '\uFFFD')
+            + " "
+            + String(Array.create 12 '\u25A0')
+
+        let worseOcrText = String(Array.create 48 '\uFFFD')
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell garbledText 10.0 145.0 190.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let reports = ResizeArray<string>()
+        let ocr = CountingDoclingOcr [ doclingOcrCell worseOcrText 20.0 80.0 220.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    enableAutoOpticalParsing = true }
+                reports.Add
+                "/tmp/garbled-worse-ocr.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+            Assert.Equal<string list>([ garbledText ], input.ocrCells |> List.map _.text)
+            Assert.Contains(reports, fun message -> message.Contains("OCR quality was not better"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling hybrid built-in layout providers resolve pp and heron`` () =
     let pp = DoclingHybrid.tryBuiltInLayoutProvider "pp-doclayout-m"
     let heron = DoclingHybrid.tryBuiltInLayoutProvider "heron"
@@ -2268,6 +2455,28 @@ let ``pdf source parsing fingerprint includes docling rasterizer and layout mode
         Assert.Contains("pdfLayoutAnalysis=true", withoutRasterizer)
         Assert.Contains("pdfLayoutModel=pp-doclayout-m", withoutRasterizer)
         Assert.Contains("pdfRasterizer=none", withoutRasterizer)
+        Assert.Contains("pdfAutoOcrFallback=false", withoutRasterizer)
+        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v1", withoutRasterizer)
+
+        let withOpticalAuto =
+            KnowledgeSources.sourceParsingFingerprint
+                { hybridOptions with
+                    enableOpticalParsing = true
+                    enableAutoOpticalParsing = true }
+                source
+
+        let autoFallbackDisabled =
+            KnowledgeSources.sourceParsingFingerprint
+                { hybridOptions with
+                    enableOpticalParsing = true
+                    enableAutoOpticalParsing = false }
+                source
+
+        Assert.Contains("pdfAutoOcrFallback=true", withOpticalAuto)
+        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v1", withOpticalAuto)
+        Assert.Contains("pdfAutoOcrFallback=false", autoFallbackDisabled)
+        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v1", autoFallbackDisabled)
+        Assert.False(String.Equals(withOpticalAuto, autoFallbackDisabled, StringComparison.Ordinal))
 
         DoclingHybrid.setRasterizerFactoryWithInfo "test-rasterizer-v1" "Test rasterizer" (fun _ ->
             FakeDoclingRasterizer(Error "unused") :> FsColbert.IDoclingPageRasterizer)

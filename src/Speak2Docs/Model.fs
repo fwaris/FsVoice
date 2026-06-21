@@ -92,6 +92,8 @@ and Model =
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      useOpticalParsing: bool
+      autoOcrFallback: bool
       describePdfVisuals: bool
       notification: TransientNotification option
       nextNotificationId: int
@@ -156,5 +158,7 @@ and Msg =
     | UseLexicalFilterToggled of bool
     | ElaborateIndexKeywordsToggled of bool
     | UseLayoutAnalysisToggled of bool
+    | UseOpticalParsingToggled of bool
+    | AutoOcrFallbackToggled of bool
     | DescribePdfVisualsToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

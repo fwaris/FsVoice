@@ -42,6 +42,12 @@ module RuntimeSettings =
     let UseLayoutAnalysis = "pdf.useLayoutAnalysis"
 
     [<Literal>]
+    let UseOpticalParsing = "pdf.useOpticalParsing"
+
+    [<Literal>]
+    let AutoOpticalParsing = "pdf.autoOpticalParsing"
+
+    [<Literal>]
     let DescribePdfVisuals = "pdf.describeVisuals"
 
     [<Literal>]
@@ -198,6 +204,8 @@ module RuntimeSettings =
           elaborateIndexKeywords = bool ElaborateIndexKeywords false values
           useHybridPdfParsing = true
           useLayoutAnalysis = bool UseLayoutAnalysis true values
+          useOpticalParsing = bool UseOpticalParsing false values
+          useAutoOcrFallback = bool AutoOpticalParsing true values
           describePdfVisuals = bool DescribePdfVisuals false values
           answerToolCallLoopLimit = answerToolCallLoopLimit values }
 

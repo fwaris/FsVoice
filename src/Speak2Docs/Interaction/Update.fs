@@ -180,6 +180,8 @@ module Update =
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
             yield RuntimeSettings.UseHybridPdfParsing, string true
             yield RuntimeSettings.UseLayoutAnalysis, string model.useLayoutAnalysis
+            yield RuntimeSettings.UseOpticalParsing, string model.useOpticalParsing
+            yield RuntimeSettings.AutoOpticalParsing, string model.autoOcrFallback
             yield RuntimeSettings.DescribePdfVisuals, string model.describePdfVisuals
 
             for KeyValue(role, modelId) in model.modelRoleOverrides do
@@ -240,6 +242,8 @@ module Update =
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
         Settings.setUseHybridPdfParsing true
         Settings.setUseLayoutAnalysis model.useLayoutAnalysis
+        Settings.setUseOpticalParsing model.useOpticalParsing
+        Settings.setAutoOpticalParsing model.autoOcrFallback
         Settings.setDescribePdfVisuals model.describePdfVisuals
 
         model.plugInSettings
@@ -427,6 +431,8 @@ module Update =
         keywordOptions
         visualOptions
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (docs: PdfDocumentSource list)
         =
         async {
@@ -441,6 +447,8 @@ module Update =
                         visualOptions
                         true
                         useLayoutAnalysis
+                        useOpticalParsing
+                        useAutoOcrFallback
                         cancellationToken
                         docs
 
@@ -457,8 +465,9 @@ module Update =
         async {
             try
                 let! modelLogs = PdfLibrary.installPackagedFsColbertModel ()
+                let! ocrModelLogs = PdfLibrary.installPackagedRapidOcrModel ()
                 let! installed, logs = PdfLibrary.installPrebuiltDocuments docs
-                return Ok(installed, modelLogs @ logs)
+                return Ok(installed, modelLogs @ ocrModelLogs @ logs)
             with ex ->
                 return Error ex
         }
@@ -521,6 +530,8 @@ module Update =
                             (visualDescriptionOptions model)
                             true
                             model.useLayoutAnalysis
+                            model.useOpticalParsing
+                            model.autoOcrFallback
                             20
                             source
                         |> Result.mapError (fun err -> InvalidOperationException(err) :> exn)
@@ -717,7 +728,15 @@ module Update =
         let processAndPersist docs =
             async {
                 let! result =
-                    processDocuments report cts.Token keywordOptions visualOptions model.useLayoutAnalysis docs
+                    processDocuments
+                        report
+                        cts.Token
+                        keywordOptions
+                        visualOptions
+                        model.useLayoutAnalysis
+                        model.useOpticalParsing
+                        model.autoOcrFallback
+                        docs
 
                 persistProcessingResultForWakeRecovery docs result model.pdfDocuments
                 return result
@@ -902,6 +921,8 @@ module Update =
               elaborateIndexKeywords = Settings.plugInElaborateIndexKeywords loadedPlugIn.definition.id false
               useHybridPdfParsing = true
               useLayoutAnalysis = Settings.useLayoutAnalysis ()
+              useOpticalParsing = Settings.useOpticalParsing ()
+              autoOcrFallback = Settings.autoOpticalParsing ()
               describePdfVisuals = Settings.describePdfVisuals ()
               notification = None
               nextNotificationId = 0
@@ -1157,6 +1178,46 @@ module Update =
                         useLayoutAnalysis = value
                         log =
                             $"Layout analysis {state}. Reprocess documents to rebuild Hybrid parser indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | UseOpticalParsingToggled value ->
+            match sourceConfigBlocked model "Changing optical parsing" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        useOpticalParsing = value
+                        log =
+                            $"Optical parsing {state}. Reprocess documents to rebuild indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | AutoOcrFallbackToggled value ->
+            match sourceConfigBlocked model "Changing automatic OCR fallback" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        autoOcrFallback = value
+                        log =
+                            $"Automatic OCR fallback {state}. Reprocess documents to rebuild indexes with this setting."
                             :: model.log
                             |> List.truncate C.MAX_LOG }
 

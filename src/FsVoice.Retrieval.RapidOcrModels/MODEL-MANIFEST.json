@@ -1,0 +1,43 @@
+{
+  "schema_name": "FsVoiceRapidOcrModelPackageManifest",
+  "schema_version": "1.0",
+  "package_id": "FsVoice.Retrieval.RapidOcrModels.PpOcrV4.Mobile",
+  "model_id": "rapidocr/pp-ocrv4-mobile/ch",
+  "asset_path": "FsVoice/FsColbert/Models/rapidocr/pp-ocrv4-mobile",
+  "source": {
+    "repository": "https://www.modelscope.cn/models/RapidAI/RapidOCR",
+    "version": "v3.8.0",
+    "license": "Apache-2.0"
+  },
+  "dictionary_source": {
+    "repository": "https://github.com/PaddlePaddle/PaddleOCR",
+    "file": "ppocr/utils/ppocr_keys_v1.txt",
+    "license": "Apache-2.0"
+  },
+  "files": [
+    {
+      "file_name": "ch_PP-OCRv4_det_mobile.onnx",
+      "role": "text_detection",
+      "size_bytes": 4745517,
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9"
+    },
+    {
+      "file_name": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+      "role": "text_angle_classification",
+      "size_bytes": 585532,
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
+    },
+    {
+      "file_name": "ch_PP-OCRv4_rec_mobile.onnx",
+      "role": "text_recognition",
+      "size_bytes": 10857958,
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b"
+    },
+    {
+      "file_name": "ppocr_keys_v1.txt",
+      "role": "recognition_dictionary",
+      "size_bytes": 26250,
+      "sha256": "a1c84d9bdb9ab29043c58896224d32941783eb821629618416dcb08f12886492"
+    }
+  ]
+}

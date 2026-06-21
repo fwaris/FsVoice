@@ -87,27 +87,35 @@ module KnowledgeSources =
                     client = None
                     modelId = defaultKeywordModel }
 
-    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
+        elif useHybridPdfParsing && useOpticalParsing then
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
     let private pdfIngestionOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         visualOptions
         : FsVoice.Retrieval.KnowledgeSources.PdfIngestionOptions =
-        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing
+          enableOpticalParsing = useOpticalParsing
+          enableAutoOpticalParsing = useAutoOcrFallback
           visualDescriptions =
             if useHybridPdfParsing && useLayoutAnalysis then
                 visualOptions
             else
                 FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
 
-    let configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions =
+    let configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions =
         { FsVoice.Retrieval.DoclingHybrid.defaults with
             enableLayoutAnalysis = useLayoutAnalysis
+            enableOcr = useOpticalParsing
+            enableAutoOpticalParsing = useAutoOcrFallback
             visualDescriptions =
                 if useLayoutAnalysis then
                     visualOptions
@@ -115,8 +123,12 @@ module KnowledgeSources =
                     FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
         |> FsVoice.Retrieval.DoclingHybrid.setDefaultOptions
 
-    let configurePdfParser useLayoutAnalysis =
-        configurePdfParserWithVisualOptions useLayoutAnalysis FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+    let configurePdfParser useLayoutAnalysis useOpticalParsing useAutoOcrFallback =
+        configurePdfParserWithVisualOptions
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
 
     let InindexSourceWithVisualOptions
         storageRoot
@@ -125,18 +137,34 @@ module KnowledgeSources =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (source: KnowledgeSource)
         =
-        configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
+        configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions
 
         source
         |> FsVoice.Retrieval.KnowledgeSources.InindexSourceWithOptions
             storageRoot
             report
             keywordOptions
-            (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
+            (pdfIngestionOptions
+                useHybridPdfParsing
+                useLayoutAnalysis
+                useOpticalParsing
+                useAutoOcrFallback
+                visualOptions)
 
-    let InindexSource storageRoot report keywordOptions useHybridPdfParsing useLayoutAnalysis source =
+    let InindexSource
+        storageRoot
+        report
+        keywordOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        source
+        =
         InindexSourceWithVisualOptions
             storageRoot
             report
@@ -144,6 +172,8 @@ module KnowledgeSources =
             FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
             useHybridPdfParsing
             useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
             source
 
     let loadIndexWithVisualOptions
@@ -153,10 +183,12 @@ module KnowledgeSources =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (sources: KnowledgeSource list)
         =
         async {
-            configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
+            configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions
 
             let! index, errors =
                 sources
@@ -164,13 +196,27 @@ module KnowledgeSources =
                     storageRoot
                     report
                     keywordOptions
-                    (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
+                    (pdfIngestionOptions
+                        useHybridPdfParsing
+                        useLayoutAnalysis
+                        useOpticalParsing
+                        useAutoOcrFallback
+                        visualOptions)
                     false
 
             return index, errors
         }
 
-    let loadIndex storageRoot report keywordOptions useHybridPdfParsing useLayoutAnalysis sources =
+    let loadIndex
+        storageRoot
+        report
+        keywordOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        sources
+        =
         loadIndexWithVisualOptions
             storageRoot
             report
@@ -178,6 +224,8 @@ module KnowledgeSources =
             FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
             useHybridPdfParsing
             useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
             sources
 
     let loadIndexPreviewWithVisualOptions
@@ -186,6 +234,8 @@ module KnowledgeSources =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         maxRecords
         source
         =
@@ -193,16 +243,32 @@ module KnowledgeSources =
         |> FsVoice.Retrieval.KnowledgeSources.loadIndexPreviewWithOptions
             storageRoot
             report
-            (pdfIngestionOptions useHybridPdfParsing useLayoutAnalysis visualOptions)
+            (pdfIngestionOptions
+                useHybridPdfParsing
+                useLayoutAnalysis
+                useOpticalParsing
+                useAutoOcrFallback
+                visualOptions)
             maxRecords
 
-    let loadIndexPreview storageRoot report useHybridPdfParsing useLayoutAnalysis maxRecords source =
+    let loadIndexPreview
+        storageRoot
+        report
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        maxRecords
+        source
+        =
         loadIndexPreviewWithVisualOptions
             storageRoot
             report
             FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
             useHybridPdfParsing
             useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
             maxRecords
             source
 

@@ -89,9 +89,11 @@ module PdfLibrary =
                 return Error $"Unable to read JSON knowledge source '{path}': {ex.Message}"
         }
 
-    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
+        elif useHybridPdfParsing && useOpticalParsing then
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
@@ -100,6 +102,8 @@ module PdfLibrary =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (doc: PdfDocumentSource)
         cancellationToken
         =
@@ -108,12 +112,18 @@ module PdfLibrary =
               location = doc.storedPath
               enabled = true }
 
-        KnowledgeSources.configurePdfParserWithVisualOptions useLayoutAnalysis visualOptions
+        KnowledgeSources.configurePdfParserWithVisualOptions
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            visualOptions
 
         FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithOptionsWithCancellation
             FileSystem.AppDataDirectory
             report
-            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing
+              enableOpticalParsing = useOpticalParsing
+              enableAutoOpticalParsing = useAutoOcrFallback
               visualDescriptions =
                 if useHybridPdfParsing && useLayoutAnalysis then
                     visualOptions
@@ -230,6 +240,24 @@ module PdfLibrary =
                 return [ $"Installed or refreshed packaged FsColbert model asset(s): {copiedCount} file(s)." ]
             else
                 return []
+        }
+
+    let installPackagedRapidOcrModel () =
+        async {
+            try
+                match
+                    FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile.TryFindExtracted(FileSystem.AppDataDirectory)
+                with
+                | Some _ -> return []
+                | None ->
+                    let folder =
+                        FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile.EnsureExtracted(
+                            FileSystem.AppDataDirectory
+                        )
+
+                    return [ $"Installed or refreshed packaged RapidOCR model asset(s): {folder}." ]
+            with ex ->
+                return [ $"Packaged RapidOCR model asset installation failed: {ex.Message}" ]
         }
 
     let private readPrebuiltManifest () =
@@ -826,6 +854,8 @@ module PdfLibrary =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (cancellationToken: CancellationToken)
         (doc: PdfDocumentSource)
         =
@@ -837,7 +867,17 @@ module PdfLibrary =
             cancellationToken.ThrowIfCancellationRequested()
             throwIfKeywordCancellationRequested keywordOptions
 
-            let! result = readPassages report visualOptions useHybridPdfParsing useLayoutAnalysis doc cancellationToken
+            let! result =
+                readPassages
+                    report
+                    visualOptions
+                    useHybridPdfParsing
+                    useLayoutAnalysis
+                    useOpticalParsing
+                    useAutoOcrFallback
+                    doc
+                    cancellationToken
+
             cancellationToken.ThrowIfCancellationRequested()
 
             match result with
@@ -856,7 +896,9 @@ module PdfLibrary =
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions
-                        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis
+                        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing
+                          enableOpticalParsing = useOpticalParsing
+                          enableAutoOpticalParsing = useAutoOcrFallback
                           visualDescriptions =
                             if useHybridPdfParsing && useLayoutAnalysis then
                                 visualOptions
@@ -896,6 +938,8 @@ module PdfLibrary =
         visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (cancellationToken: CancellationToken)
         (docs: PdfDocumentSource list)
         =
@@ -916,6 +960,8 @@ module PdfLibrary =
                             visualOptions
                             useHybridPdfParsing
                             useLayoutAnalysis
+                            useOpticalParsing
+                            useAutoOcrFallback
                             cancellationToken
                             doc
 

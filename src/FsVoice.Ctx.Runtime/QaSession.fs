@@ -253,6 +253,8 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords
                     pdfParsingMode = options.pdfParsingMode
+                    enableOpticalParsing = options.enableOpticalParsing
+                    enableAutoOpticalParsing = options.enableAutoOpticalParsing
                     pdfVisualDescriptionOptions =
                         { options.pdfVisualDescriptionOptions with
                             client =

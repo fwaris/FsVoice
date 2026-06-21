@@ -578,6 +578,18 @@ module Settings =
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
 
+    let useOpticalParsing () =
+        Preferences.Default.Get(C.SETTINGS_USE_OPTICAL_PARSING, false)
+
+    let setUseOpticalParsing value =
+        Preferences.Default.Set(C.SETTINGS_USE_OPTICAL_PARSING, value)
+
+    let autoOpticalParsing () =
+        Preferences.Default.Get(C.SETTINGS_AUTO_OPTICAL_PARSING, true)
+
+    let setAutoOpticalParsing value =
+        Preferences.Default.Set(C.SETTINGS_AUTO_OPTICAL_PARSING, value)
+
     let describePdfVisuals () =
         Preferences.Default.Get(C.SETTINGS_DESCRIBE_PDF_VISUALS, false)
 

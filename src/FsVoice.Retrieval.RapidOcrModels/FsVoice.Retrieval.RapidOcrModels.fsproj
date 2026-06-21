@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.Retrieval.RapidOcrModels</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.Retrieval.RapidOcrModels.PpOcrV4.Mobile</PackageId>
+    <PackageVersion>0.9.3.21</PackageVersion>
+    <Description>Embedded RapidOCR PP-OCRv4 mobile ONNX model assets for FsVoice optical PDF parsing.</Description>
+    <PackageLicenseExpression>MIT AND Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>FSharp;Voice;Retrieval;PDF;OCR;RapidOCR;PaddleOCR;ONNX;AI</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="RapidOcrModels.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Models\rapidocr-ppocrv4-mobile\*" LogicalName="FsVoice.Retrieval.RapidOcrModels.Resources.Models.rapidocr-ppocrv4-mobile.%(Filename)%(Extension)" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="MODEL-MANIFEST.json" Pack="true" PackagePath="\" />
+    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

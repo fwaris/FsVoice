@@ -35,6 +35,8 @@ module OracleAgent =
     let private pdfParsingMode flags =
         if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
+        elif flags.useHybridPdfParsing && flags.useOpticalParsing then
+            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
@@ -89,6 +91,8 @@ module OracleAgent =
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
+                enableOpticalParsing = flags.useOpticalParsing
+                enableAutoOpticalParsing = flags.useAutoOcrFallback
                 pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
                 enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
@@ -119,6 +123,8 @@ module OracleAgent =
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 pdfParsingMode = pdfParsingMode flags
+                enableOpticalParsing = flags.useOpticalParsing
+                enableAutoOpticalParsing = flags.useAutoOcrFallback
                 pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
                 buildMissingIndexes = false
                 logExpansions = flags.logExpansions
@@ -170,7 +176,7 @@ module OracleAgent =
 
     let private configureSession st flags mode sources (session: FsVoice.Ctx.IQaOrchestrator) =
         async {
-            KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
+            KnowledgeSources.configurePdfParser flags.useLayoutAnalysis flags.useOpticalParsing flags.useAutoOcrFallback
 
             let provider = createContextProvider st flags mode sources
             let providers = createPlugInContextProviders st @ [ provider ]
@@ -190,7 +196,7 @@ module OracleAgent =
 
             st.bus.PostToAgent(
                 Ag_Log
-                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName} pdfVisuals:{flags.describePdfVisuals}."
+                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName} pdfOptical:{flags.useOpticalParsing} pdfAutoOcr:{flags.useAutoOcrFallback} pdfVisuals:{flags.describePdfVisuals}."
             )
 
             startAnswerTransportPreparation st session

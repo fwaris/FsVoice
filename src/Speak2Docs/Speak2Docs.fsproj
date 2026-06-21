@@ -162,6 +162,7 @@
     <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
     <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval.RapidOcrModels\FsVoice.Retrieval.RapidOcrModels.fsproj" />
     <ProjectReference Include="..\FsVoice.Retrieval.PdfRasterization\FsVoice.Retrieval.PdfRasterization.fsproj" />
     <ProjectReference Include="..\Speak2Docs.Orchestration\Speak2Docs.Orchestration.fsproj" />
   </ItemGroup>

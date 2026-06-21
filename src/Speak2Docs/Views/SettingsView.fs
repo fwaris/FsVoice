@@ -267,37 +267,61 @@ module SettingsView =
     let private pdfParsingSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 3) {
+            ((Grid(columns, sectionRows 5) {
                 sectionTitle "PDF Parsing"
 
-                ViewControls.formLabel "Layout Analysis" 1
+                ViewControls.formLabel "Optical Parsing" 1
+
+                (switchWithText
+                    model.useOpticalParsing
+                    UseOpticalParsingToggled
+                    canEdit
+                    (if model.useOpticalParsing then "On - slower" else "Off"))
+                    .gridRow(1)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Auto OCR Fallback" 2
+
+                (switchWithText
+                    model.autoOcrFallback
+                    AutoOcrFallbackToggled
+                    (canEdit && model.useOpticalParsing)
+                    (if model.autoOcrFallback then "On" else "Off"))
+                    .gridRow(2)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Layout Analysis" 3
 
                 (switchWithText
                     model.useLayoutAnalysis
                     UseLayoutAnalysisToggled
                     canEdit
                     (if model.useLayoutAnalysis then "On - slower" else "Off"))
-                    .gridRow(1)
+                    .gridRow(3)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Enrich Keywords" 2
+                ViewControls.formLabel "Enrich Keywords" 4
 
                 Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
                     .isEnabled(canEdit)
-                    .gridRow(2)
+                    .gridRow(4)
                     .gridColumn(1)
                     .centerVertical ()
 
-                ViewControls.formLabel "Describe Visuals" 3
+                ViewControls.formLabel "Describe Visuals" 5
 
                 (switchWithText
                     model.describePdfVisuals
                     DescribePdfVisualsToggled
                     (canEdit && model.useLayoutAnalysis)
                     (if model.describePdfVisuals then "On - slower" else "Off"))
-                    .gridRow(3)
+                    .gridRow(5)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)

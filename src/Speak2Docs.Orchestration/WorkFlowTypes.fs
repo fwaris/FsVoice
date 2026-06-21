@@ -100,6 +100,8 @@ type SourceFlags =
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      useOpticalParsing: bool
+      useAutoOcrFallback: bool
       describePdfVisuals: bool
       answerToolCallLoopLimit: int }
 

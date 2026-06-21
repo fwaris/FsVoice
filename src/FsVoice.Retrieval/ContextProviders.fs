@@ -19,6 +19,8 @@ type FsColbertContextProviderOptions =
       keywordModelId: string
       elaborateIndexKeywords: bool
       pdfParsingMode: KnowledgeSources.PdfParsingMode
+      enableOpticalParsing: bool
+      enableAutoOpticalParsing: bool
       pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
       buildMissingIndexes: bool
       logExpansions: bool
@@ -40,6 +42,8 @@ module FsColbertContextProviderOptions =
           keywordModelId = QaDefaults.keywordModel
           elaborateIndexKeywords = true
           pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
+          enableOpticalParsing = false
+          enableAutoOpticalParsing = true
           pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
           buildMissingIndexes = true
           logExpansions = false
@@ -83,6 +87,8 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                             options.report
                             keywordOptions
                             { parsingMode = options.pdfParsingMode
+                              enableOpticalParsing = options.enableOpticalParsing
+                              enableAutoOpticalParsing = options.enableAutoOpticalParsing
                               visualDescriptions = options.pdfVisualDescriptionOptions }
                             options.buildMissingIndexes
                             sources

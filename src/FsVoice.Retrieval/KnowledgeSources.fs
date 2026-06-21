@@ -22,7 +22,8 @@ module KnowledgeSources =
     let private DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS = 90000
 
     [<Literal>]
-    let private CONTEXTUAL_RETRIEVAL_VERSION = "contextual-retrieval-v2-layout-overlay-v1"
+    let private CONTEXTUAL_RETRIEVAL_VERSION =
+        "contextual-retrieval-v2-layout-overlay-v1"
 
     type RetrievalIndex =
         { sources: KnowledgeSource list
@@ -127,11 +128,15 @@ module KnowledgeSources =
 
     type PdfIngestionOptions =
         { parsingMode: PdfParsingMode
+          enableOpticalParsing: bool
+          enableAutoOpticalParsing: bool
           visualDescriptions: PdfVisualDescriptionOptions }
 
     module PdfIngestionOptions =
         let create parsingMode =
             { parsingMode = parsingMode
+              enableOpticalParsing = false
+              enableAutoOpticalParsing = true
               visualDescriptions = PdfVisualDescriptionOptions.disabled }
 
         let defaults = create PdfParsingMode.Hybrid
@@ -182,6 +187,8 @@ module KnowledgeSources =
             storageRoot: string *
             report: (string -> unit) *
             enableLayoutAnalysis: bool *
+            enableOpticalParsing: bool *
+            enableAutoOpticalParsing: bool *
             visualDescriptions: PdfVisualDescriptionOptions
 
     [<AllowNullLiteral>]
@@ -341,10 +348,17 @@ module KnowledgeSources =
             match mode with
             | LegacyPdf ->
                 checkedRead (FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location)
-            | HybridPdf(storageRoot, report, enableLayoutAnalysis, visualDescriptions) ->
+            | HybridPdf(storageRoot,
+                        report,
+                        enableLayoutAnalysis,
+                        enableOpticalParsing,
+                        enableAutoOpticalParsing,
+                        visualDescriptions) ->
                 let options =
                     { DoclingHybrid.currentDefaultOptions () with
                         enableLayoutAnalysis = enableLayoutAnalysis
+                        enableOcr = enableOpticalParsing
+                        enableAutoOpticalParsing = enableAutoOpticalParsing
                         visualDescriptions = PdfVisualDescriptionOptions.sanitize visualDescriptions }
 
                 DoclingHybrid.readPdfPassagesWithOptionsWithFallbackAndCancellation
@@ -378,12 +392,26 @@ module KnowledgeSources =
         | PdfParsingMode.Legacy -> sourcePassagesWithCancellation LegacyPdf source cancellationToken
         | PdfParsingMode.Hybrid ->
             sourcePassagesWithCancellation
-                (HybridPdf(storageRoot, report, true, pdfOptions.visualDescriptions))
+                (HybridPdf(
+                    storageRoot,
+                    report,
+                    true,
+                    pdfOptions.enableOpticalParsing,
+                    pdfOptions.enableAutoOpticalParsing,
+                    pdfOptions.visualDescriptions
+                ))
                 source
                 cancellationToken
         | PdfParsingMode.HybridWithoutLayout ->
             sourcePassagesWithCancellation
-                (HybridPdf(storageRoot, report, false, PdfVisualDescriptionOptions.disabled))
+                (HybridPdf(
+                    storageRoot,
+                    report,
+                    false,
+                    pdfOptions.enableOpticalParsing,
+                    pdfOptions.enableAutoOpticalParsing,
+                    PdfVisualDescriptionOptions.disabled
+                ))
                 source
                 cancellationToken
 
@@ -635,7 +663,9 @@ module KnowledgeSources =
         || looksLikeChecklistText chunk.text
         || (chunk.sectionPath
             |> List.exists (fun section ->
-                let normalized = Text.normalizeWhitespace section |> fun value -> value.ToLowerInvariant()
+                let normalized =
+                    Text.normalizeWhitespace section |> fun value -> value.ToLowerInvariant()
+
                 normalized = "neurips paper checklist" || normalized = "genai usage disclosure"))
 
     let private roleAwareRawMaxResults query maxResults =
@@ -653,18 +683,16 @@ module KnowledgeSources =
         |> List.map (fun chunk ->
             let boost =
                 if looksLikeChecklistChunk chunk then
-                    if wantsChecklist then
-                        1.25f
-                    else
-                        -2.0f
+                    if wantsChecklist then 1.25f else -2.0f
                 else
                     match chunk.contentRole with
                     | SourceContentRole.FrontMatter when wantsAuthors -> 1.5f
                     | SourceContentRole.Abstract when wantsAbstract -> 1.5f
-                    | SourceContentRole.References when queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query ->
+                    | SourceContentRole.References when
+                        queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query
+                        ->
                         0.8f
-                    | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query ->
-                        0.8f
+                    | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query -> 0.8f
                     | _ -> 0.0f
 
             if boost = 0.0f then
@@ -1951,6 +1979,8 @@ Passages:
                         | PdfParsingMode.Hybrid -> true
                         | PdfParsingMode.HybridWithoutLayout
                         | PdfParsingMode.Legacy -> false
+                    enableOcr = pdfOptions.enableOpticalParsing
+                    enableAutoOpticalParsing = pdfOptions.enableAutoOpticalParsing
                     visualDescriptions = pdfOptions.visualDescriptions }
 
             [ yield PdfParsingModes.indexFingerprint pdfOptions.parsingMode

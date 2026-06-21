@@ -2,6 +2,7 @@ namespace FsVoice.Retrieval
 
 open System
 open System.Diagnostics
+open System.Globalization
 open System.IO
 open System.Net.Http
 open System.Reflection
@@ -89,6 +90,7 @@ type DoclingHybridOptions =
       ocrDedupeOverlapThreshold: float
       rasterDpi: int
       enableOcr: bool
+      enableAutoOpticalParsing: bool
       enableLayoutAnalysis: bool
       enableFigureClassification: bool
       layoutModelProvider: IDoclingLayoutModelProvider option
@@ -107,6 +109,7 @@ module DoclingHybrid =
           ocrDedupeOverlapThreshold = 0.75
           rasterDpi = 96
           enableOcr = true
+          enableAutoOpticalParsing = true
           enableLayoutAnalysis = true
           enableFigureClassification = false
           layoutModelProvider = None
@@ -173,7 +176,8 @@ module DoclingHybrid =
     let private rapidOcrModelFolders storageRoot =
         [ Environment.GetEnvironmentVariable "FSKAME_RAPIDOCR_MODELS"
           Path.Combine(fsColbertRoot storageRoot, "Models", "rapidocr")
-          Path.Combine(storageRoot, "models", "rapidocr") ]
+          Path.Combine(storageRoot, "models", "rapidocr")
+          Path.Combine(AppContext.BaseDirectory, "FsVoice", "FsColbert", "Models", "rapidocr") ]
         |> List.choose Text.notEmpty
         |> List.distinctBy _.ToLowerInvariant()
 
@@ -793,10 +797,50 @@ Rules:
         | Some det, Some cls, Some recModel, Some keys -> Some(det, cls, recModel, keys)
         | _ -> None
 
+    let private tryLoadCompanionRapidOcrModelAssembly () =
+        AppDomain.CurrentDomain.GetAssemblies()
+        |> Array.tryFind (fun assembly ->
+            String.Equals(assembly.GetName().Name, "FsVoice.Retrieval.RapidOcrModels", StringComparison.Ordinal))
+        |> Option.orElseWith (fun () ->
+            try
+                Assembly.Load("FsVoice.Retrieval.RapidOcrModels") |> Some
+            with _ ->
+                None)
+
+    let private tryEnsureCompanionRapidOcrModel storageRoot =
+        try
+            tryLoadCompanionRapidOcrModelAssembly ()
+            |> Option.bind (fun assembly ->
+                let modelType =
+                    assembly.GetType("FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile", false)
+
+                if isNull modelType then
+                    None
+                else
+                    let method =
+                        modelType.GetMethod(
+                            "EnsureExtracted",
+                            BindingFlags.Public ||| BindingFlags.Static,
+                            null,
+                            [| typeof<string> |],
+                            null
+                        )
+
+                    if isNull method then
+                        None
+                    else
+                        match method.Invoke(null, [| storageRoot :> obj |]) with
+                        | :? string as folder -> Text.notEmpty folder
+                        | _ -> None)
+        with _ ->
+            None
+
     let private tryCreateRapidOcrProvider options storageRoot =
         if not options.enableOcr then
             Ok None
         else
+            tryEnsureCompanionRapidOcrModel storageRoot |> ignore
+
             rapidOcrModelFolders storageRoot
             |> List.tryPick (fun folder -> findRapidOcrFiles folder |> Option.map (fun files -> folder, files))
             |> function
@@ -1387,11 +1431,190 @@ Rules:
         let id = info.id |> normalizeFingerprintPart "unknown"
         $"pdfRasterizer={id}"
 
+    [<Literal>]
+    let private nativeTextQualityHeuristicVersion = "native-text-quality-v1"
+
     let parserRuntimeFingerprint (options: DoclingHybridOptions) =
-        [ $"pdfLayoutAnalysis={options.enableLayoutAnalysis.ToString().ToLowerInvariant()}"
-          layoutModelFingerprint options
-          rasterizerFingerprint () ]
+        let autoOcrFallbackEnabled = options.enableOcr && options.enableAutoOpticalParsing
+
+        [ yield $"pdfLayoutAnalysis={options.enableLayoutAnalysis.ToString().ToLowerInvariant()}"
+          yield $"pdfOpticalParsing={options.enableOcr.ToString().ToLowerInvariant()}"
+          yield $"pdfAutoOcrFallback={autoOcrFallbackEnabled.ToString().ToLowerInvariant()}"
+          if autoOcrFallbackEnabled then
+              yield $"pdfNativeTextQualityHeuristic={nativeTextQualityHeuristicVersion}"
+          if options.enableOcr then
+              yield "pdfOcrEngine=RapidOCR.Net"
+              yield "pdfOcrModel=rapidocr/pp-ocrv4-mobile/ch"
+          yield layoutModelFingerprint options
+          yield rasterizerFingerprint () ]
         |> String.concat "\n"
+
+    type private NativeTextQuality =
+        { normalizedLength: int
+          failedSignals: int
+          printableRatio: float
+          suspiciousGlyphRatio: float
+          privateUseRatio: float
+          symbolRatio: float
+          letterDigitRatio: float
+          tokenCharRatio: float
+          repeatedRunRatio: float
+          looksGarbled: bool }
+
+    let private ratio count total =
+        if total <= 0 then 0.0 else float count / float total
+
+    let private isPrivateUseCharacter (value: char) =
+        let code = int value
+
+        (code >= 0xE000 && code <= 0xF8FF)
+        || (code >= 0xF0000 && code <= 0xFFFFD)
+        || (code >= 0x100000 && code <= 0x10FFFD)
+
+    let private isSuspiciousGlyph (value: char) =
+        let code = int value
+
+        code = 0xFFFD
+        || Char.IsSurrogate value
+        || (code >= 0x25A0 && code <= 0x25FF)
+        || isPrivateUseCharacter value
+
+    let private isSymbolCharacter (value: char) =
+        match Char.GetUnicodeCategory value with
+        | UnicodeCategory.CurrencySymbol
+        | UnicodeCategory.MathSymbol
+        | UnicodeCategory.ModifierSymbol
+        | UnicodeCategory.OtherSymbol -> true
+        | _ -> false
+
+    let private repeatedRunRatio (text: string) =
+        if String.IsNullOrEmpty text then
+            0.0
+        else
+            let chars = text.ToCharArray()
+            let mutable repeatedChars = 0
+            let mutable previous = chars[0]
+            let mutable runLength = 1
+
+            let addRun length =
+                if length >= 4 then
+                    repeatedChars <- repeatedChars + length
+
+            for index = 1 to chars.Length - 1 do
+                let current = chars[index]
+
+                if current = previous then
+                    runLength <- runLength + 1
+                else
+                    addRun runLength
+                    previous <- current
+                    runLength <- 1
+
+            addRun runLength
+            ratio repeatedChars chars.Length
+
+    let private cellsToNormalizedText (cells: DoclingOcrCell list) =
+        cells |> List.map _.text |> String.concat " " |> Text.normalizeWhitespace
+
+    let private nativeTextQuality minNativeCharsPerPage cells =
+        let text = cellsToNormalizedText cells
+        let charCount = text.Length
+
+        if charCount = 0 then
+            { normalizedLength = 0
+              failedSignals = 0
+              printableRatio = 1.0
+              suspiciousGlyphRatio = 0.0
+              privateUseRatio = 0.0
+              symbolRatio = 0.0
+              letterDigitRatio = 0.0
+              tokenCharRatio = 0.0
+              repeatedRunRatio = 0.0
+              looksGarbled = false }
+        else
+            let chars = text.ToCharArray()
+
+            let controlCount =
+                chars
+                |> Array.sumBy (fun value ->
+                    if Char.IsControl value && not (Char.IsWhiteSpace value) then
+                        1
+                    else
+                        0)
+
+            let suspiciousGlyphCount =
+                chars |> Array.sumBy (fun value -> if isSuspiciousGlyph value then 1 else 0)
+
+            let privateUseCount =
+                chars |> Array.sumBy (fun value -> if isPrivateUseCharacter value then 1 else 0)
+
+            let symbolCount =
+                chars |> Array.sumBy (fun value -> if isSymbolCharacter value then 1 else 0)
+
+            let letterDigitCount =
+                chars |> Array.sumBy (fun value -> if Char.IsLetterOrDigit value then 1 else 0)
+
+            let tokenChars = Text.terms text |> List.sumBy _.Length
+            let printableRatio = 1.0 - ratio controlCount charCount
+            let suspiciousGlyphRatio = ratio suspiciousGlyphCount charCount
+            let privateUseRatio = ratio privateUseCount charCount
+            let symbolRatio = ratio symbolCount charCount
+            let letterDigitRatio = ratio letterDigitCount charCount
+            let tokenCharRatio = ratio tokenChars charCount
+            let repeatedRunRatio = repeatedRunRatio text
+
+            let hasControlCharacters = printableRatio < 0.98
+            let hasSuspiciousGlyphs = suspiciousGlyphRatio >= 0.025 || suspiciousGlyphCount >= 2
+            let hasPrivateUseCharacters = privateUseRatio >= 0.02 || privateUseCount >= 2
+            let hasLowLetterDigitRatio = charCount >= 40 && letterDigitRatio < 0.30
+            let hasLowTokenRatio = charCount >= 40 && tokenCharRatio < 0.12
+            let hasRepeatedRuns = charCount >= 24 && repeatedRunRatio >= 0.20
+            let isSymbolHeavy = charCount >= 40 && symbolRatio >= 0.35 && tokenCharRatio < 0.25
+
+            let corruptionSignals =
+                [ hasControlCharacters
+                  hasSuspiciousGlyphs
+                  hasPrivateUseCharacters
+                  hasRepeatedRuns ]
+                |> List.sumBy (fun failed -> if failed then 1 else 0)
+
+            let failedSignals =
+                [ hasControlCharacters
+                  hasSuspiciousGlyphs
+                  hasPrivateUseCharacters
+                  hasLowLetterDigitRatio
+                  hasLowTokenRatio
+                  hasRepeatedRuns
+                  isSymbolHeavy ]
+                |> List.sumBy (fun failed -> if failed then 1 else 0)
+
+            { normalizedLength = charCount
+              failedSignals = failedSignals
+              printableRatio = printableRatio
+              suspiciousGlyphRatio = suspiciousGlyphRatio
+              privateUseRatio = privateUseRatio
+              symbolRatio = symbolRatio
+              letterDigitRatio = letterDigitRatio
+              tokenCharRatio = tokenCharRatio
+              repeatedRunRatio = repeatedRunRatio
+              looksGarbled =
+                charCount >= max 24 minNativeCharsPerPage
+                && corruptionSignals >= 1
+                && failedSignals >= 2 }
+
+    let private ocrQualityBeatsNative minNativeCharsPerPage nativeQuality ocrCells =
+        let ocrQuality = nativeTextQuality minNativeCharsPerPage ocrCells
+
+        let hasEnoughOcrText = DoclingCells.hasEnoughText minNativeCharsPerPage ocrCells
+
+        let hasBetterShape =
+            ocrQuality.failedSignals < nativeQuality.failedSignals
+            || (not ocrQuality.looksGarbled
+                && (ocrQuality.tokenCharRatio >= nativeQuality.tokenCharRatio + 0.10
+                    || ocrQuality.letterDigitRatio >= nativeQuality.letterDigitRatio + 0.10
+                    || ocrQuality.printableRatio >= nativeQuality.printableRatio + 0.02))
+
+        hasEnoughOcrText && hasBetterShape, ocrQuality
 
     let private createLayoutPredictor options report storageRoot cancellationToken =
         let provider =
@@ -1488,6 +1711,26 @@ Rules:
                     let nativeByPage =
                         nativePages |> List.map (fun page -> page.pageNo, page) |> Map.ofList
 
+                    let recognizeWithOcr page (ocrProvider: IDoclingOcrProvider) =
+                        async {
+                            let! ocrResult =
+                                match ocrProvider with
+                                | :? ICancelableDoclingOcrProvider as cancelable ->
+                                    cancelable.RecognizeAsync(page, cancellationToken)
+                                | _ -> ocrProvider.RecognizeAsync page
+                                |> timed report $"Document structure OCR page {page.pageNo}"
+                                |> withTimeout
+                                    30000
+                                    $"Document structure OCR timed out on page {page.pageNo}; falling back to legacy PDF parsing."
+
+                            throwIfCanceled cancellationToken
+                            return ocrResult
+                        }
+
+                    let availableOcrProvider = if options.enableOcr then ocrProvider else None
+
+                    let autoOcrFallbackEnabled = options.enableOcr && options.enableAutoOpticalParsing
+
                     let rec loop (pages: DoclingRasterPage list) (acc: DoclingPageInput list) =
                         async {
                             match pages with
@@ -1508,31 +1751,62 @@ Rules:
                                 let nativeCells =
                                     DoclingCells.scaleCellsToImage nativePage.size page.image nativePage.cells
 
-                                if DoclingCells.hasEnoughText options.minNativeCharsPerPage nativeCells then
-                                    let input: DoclingPageInput =
-                                        { pageNo = page.pageNo
-                                          image = page.image
-                                          ocrCells = nativeCells }
+                                let nativeHasEnoughText =
+                                    DoclingCells.hasEnoughText options.minNativeCharsPerPage nativeCells
 
-                                    return! loop rest (input :: acc)
+                                let nativeQuality = nativeTextQuality options.minNativeCharsPerPage nativeCells
+
+                                if nativeHasEnoughText then
+                                    match autoOcrFallbackEnabled, nativeQuality.looksGarbled, availableOcrProvider with
+                                    | true, true, Some ocrProvider ->
+                                        let! ocrResult = recognizeWithOcr page ocrProvider
+
+                                        match ocrResult with
+                                        | Error err -> return Error err
+                                        | Ok ocrCells ->
+                                            let useOcr, _ =
+                                                ocrQualityBeatsNative
+                                                    options.minNativeCharsPerPage
+                                                    nativeQuality
+                                                    ocrCells
+
+                                            let selectedCells =
+                                                if useOcr then
+                                                    report
+                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled; using OCR text."
+
+                                                    ocrCells
+                                                else
+                                                    report
+                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR quality was not better; keeping native text."
+
+                                                    nativeCells
+
+                                            let input: DoclingPageInput =
+                                                { pageNo = page.pageNo
+                                                  image = page.image
+                                                  ocrCells = selectedCells }
+
+                                            return! loop rest (input :: acc)
+                                    | _ ->
+                                        if autoOcrFallbackEnabled && nativeQuality.looksGarbled then
+                                            report
+                                                $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR is not available; keeping native text."
+
+                                        let input: DoclingPageInput =
+                                            { pageNo = page.pageNo
+                                              image = page.image
+                                              ocrCells = nativeCells }
+
+                                        return! loop rest (input :: acc)
                                 else
-                                    match ocrProvider with
+                                    match availableOcrProvider with
                                     | None ->
                                         return
                                             Error
                                                 $"Page {page.pageNo} has insufficient native PDF text and no RapidOCR model is configured."
                                     | Some ocrProvider ->
-                                        let! ocrResult =
-                                            match ocrProvider with
-                                            | :? ICancelableDoclingOcrProvider as cancelable ->
-                                                cancelable.RecognizeAsync(page, cancellationToken)
-                                            | _ -> ocrProvider.RecognizeAsync page
-                                            |> timed report $"Document structure OCR page {page.pageNo}"
-                                            |> withTimeout
-                                                30000
-                                                $"Document structure OCR timed out on page {page.pageNo}; falling back to legacy PDF parsing."
-
-                                        throwIfCanceled cancellationToken
+                                        let! ocrResult = recognizeWithOcr page ocrProvider
 
                                         match ocrResult with
                                         | Error err -> return Error err
@@ -2035,10 +2309,14 @@ Rules:
             || line.Contains("NeurIPS Paper Checklist", StringComparison.OrdinalIgnoreCase))
 
     let private passageHasChecklistHeader (passage: PassageRef) =
-        sectionPathContainsChecklist passage.sectionPath || textStartsChecklistHeader passage.text
+        sectionPathContainsChecklist passage.sectionPath
+        || textStartsChecklistHeader passage.text
 
     let private normalizedLastSection sectionPath =
-        sectionPath |> List.tryLast |> Option.map normalizedSectionName |> Option.defaultValue ""
+        sectionPath
+        |> List.tryLast
+        |> Option.map normalizedSectionName
+        |> Option.defaultValue ""
 
     let private checklistInternalSectionNames =
         [ "answer: [yes]"
@@ -2101,10 +2379,7 @@ Rules:
         |> List.sortByDescending List.length
         |> List.tryHead
 
-    let private enrichNativePassagesWithLayout
-        (layoutPassages: PassageRef list)
-        (nativePassages: PassageRef list)
-        =
+    let private enrichNativePassagesWithLayout (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
         nativePassages
         |> List.map (fun nativePassage ->
             let layoutCandidates =
@@ -2121,34 +2396,30 @@ Rules:
                     |> distinctNonEmpty
 
                 let captions =
-                    layoutCandidates |> List.collect _.captions |> distinctNonEmpty |> List.truncate 8
+                    layoutCandidates
+                    |> List.collect _.captions
+                    |> distinctNonEmpty
+                    |> List.truncate 8
 
                 let sectionPath =
                     match pickLayoutSectionPath nativePassage layoutCandidates with
-                    | Some layoutPath
-                        when List.isEmpty nativePassage.sectionPath
-                             || List.length layoutPath > List.length nativePassage.sectionPath ->
+                    | Some layoutPath when
+                        List.isEmpty nativePassage.sectionPath
+                        || List.length layoutPath > List.length nativePassage.sectionPath
+                        ->
                         layoutPath
                     | Some layoutPath when passageHasChecklistHeader nativePassage -> layoutPath
                     | _ -> nativePassage.sectionPath
 
                 let keywords =
-                    nativePassage.keywords
-                    @ layoutKeywordTerms layoutLabels captions
+                    nativePassage.keywords @ layoutKeywordTerms layoutLabels captions
                     |> distinctNonEmpty
 
                 { nativePassage with
                     sectionPath = sectionPath
                     contentRole = FsColbert.DocumentContentRoles.infer sectionPath nativePassage.text
-                    layoutLabels =
-                        nativePassage.layoutLabels
-                        @ layoutLabels
-                        |> distinctNonEmpty
-                    captions =
-                        nativePassage.captions
-                        @ captions
-                        |> distinctNonEmpty
-                        |> List.truncate 8
+                    layoutLabels = nativePassage.layoutLabels @ layoutLabels |> distinctNonEmpty
+                    captions = nativePassage.captions @ captions |> distinctNonEmpty |> List.truncate 8
                     keywords = keywords })
 
     let private shouldResumeAfterChecklist markerSectionPath (passage: PassageRef) =
@@ -2186,8 +2457,7 @@ Rules:
         let dropped = passages.Length - kept.Length
 
         if dropped > 0 then
-            report
-                $"Dropped {dropped} {label} passage(s) under NeurIPS Paper Checklist for {fileName}."
+            report $"Dropped {dropped} {label} passage(s) under NeurIPS Paper Checklist for {fileName}."
 
         kept
 
@@ -2226,8 +2496,7 @@ Rules:
 
             match convertNativeTextOnly false report chunkOptions passageSource path pageInputs with
             | Ok nativePassages ->
-                let nativePassages =
-                    enrichNativePassagesWithLayout layoutPassages nativePassages
+                let nativePassages = enrichNativePassagesWithLayout layoutPassages nativePassages
 
                 match layoutFallbackReason layoutPassages nativePassages with
                 | None -> Ok(dropChecklistAndReport report fileName "layout" layoutPassages)

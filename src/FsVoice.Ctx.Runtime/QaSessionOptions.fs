@@ -42,6 +42,8 @@ type QaSessionOptions =
       keywordModelId: string
       elaborateIndexKeywords: bool
       pdfParsingMode: KnowledgeSources.PdfParsingMode
+      enableOpticalParsing: bool
+      enableAutoOpticalParsing: bool
       pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
       memoryCandidateChunks: int
       maxContextChunks: int
@@ -78,6 +80,8 @@ module QaSessionOptions =
           keywordModelId = QaDefaults.keywordModel
           elaborateIndexKeywords = true
           pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
+          enableOpticalParsing = false
+          enableAutoOpticalParsing = true
           pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
           memoryCandidateChunks = QaDefaults.memoryCandidateChunks
           maxContextChunks = QaDefaults.maxContextChunks

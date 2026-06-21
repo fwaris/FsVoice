@@ -7,6 +7,7 @@ The app may also include or download local model assets used for document layout
 Notable bundled notice:
 
 - PP-DocLayout-M notice: `src/FsVoice.Retrieval/PackageNotices/PP-DocLayout-M-NOTICE.md`
+- RapidOCR PP-OCRv4 mobile model notice: `src/FsVoice.Retrieval.RapidOcrModels/THIRD-PARTY-NOTICES.md`
 
 Speak2Docs source code is licensed under MIT. Third-party packages retain their respective licenses.
 
