@@ -22,7 +22,7 @@ Never commit these files or values:
 - OpenAI API keys or reviewer test keys.
 - Generated `.ipa`, `.aab`, or `.apk` files.
 
-Use a local untracked `build/release/release.env` file or CI secrets with these variables:
+Use a local untracked `build/release/release.env` file or CI secrets with these variables. Values exported in the shell override `release.env`, which lets a release command choose the App Store version train or build number without editing local signing settings.
 
 ```text
 APP_TITLE
