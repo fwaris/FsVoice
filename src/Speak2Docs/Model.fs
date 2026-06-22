@@ -11,6 +11,7 @@ open RTOpenAI.Api
 type AppPage =
     | Terms
     | Main
+    | Library
     | Settings
     | Info
     | IndexPreview of documentId: string
@@ -18,6 +19,13 @@ type AppPage =
 type OpenAiDisclosureMode =
     | ConnectAfterAcknowledgement
     | ReviewOnly
+
+type DocumentFilter =
+    | AllDocuments
+    | SelectedDocuments
+    | ReadyDocuments
+    | ProcessingDocuments
+    | FailedDocuments
 
 type ConnectionBundle =
     { id: string
@@ -71,6 +79,8 @@ and Model =
       plugInSettings: Map<string, string>
       modelRoleOverrides: Map<FsVoice.Ctx.ModelRole, string>
       retrievalMode: RetrievalMode
+      documentFilter: DocumentFilter
+      documentSearch: string
       pdfDocuments: PdfDocumentSource list
       log: string list
       logFontSize: float
@@ -98,6 +108,7 @@ and Model =
       notification: TransientNotification option
       nextNotificationId: int
       appTheme: AppTheme
+      indexPreviewReturnsToLibrary: bool
       indexPreview: IndexPreviewState option }
 
 and Msg =
@@ -112,6 +123,8 @@ and Msg =
     | ModelRoleModelChanged of FsVoice.Ctx.ModelRole * string
     | PlugInSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode
+    | Library_Show
+    | Library_Close
     | Settings_Show
     | Settings_Close
     | Info_Show
@@ -123,6 +136,11 @@ and Msg =
     | PickSourcesCompleted of Result<PickedSourceImportResult, exn>
     | PdfProcessingCompleted of PdfDocumentSource list * Result<PdfProcessingOutcome, exn>
     | CancelPdfProcessing
+    | DocumentFilterChanged of DocumentFilter
+    | DocumentSearchChanged of string
+    | SelectReadyDocuments
+    | ClearDocumentSelection
+    | RetryFailedPdfProcessing
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
     | DeletePdf of string

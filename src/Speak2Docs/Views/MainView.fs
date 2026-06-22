@@ -1,5 +1,6 @@
 namespace Speak2Docs.Views
 
+open System
 open Fabulous.Maui
 open Speak2Docs
 open Microsoft.Maui
@@ -8,6 +9,38 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module MainView =
+    let private availablePageHeight model =
+        model.mainPageSize
+        |> Option.map (fun size -> max 320. (size.height - 36. - 54. - 32.))
+        |> Option.defaultValue 560.
+
+    let private selectedSourceRows model =
+        let selectedCount = PdfDocuments.selectedReady model.pdfDocuments |> List.length
+
+        if selectedCount <= 0 then
+            1
+        else
+            let availableWidth =
+                model.mainPageSize
+                |> Option.map (fun size -> max 160. (size.width - 36. - 20.))
+                |> Option.defaultValue 320.
+
+            let chipOuterWidth = 168.
+            let columns = max 1 (int (Math.Floor(availableWidth / chipOuterWidth)))
+            int (Math.Ceiling(float selectedCount / float columns))
+
+    let private sourcePaneHeight model =
+        let desiredHeight = 74. + (float (selectedSourceRows model) * 54.)
+        let maxHeight = availablePageHeight model * 0.75
+
+        desiredHeight |> max 158. |> min maxHeight
+
+    let private documentPaneHeight model =
+        if model.documentProcessingCancellation.IsSome then
+            178.
+        else
+            sourcePaneHeight model
+
     let private notificationView (notification: TransientNotification) =
         Border(
             Label(notification.message)
@@ -193,7 +226,7 @@ module MainView =
                 [ Dimension.Star ],
                 [ Dimension.Absolute 54.
                   Dimension.Auto
-                  Dimension.Absolute 230.
+                  Dimension.Absolute(documentPaneHeight model)
                   Dimension.Star
                   Dimension.Auto ]
             ) {

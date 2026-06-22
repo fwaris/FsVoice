@@ -15,6 +15,7 @@ module Icons =
     let checkbox = "\ue834"
     let preview = "\ue8f4"
     let back = "\ue5c4"
+    let libraryBooks = "\ue02f"
     let refresh = "\ue5d5"
     let uploadFile = "\uf09b"
     let archive = "\ue149"

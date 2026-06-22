@@ -546,6 +546,11 @@ let private keywordOptions schemaVersion client =
 let private tempStorageRoot () =
     Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
 
+let private testPersistedIndexFolder storageRoot =
+    let path = Path.Combine(storageRoot, "FsVoice", "FsColbert", "Indexes")
+    Directory.CreateDirectory path |> ignore
+    path
+
 let private testTranscript turnId text : TranscriptSnapshot =
     { turnId = turnId
       itemId = turnId
@@ -619,6 +624,26 @@ let private testSourceFingerprint (source: KnowledgeSource) =
             source.location
 
     $"{testSourceKindId source.kind}:{filePart}"
+
+let private writePersistedIndexStub storageRoot name (source: KnowledgeSource) =
+    let folder = testPersistedIndexFolder storageRoot
+    let path = Path.Combine(folder, $"{name}.fsci")
+    File.WriteAllText(path, "stub")
+
+    let metadata =
+        JsonSerializer.Serialize(
+            {| sourceFingerprint = testSourceFingerprint source
+               sourceLocation = source.location
+               sourceDisplayName = source.DisplayName
+               sourceKind = testSourceKindId source.kind
+               parserFingerprint = (null: string)
+               pdfParsingMode = (null: string)
+               keywordFingerprint = ""
+               createdAtUtc = DateTimeOffset.UtcNow |}
+        )
+
+    File.WriteAllText($"{path}.metadata.json", metadata)
+    path
 
 let private doclingNativeCell text l bottom r top : FsColbert.DoclingOcrCell =
     { text = text
@@ -3522,6 +3547,44 @@ let ``docling hybrid fallback uses legacy pdf reader when hybrid returns one pas
             Assert.Contains(reports, fun message -> message.Contains("Using PdfPig fallback"))
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``clearing persisted indexes for a source preserves other source indexes`` () =
+    let storageRoot = tempStorageRoot ()
+    Directory.CreateDirectory storageRoot |> ignore
+
+    try
+        let sourcePath = Path.Combine(storageRoot, "source-a.md")
+        let otherPath = Path.Combine(storageRoot, "source-b.md")
+        File.WriteAllText(sourcePath, "Source A")
+        File.WriteAllText(otherPath, "Source B")
+
+        let source =
+            { kind = Markdown
+              location = sourcePath
+              enabled = true }
+
+        let other =
+            { kind = Markdown
+              location = otherPath
+              enabled = true }
+
+        let sourceIndexPath = writePersistedIndexStub storageRoot "source-a" source
+        let otherIndexPath = writePersistedIndexStub storageRoot "source-b" other
+
+        let deleted, errors =
+            KnowledgeSources.clearPersistedIndexesForSource storageRoot source
+            |> Async.RunSynchronously
+
+        Assert.Empty errors
+        Assert.Equal(2, deleted)
+        Assert.False(File.Exists sourceIndexPath)
+        Assert.False(File.Exists($"{sourceIndexPath}.metadata.json"))
+        Assert.True(File.Exists otherIndexPath)
+        Assert.True(File.Exists($"{otherIndexPath}.metadata.json"))
+    finally
+        if Directory.Exists storageRoot then
+            Directory.Delete(storageRoot, true)
 
 [<Fact>]
 let ``legacy prebuilt manifest still loads persisted index keywords`` () =

@@ -486,16 +486,21 @@ module Update =
     let private deleteDocumentAndIndexes (doc: PdfDocumentSource) =
         async {
             try
-                let! removedFile = PdfLibrary.deleteStoredDocument doc
-                let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes FileSystem.AppDataDirectory
+                let source = sourceFromDocument doc
+
+                let! removedFile, prebuiltIndexCount, prebuiltErrors =
+                    PdfLibrary.deleteStoredDocumentAndPrebuiltIndexes doc
+
+                let! persistedIndexCount, persistedErrors =
+                    FsVoice.Retrieval.KnowledgeSources.clearPersistedIndexesForSource FileSystem.AppDataDirectory source
 
                 return
                     Ok
                         { id = doc.id
                           displayName = doc.displayName
                           removedFile = removedFile
-                          removedIndexCount = removedIndexCount
-                          indexErrors = indexErrors }
+                          removedIndexCount = prebuiltIndexCount + persistedIndexCount
+                          indexErrors = prebuiltErrors @ persistedErrors }
             with ex ->
                 return Error ex
         }
@@ -897,6 +902,8 @@ module Update =
               plugInSettings = Settings.plugInSettings loadedPlugIn.definition.id loadedPlugIn.definition.settingsFacets
               modelRoleOverrides = modelRoleOverrides
               retrievalMode = retrievalMode
+              documentFilter = AllDocuments
+              documentSearch = ""
               pdfDocuments = docs
               log = initialLog
               logFontSize = 12.
@@ -927,6 +934,7 @@ module Update =
               notification = None
               nextNotificationId = 0
               appTheme = currentAppTheme ()
+              indexPreviewReturnsToLibrary = false
               indexPreview = None }
             |> refreshRuntimeSettings
 
@@ -1264,6 +1272,12 @@ module Update =
                     $"Prebuilt document installation failed: {ex.Message}" :: model.log
                     |> List.truncate C.MAX_LOG },
             Cmd.none
+        | Library_Show -> { model with currentPage = Library }, Cmd.none
+        | Library_Close ->
+            { model with
+                currentPage = Main
+                documentSearch = "" },
+            Cmd.none
         | Settings_Show ->
             if model.isBusy then
                 { model with
@@ -1421,6 +1435,102 @@ module Update =
                 { model with
                     log = "Canceling document processing..." :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
+        | DocumentFilterChanged filter -> { model with documentFilter = filter }, Cmd.none
+        | DocumentSearchChanged value -> { model with documentSearch = value }, Cmd.none
+        | SelectReadyDocuments ->
+            if not (canChangeSourceSelection model) then
+                { model with
+                    log =
+                        "Changing selected sources is unavailable while realtime is connected or another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            else
+                let pdfDocuments =
+                    model.pdfDocuments
+                    |> List.map (fun doc ->
+                        if PdfDocuments.canSelect doc then
+                            { doc with selected = true }
+                        else
+                            doc)
+
+                let selectedCount =
+                    pdfDocuments
+                    |> List.filter (fun doc -> doc.selected && PdfDocuments.canSelect doc)
+                    |> List.length
+
+                let model =
+                    { model with
+                        pdfDocuments = pdfDocuments
+                        log =
+                            $"Selected {selectedCount} ready document(s)." :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                let model =
+                    { model with
+                        log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                postSources model
+                model, Cmd.none
+        | ClearDocumentSelection ->
+            if not (canChangeSourceSelection model) then
+                { model with
+                    log =
+                        "Changing selected sources is unavailable while realtime is connected or another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            else
+                let clearedCount =
+                    model.pdfDocuments |> List.filter (fun doc -> doc.selected) |> List.length
+
+                let pdfDocuments =
+                    model.pdfDocuments |> List.map (fun doc -> { doc with selected = false })
+
+                let model =
+                    { model with
+                        pdfDocuments = pdfDocuments
+                        log =
+                            $"Cleared {clearedCount} selected document(s)." :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                let model =
+                    { model with
+                        log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                postSources model
+                model, Cmd.none
+        | RetryFailedPdfProcessing ->
+            match documentMutationBlocked model "Retrying failed document processing" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let retry = model.pdfDocuments |> List.filter (fun doc -> doc.status = Failed)
+
+                if List.isEmpty retry then
+                    { model with
+                        log = "No failed documents need retry." :: model.log |> List.truncate C.MAX_LOG },
+                    Cmd.none
+                else
+                    let ids = retry |> List.map _.id |> Set.ofList
+
+                    let model =
+                        { model with
+                            pdfDocuments = retryDocs ids model.pdfDocuments
+                            isBusy = true }
+
+                    let report msg = processingReport model msg
+                    let cts = new CancellationTokenSource()
+
+                    let model =
+                        { model with
+                            log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                    { model with
+                        documentProcessingCancellation = Some cts },
+                    documentProcessingCommand report cts model retry
         | PdfSelectionChanged(id, selected) ->
             if not (canChangeSourceSelection model) then
                 { model with
@@ -1605,8 +1715,14 @@ module Update =
                         |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Some _ ->
+                let returnsToLibrary =
+                    match model.currentPage with
+                    | Library -> true
+                    | _ -> false
+
                 { model with
                     currentPage = IndexPreview id
+                    indexPreviewReturnsToLibrary = returnsToLibrary
                     indexPreview = Some(PreviewLoading id) },
                 Cmd.OfAsync.either
                     (loadIndexPreviewForDocument model)
@@ -1624,12 +1740,16 @@ module Update =
                     (fun result -> IndexPreviewLoaded(id, result))
                     EventError
             | Main
+            | Library
             | Terms
             | Info
             | Settings -> model, Cmd.none
         | IndexPreviewBack ->
+            let returnPage = if model.indexPreviewReturnsToLibrary then Library else Main
+
             { model with
-                currentPage = Main
+                currentPage = returnPage
+                indexPreviewReturnsToLibrary = false
                 indexPreview = None },
             Cmd.none
         | IndexPreviewLoaded(id, Ok preview) ->
@@ -1643,6 +1763,7 @@ module Update =
                         |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Main
+            | Library
             | Terms
             | Info
             | Settings
@@ -1655,6 +1776,7 @@ module Update =
                     log = $"Index preview failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Main
+            | Library
             | Terms
             | Info
             | Settings

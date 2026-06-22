@@ -427,7 +427,6 @@ module PdfLibrary =
     let private installedBundleSourceMatches (doc: PdfDocumentSource) (source: FsColbert.IndexBundleSource) =
         seq {
             yield source.sourceId
-            yield source.sourceDisplayName
 
             match source.sourceLocation with
             | Some location -> yield location
@@ -435,7 +434,6 @@ module PdfLibrary =
         }
         |> Seq.exists (fun candidate ->
             String.Equals(candidate, doc.id, StringComparison.OrdinalIgnoreCase)
-            || String.Equals(candidate, doc.displayName, StringComparison.OrdinalIgnoreCase)
             || String.Equals(candidate, doc.storedPath, StringComparison.OrdinalIgnoreCase))
 
     let private removeInstalledBundleSource (doc: PdfDocumentSource) (errors: ResizeArray<string>) =
@@ -979,4 +977,16 @@ module PdfLibrary =
                 return false
             else
                 return deleteStoredDocumentFile doc
+        }
+
+    let deleteStoredDocumentAndPrebuiltIndexes (doc: PdfDocumentSource) =
+        async {
+            let removedFile =
+                if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
+                    false
+                else
+                    deleteStoredDocumentFile doc
+
+            let removedIndexCount, errors = cleanupPrebuiltStorageForDocument doc
+            return removedFile, removedIndexCount, errors
         }

@@ -1279,7 +1279,11 @@ Query: {query}
     let clearPersistedIndexes storageRoot =
         async {
             let files =
-                Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci") |> Seq.toList
+                seq {
+                    yield! Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci")
+                    yield! Directory.EnumerateFiles(indexFolder storageRoot, "*.metadata.json")
+                }
+                |> Seq.toList
 
             let errors = ResizeArray<string>()
 
@@ -2125,6 +2129,49 @@ Passages:
         |> List.exists (fun passage ->
             String.Equals(passage.reference.sourceLocation, source.location, StringComparison.OrdinalIgnoreCase)
             || String.Equals(passage.reference.sourceId, source.location, StringComparison.OrdinalIgnoreCase))
+
+    let private deletePersistedIndexWithMetadata (errors: ResizeArray<string>) path =
+        seq {
+            yield path
+            yield indexMetadataPath path
+        }
+        |> Seq.distinctBy (fun candidate -> candidate.ToLowerInvariant())
+        |> Seq.sumBy (fun candidate ->
+            if String.IsNullOrWhiteSpace candidate || not (File.Exists candidate) then
+                0
+            else
+                try
+                    File.Delete candidate
+                    1
+                with ex ->
+                    errors.Add $"Unable to delete FsColbert index artifact '{candidate}': {ex.Message}"
+                    0)
+
+    let private persistedIndexBelongsToSource source path =
+        match tryReadIndexMetadata path with
+        | Some metadata ->
+            String.Equals(metadata.sourceLocation, source.location, StringComparison.OrdinalIgnoreCase)
+            || String.Equals(metadata.sourceFingerprint, sourceFingerprint source, StringComparison.Ordinal)
+        | None ->
+            match tryLoadPersistedIndex path with
+            | Ok(Some index) -> indexMatchesSource source index
+            | Ok None
+            | Error _ -> false
+
+    let clearPersistedIndexesForSource storageRoot source =
+        async {
+            let files =
+                Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci") |> Seq.toList
+
+            let errors = ResizeArray<string>()
+
+            let deleted =
+                files
+                |> List.filter (persistedIndexBelongsToSource source)
+                |> List.sumBy (deletePersistedIndexWithMetadata errors)
+
+            return deleted, List.ofSeq errors
+        }
 
     let private persistedIndexCandidate pdfOptions source exactPath path =
         let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
