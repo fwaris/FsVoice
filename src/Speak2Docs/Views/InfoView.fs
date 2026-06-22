@@ -51,7 +51,7 @@ module InfoView =
                     appTheme
                     Icons.settings
                     "Settings"
-                    "Edit the API key, model choices, retrieval behavior, parsing options, and plugin settings."
+                    "Edit the API key, model choices, retrieval behavior, audio, and PDF parsing options."
 
                 helpRow
                     appTheme
@@ -61,7 +61,14 @@ module InfoView =
 
                 helpRow appTheme Icons.info "Info" "Open this page."
                 helpRow appTheme Icons.mic "Connect" "Connect or disconnect the realtime voice QA session."
-                helpRow appTheme Icons.add "Add" "Import PDFs, Markdown, JSON, or Speak2Docs index bundles."
+
+                helpRow
+                    appTheme
+                    Icons.libraryBooks
+                    "Sources"
+                    "Open the full Library page to select, preview, search, or delete sources."
+
+                helpRow appTheme Icons.add "Add" "Import sources and show progress while the new items are indexed."
             })
                 .padding (10.)
         )
@@ -73,8 +80,27 @@ module InfoView =
         Border(
             (VStack(spacing = 12.) {
                 sectionTitle "Source Controls"
-                helpRow appTheme Icons.checkbox "Checkbox" "Include or exclude a ready source from answers."
-                helpRow appTheme Icons.preview "Preview" "Open a sample of the ready source index and chunks."
+
+                helpRow
+                    appTheme
+                    Icons.libraryBooks
+                    "Library"
+                    "Manage the full source list when the compact main-page Sources flow is not enough."
+
+                helpRow
+                    appTheme
+                    Icons.checkbox
+                    "Selection"
+                    "Include or exclude ready sources from the next answer session."
+
+                helpRow appTheme Icons.preview "Preview" "Tap a ready source to open a sample of its index and chunks."
+                helpRow appTheme Icons.search "Search" "Filter the Library list by source name, type, or status."
+
+                helpRow
+                    appTheme
+                    Icons.clear
+                    "Clear"
+                    "Clear all selected sources from the Library without deleting them."
 
                 helpRow
                     appTheme

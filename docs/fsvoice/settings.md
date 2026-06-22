@@ -2,6 +2,8 @@
 
 Settings are locked when Speak2Docs is busy, a realtime connection is starting or active, or a source operation is running. Disconnect or wait for processing to finish before changing them.
 
+The Settings top-bar Help icon opens this page.
+
 ## Account
 
 Account settings identify the OpenAI account Speak2Docs should use.

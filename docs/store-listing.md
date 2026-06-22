@@ -10,7 +10,7 @@ Realtime voice question answering over your selected documents.
 
 ## Full Description
 
-Speak2Docs lets you add PDFs, Markdown, and structured JSON sources, build a local retrieval index, and ask questions by voice using OpenAI realtime models. The app keeps document indexes on device and uses your OpenAI API key for realtime answers after you acknowledge the OpenAI data notice in the app.
+Speak2Docs lets you add PDFs, Markdown, and structured JSON sources, build a local retrieval index, and ask questions by voice using OpenAI realtime models. The main screen keeps selected ready sources in a compact Sources flow view, while the Library page provides search, preview, selection, clear-selection, delete, and retry controls for longer source lists. The app keeps document indexes on device and uses your OpenAI API key for realtime answers after you acknowledge the OpenAI data notice in the app.
 
 ## Reviewer Notes
 
@@ -21,11 +21,12 @@ OpenAI data use: Speak2Docs uses OpenAI as the third-party AI service for realti
 Suggested reviewer flow:
 
 1. Open Settings and enter an OpenAI API key.
-2. Add or use bundled sample documents.
-3. Wait for document processing to finish.
-4. Select one or more ready documents.
-5. Tap Connect, review the OpenAI data notice popup, and choose Acknowledge.
-6. Tap Connect again if needed, then ask a question about the selected documents.
+2. Use the bundled sample source or tap + to add PDFs, Markdown, JSON, or a Speak2Docs index bundle.
+3. Wait for document processing to finish. The add progress panel shows status and can be canceled.
+4. Tap Sources to open Library, search or preview sources if desired, and select one or more ready sources.
+5. Return to the main screen and confirm the selected sources appear in the compact Sources area.
+6. Tap Connect, review the OpenAI data notice popup, and choose Acknowledge.
+7. Tap Connect again if needed, then ask a question about the selected sources.
 
 ## Keywords
 

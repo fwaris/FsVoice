@@ -14,6 +14,7 @@ module Icons =
     let visibilityOff = "\ue8f5"
     let checkbox = "\ue834"
     let preview = "\ue8f4"
+    let search = "\ue8b6"
     let back = "\ue5c4"
     let libraryBooks = "\ue02f"
     let refresh = "\ue5d5"
