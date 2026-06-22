@@ -242,22 +242,29 @@ module PdfLibrary =
                 return []
         }
 
+    let private rapidOcrV5ModelFileNames =
+        [ "ch_PP-OCRv5_mobile_det.onnx"
+          "ch_ppocr_mobile_v2.0_cls_infer.onnx"
+          "latin_PP-OCRv5_rec_mobile_infer.onnx"
+          "ppocrv5_latin_dict.txt" ]
+
+    let private rapidOcrV5ModelFolders () =
+        [ Path.Combine(AppContext.BaseDirectory, "models", "v5")
+          Path.Combine(AppContext.BaseDirectory, "models")
+          Path.Combine(FileSystem.AppDataDirectory, "models", "v5") ]
+
+    let private hasRapidOcrV5Models folder =
+        Directory.Exists folder
+        && rapidOcrV5ModelFileNames
+           |> List.forall (fun fileName -> File.Exists(Path.Combine(folder, fileName)))
+
     let installPackagedRapidOcrModel () =
         async {
-            try
-                match
-                    FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile.TryFindExtracted(FileSystem.AppDataDirectory)
-                with
-                | Some _ -> return []
-                | None ->
-                    let folder =
-                        FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile.EnsureExtracted(
-                            FileSystem.AppDataDirectory
-                        )
-
-                    return [ $"Installed or refreshed packaged RapidOCR model asset(s): {folder}." ]
-            with ex ->
-                return [ $"Packaged RapidOCR model asset installation failed: {ex.Message}" ]
+            match rapidOcrV5ModelFolders () |> List.tryFind hasRapidOcrV5Models with
+            | Some _ -> return []
+            | None ->
+                return
+                    [ "RapidOcrNet bundled OCR model assets were not found under the app runtime folders; Auto OCR Fallback may be unavailable." ]
         }
 
     let private readPrebuiltManifest () =

@@ -37,7 +37,7 @@
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" />
-    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="RapidOcrNet" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 

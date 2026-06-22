@@ -2209,6 +2209,45 @@ let ``docling json knowledge source loads passages with keywords`` () =
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling hybrid native text quality accepts clean english`` () =
+    let text =
+        "Install the power cable and verify that the baseband enclosure reports normal operating status."
+
+    Assert.False(DoclingHybrid.nativeTextLooksGarbledForTesting 24 text)
+
+[<Fact>]
+let ``docling hybrid native text quality rejects control byte corruption`` () =
+    let text =
+        "Install Power 6250 "
+        + String.replicate 4 "\u0000"
+        + " "
+        + String.replicate 4 "\u0001"
+        + " rail guide section"
+
+    Assert.True(DoclingHybrid.nativeTextLooksGarbledForTesting 24 text)
+
+[<Fact>]
+let ``docling hybrid native text quality rejects extended latin alphabet soup`` () =
+    let text =
+        String.replicate 8 "\u00C5\u00D1\u00DE\u00D8\u00C7\u00EA\u00F8\u00DC" + " 6648"
+
+    Assert.True(DoclingHybrid.nativeTextLooksGarbledForTesting 24 text)
+
+[<Fact>]
+let ``docling hybrid native text quality accepts ordinary accented prose`` () =
+    let text =
+        "Le resume du cafe de Montreal decrit une facade naive deja verifiee pour l'equipe d'installation."
+            .Replace("resume", "r\u00E9sum\u00E9")
+            .Replace("cafe", "caf\u00E9")
+            .Replace("Montreal", "Montr\u00E9al")
+            .Replace("facade", "fa\u00E7ade")
+            .Replace("naive", "na\u00EFve")
+            .Replace("deja", "d\u00E9j\u00E0")
+            .Replace("verifiee", "v\u00E9rifi\u00E9e")
+
+    Assert.False(DoclingHybrid.nativeTextLooksGarbledForTesting 24 text)
+
+[<Fact>]
 let ``docling hybrid page input builder skips ocr when native pdf text is sufficient`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -2284,6 +2323,92 @@ let ``docling hybrid page input builder still ocrs sparse native pdf text`` () =
             let input = Assert.Single inputs
             Assert.Equal(1, ocr.Calls)
             Assert.Equal<string list>([ "OCR fallback text with readable words" ], input.ocrCells |> List.map _.text)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder merges sparse clean native pdf text with ocr`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell "Clean native heading" 10.0 145.0 150.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "OCR fallback body text with readable words" 20.0 240.0 260.0 270.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 80 }
+                ignore
+                "/tmp/sparse-clean.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            let texts = input.ocrCells |> List.map _.text
+            Assert.Equal(1, ocr.Calls)
+            Assert.Contains("Clean native heading", texts)
+            Assert.Contains("OCR fallback body text with readable words", texts)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder uses ocr only for sparse corrupt native pdf text`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell "badpdf\u0000x" 10.0 145.0 90.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let reports = ResizeArray<string>()
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "OCR fallback body text with readable words" 20.0 80.0 260.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 80 }
+                reports.Add
+                "/tmp/sparse-corrupt.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+
+            Assert.Equal<string list>(
+                [ "OCR fallback body text with readable words" ],
+                input.ocrCells |> List.map _.text
+            )
+
+            Assert.Contains(reports, fun message -> message.Contains("sparse native text had corruption signals"))
     }
     |> Async.RunSynchronously
 
@@ -2432,7 +2557,7 @@ let ``docling hybrid page input builder rejects auto ocr when ocr text quality i
             let input = Assert.Single inputs
             Assert.Equal(1, ocr.Calls)
             Assert.Equal<string list>([ garbledText ], input.ocrCells |> List.map _.text)
-            Assert.Contains(reports, fun message -> message.Contains("OCR quality was not better"))
+            Assert.Contains(reports, fun message -> message.Contains("OCR text was not usable"))
     }
     |> Async.RunSynchronously
 
@@ -2481,7 +2606,7 @@ let ``pdf source parsing fingerprint includes docling rasterizer and layout mode
         Assert.Contains("pdfLayoutModel=pp-doclayout-m", withoutRasterizer)
         Assert.Contains("pdfRasterizer=none", withoutRasterizer)
         Assert.Contains("pdfAutoOcrFallback=false", withoutRasterizer)
-        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v1", withoutRasterizer)
+        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v2", withoutRasterizer)
 
         let withOpticalAuto =
             KnowledgeSources.sourceParsingFingerprint
@@ -2498,9 +2623,11 @@ let ``pdf source parsing fingerprint includes docling rasterizer and layout mode
                 source
 
         Assert.Contains("pdfAutoOcrFallback=true", withOpticalAuto)
-        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v1", withOpticalAuto)
+        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v2", withOpticalAuto)
+        Assert.Contains("pdfOcrEngine=RapidOcrNet", withOpticalAuto)
+        Assert.Contains("pdfOcrModel=rapidocr/pp-ocrv5-latin", withOpticalAuto)
         Assert.Contains("pdfAutoOcrFallback=false", autoFallbackDisabled)
-        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v1", autoFallbackDisabled)
+        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v2", autoFallbackDisabled)
         Assert.False(String.Equals(withOpticalAuto, autoFallbackDisabled, StringComparison.Ordinal))
 
         DoclingHybrid.setRasterizerFactoryWithInfo "test-rasterizer-v1" "Test rasterizer" (fun _ ->

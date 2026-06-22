@@ -175,7 +175,10 @@ module DoclingHybrid =
 
     let private rapidOcrModelFolders storageRoot =
         [ Environment.GetEnvironmentVariable "FSKAME_RAPIDOCR_MODELS"
+          Path.Combine(AppContext.BaseDirectory, "models", "v5")
+          Path.Combine(AppContext.BaseDirectory, "models")
           Path.Combine(fsColbertRoot storageRoot, "Models", "rapidocr")
+          Path.Combine(storageRoot, "models", "v5")
           Path.Combine(storageRoot, "models", "rapidocr")
           Path.Combine(AppContext.BaseDirectory, "FsVoice", "FsColbert", "Models", "rapidocr") ]
         |> List.choose Text.notEmpty
@@ -185,7 +188,7 @@ module DoclingHybrid =
         DoclingRgbImage.validate image
 
         let bitmap =
-            new SKBitmap(image.width, image.height, SKColorType.Rgba8888, SKAlphaType.Opaque)
+            new SKBitmap(image.width, image.height, SKColorType.Bgra8888, SKAlphaType.Opaque)
 
         for y = 0 to image.height - 1 do
             for x = 0 to image.width - 1 do
@@ -721,7 +724,7 @@ Rules:
         let gate = obj ()
 
         let textBlockCell (block: TextBlock) =
-            let text = block.GetText() |> Text.normalizeWhitespace
+            let text = block.Text |> Text.normalizeWhitespace
 
             if
                 String.IsNullOrWhiteSpace text
@@ -797,50 +800,10 @@ Rules:
         | Some det, Some cls, Some recModel, Some keys -> Some(det, cls, recModel, keys)
         | _ -> None
 
-    let private tryLoadCompanionRapidOcrModelAssembly () =
-        AppDomain.CurrentDomain.GetAssemblies()
-        |> Array.tryFind (fun assembly ->
-            String.Equals(assembly.GetName().Name, "FsVoice.Retrieval.RapidOcrModels", StringComparison.Ordinal))
-        |> Option.orElseWith (fun () ->
-            try
-                Assembly.Load("FsVoice.Retrieval.RapidOcrModels") |> Some
-            with _ ->
-                None)
-
-    let private tryEnsureCompanionRapidOcrModel storageRoot =
-        try
-            tryLoadCompanionRapidOcrModelAssembly ()
-            |> Option.bind (fun assembly ->
-                let modelType =
-                    assembly.GetType("FsVoice.Retrieval.RapidOcrModels.RapidOcrPpOcrV4Mobile", false)
-
-                if isNull modelType then
-                    None
-                else
-                    let method =
-                        modelType.GetMethod(
-                            "EnsureExtracted",
-                            BindingFlags.Public ||| BindingFlags.Static,
-                            null,
-                            [| typeof<string> |],
-                            null
-                        )
-
-                    if isNull method then
-                        None
-                    else
-                        match method.Invoke(null, [| storageRoot :> obj |]) with
-                        | :? string as folder -> Text.notEmpty folder
-                        | _ -> None)
-        with _ ->
-            None
-
     let private tryCreateRapidOcrProvider options storageRoot =
         if not options.enableOcr then
             Ok None
         else
-            tryEnsureCompanionRapidOcrModel storageRoot |> ignore
-
             rapidOcrModelFolders storageRoot
             |> List.tryPick (fun folder -> findRapidOcrFiles folder |> Option.map (fun files -> folder, files))
             |> function
@@ -1432,7 +1395,7 @@ Rules:
         $"pdfRasterizer={id}"
 
     [<Literal>]
-    let private nativeTextQualityHeuristicVersion = "native-text-quality-v1"
+    let private nativeTextQualityHeuristicVersion = "native-text-quality-v2"
 
     let parserRuntimeFingerprint (options: DoclingHybridOptions) =
         let autoOcrFallbackEnabled = options.enableOcr && options.enableAutoOpticalParsing
@@ -1443,18 +1406,21 @@ Rules:
           if autoOcrFallbackEnabled then
               yield $"pdfNativeTextQualityHeuristic={nativeTextQualityHeuristicVersion}"
           if options.enableOcr then
-              yield "pdfOcrEngine=RapidOCR.Net"
-              yield "pdfOcrModel=rapidocr/pp-ocrv4-mobile/ch"
+              yield "pdfOcrEngine=RapidOcrNet"
+              yield "pdfOcrModel=rapidocr/pp-ocrv5-latin"
           yield layoutModelFingerprint options
           yield rasterizerFingerprint () ]
         |> String.concat "\n"
 
     type private NativeTextQuality =
         { normalizedLength: int
+          corruptionSignals: int
           failedSignals: int
           printableRatio: float
           suspiciousGlyphRatio: float
           privateUseRatio: float
+          extendedLatinRatio: float
+          extendedLatinRunRatio: float
           symbolRatio: float
           letterDigitRatio: float
           tokenCharRatio: float
@@ -1486,6 +1452,34 @@ Rules:
         | UnicodeCategory.ModifierSymbol
         | UnicodeCategory.OtherSymbol -> true
         | _ -> false
+
+    let private isExtendedLatinLetter (value: char) =
+        let code = int value
+
+        Char.IsLetter value
+        && ((code >= 0x00C0 && code <= 0x024F) || (code >= 0x1E00 && code <= 0x1EFF))
+
+    let private runRatio predicate minRunLength (text: string) =
+        if String.IsNullOrEmpty text then
+            0.0
+        else
+            let chars = text.ToCharArray()
+            let mutable runChars = 0
+            let mutable runLength = 0
+
+            let addRun length =
+                if length >= minRunLength then
+                    runChars <- runChars + length
+
+            for value in chars do
+                if predicate value then
+                    runLength <- runLength + 1
+                else
+                    addRun runLength
+                    runLength <- 0
+
+            addRun runLength
+            ratio runChars chars.Length
 
     let private repeatedRunRatio (text: string) =
         if String.IsNullOrEmpty text then
@@ -1522,10 +1516,13 @@ Rules:
 
         if charCount = 0 then
             { normalizedLength = 0
+              corruptionSignals = 0
               failedSignals = 0
               printableRatio = 1.0
               suspiciousGlyphRatio = 0.0
               privateUseRatio = 0.0
+              extendedLatinRatio = 0.0
+              extendedLatinRunRatio = 0.0
               symbolRatio = 0.0
               letterDigitRatio = 0.0
               tokenCharRatio = 0.0
@@ -1548,6 +1545,9 @@ Rules:
             let privateUseCount =
                 chars |> Array.sumBy (fun value -> if isPrivateUseCharacter value then 1 else 0)
 
+            let extendedLatinCount =
+                chars |> Array.sumBy (fun value -> if isExtendedLatinLetter value then 1 else 0)
+
             let symbolCount =
                 chars |> Array.sumBy (fun value -> if isSymbolCharacter value then 1 else 0)
 
@@ -1558,12 +1558,18 @@ Rules:
             let printableRatio = 1.0 - ratio controlCount charCount
             let suspiciousGlyphRatio = ratio suspiciousGlyphCount charCount
             let privateUseRatio = ratio privateUseCount charCount
+            let extendedLatinRatio = ratio extendedLatinCount charCount
+            let extendedLatinRunRatio = runRatio isExtendedLatinLetter 8 text
             let symbolRatio = ratio symbolCount charCount
             let letterDigitRatio = ratio letterDigitCount charCount
             let tokenCharRatio = ratio tokenChars charCount
             let repeatedRunRatio = repeatedRunRatio text
 
-            let hasControlCharacters = printableRatio < 0.98
+            let hasControlCharacters = controlCount >= 1 && charCount >= 8
+
+            let hasSevereControlCorruption =
+                controlCount >= 3 || (charCount >= 40 && printableRatio < 0.96)
+
             let hasSuspiciousGlyphs = suspiciousGlyphRatio >= 0.025 || suspiciousGlyphCount >= 2
             let hasPrivateUseCharacters = privateUseRatio >= 0.02 || privateUseCount >= 2
             let hasLowLetterDigitRatio = charCount >= 40 && letterDigitRatio < 0.30
@@ -1571,11 +1577,19 @@ Rules:
             let hasRepeatedRuns = charCount >= 24 && repeatedRunRatio >= 0.20
             let isSymbolHeavy = charCount >= 40 && symbolRatio >= 0.35 && tokenCharRatio < 0.25
 
+            let hasExtendedLatinAlphabetSoup =
+                charCount >= 40 && extendedLatinRatio >= 0.25 && tokenCharRatio < 0.35
+
+            let hasExtendedLatinRuns =
+                charCount >= 40 && extendedLatinRunRatio >= 0.20 && tokenCharRatio < 0.45
+
             let corruptionSignals =
                 [ hasControlCharacters
                   hasSuspiciousGlyphs
                   hasPrivateUseCharacters
-                  hasRepeatedRuns ]
+                  hasRepeatedRuns
+                  hasExtendedLatinAlphabetSoup
+                  hasExtendedLatinRuns ]
                 |> List.sumBy (fun failed -> if failed then 1 else 0)
 
             let failedSignals =
@@ -1585,36 +1599,41 @@ Rules:
                   hasLowLetterDigitRatio
                   hasLowTokenRatio
                   hasRepeatedRuns
-                  isSymbolHeavy ]
+                  isSymbolHeavy
+                  hasExtendedLatinAlphabetSoup
+                  hasExtendedLatinRuns ]
                 |> List.sumBy (fun failed -> if failed then 1 else 0)
 
             { normalizedLength = charCount
+              corruptionSignals = corruptionSignals
               failedSignals = failedSignals
               printableRatio = printableRatio
               suspiciousGlyphRatio = suspiciousGlyphRatio
               privateUseRatio = privateUseRatio
+              extendedLatinRatio = extendedLatinRatio
+              extendedLatinRunRatio = extendedLatinRunRatio
               symbolRatio = symbolRatio
               letterDigitRatio = letterDigitRatio
               tokenCharRatio = tokenCharRatio
               repeatedRunRatio = repeatedRunRatio
               looksGarbled =
                 charCount >= max 24 minNativeCharsPerPage
-                && corruptionSignals >= 1
-                && failedSignals >= 2 }
+                && ((corruptionSignals >= 1 && failedSignals >= 2) || hasSevereControlCorruption) }
 
-    let private ocrQualityBeatsNative minNativeCharsPerPage nativeQuality ocrCells =
+    let nativeTextLooksGarbledForTesting minNativeCharsPerPage text =
+        let cell: DoclingOcrCell =
+            { text = text
+              bbox = DoclingGeometry.topLeftBox 0.0 0.0 1.0 1.0
+              confidence = None }
+
+        (nativeTextQuality minNativeCharsPerPage [ cell ]).looksGarbled
+
+    let private ocrQualityUsableForCorruptNative minNativeCharsPerPage ocrCells =
         let ocrQuality = nativeTextQuality minNativeCharsPerPage ocrCells
 
         let hasEnoughOcrText = DoclingCells.hasEnoughText minNativeCharsPerPage ocrCells
 
-        let hasBetterShape =
-            ocrQuality.failedSignals < nativeQuality.failedSignals
-            || (not ocrQuality.looksGarbled
-                && (ocrQuality.tokenCharRatio >= nativeQuality.tokenCharRatio + 0.10
-                    || ocrQuality.letterDigitRatio >= nativeQuality.letterDigitRatio + 0.10
-                    || ocrQuality.printableRatio >= nativeQuality.printableRatio + 0.02))
-
-        hasEnoughOcrText && hasBetterShape, ocrQuality
+        hasEnoughOcrText && not ocrQuality.looksGarbled, ocrQuality
 
     let private createLayoutPredictor options report storageRoot cancellationToken =
         let provider =
@@ -1765,10 +1784,7 @@ Rules:
                                         | Error err -> return Error err
                                         | Ok ocrCells ->
                                             let useOcr, _ =
-                                                ocrQualityBeatsNative
-                                                    options.minNativeCharsPerPage
-                                                    nativeQuality
-                                                    ocrCells
+                                                ocrQualityUsableForCorruptNative options.minNativeCharsPerPage ocrCells
 
                                             let selectedCells =
                                                 if useOcr then
@@ -1778,7 +1794,7 @@ Rules:
                                                     ocrCells
                                                 else
                                                     report
-                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR quality was not better; keeping native text."
+                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR text was not usable; keeping native text."
 
                                                     nativeCells
 
@@ -1812,11 +1828,17 @@ Rules:
                                         | Error err -> return Error err
                                         | Ok ocrCells ->
                                             let merged =
-                                                DoclingCells.mergePreferPrimary
-                                                    (float page.image.height)
-                                                    options.ocrDedupeOverlapThreshold
-                                                    nativeCells
+                                                if nativeQuality.corruptionSignals > 0 then
+                                                    report
+                                                        $"Auto OCR fallback page {page.pageNo}: sparse native text had corruption signals; using OCR text only."
+
                                                     ocrCells
+                                                else
+                                                    DoclingCells.mergePreferPrimary
+                                                        (float page.image.height)
+                                                        options.ocrDedupeOverlapThreshold
+                                                        nativeCells
+                                                        ocrCells
 
                                             let input: DoclingPageInput =
                                                 { pageNo = page.pageNo
