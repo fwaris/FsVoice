@@ -33,7 +33,6 @@
     <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
-    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

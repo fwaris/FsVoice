@@ -46,6 +46,7 @@ module DurableMemory =
           conflictsWith: string list
           derivedFrom: string list
           indexText: string
+          semanticDocumentIds: string list
           colbertDocIds: string list
           indexedAt: string
           embeddingModel: string
@@ -261,7 +262,8 @@ module DurableMemory =
           conflictsWith = record.relations.conflictsWith
           derivedFrom = record.relations.derivedFrom
           indexText = record.retrieval.indexText
-          colbertDocIds = record.retrieval.colbertDocIds
+          semanticDocumentIds = record.retrieval.semanticDocumentIds
+          colbertDocIds = record.retrieval.semanticDocumentIds
           indexedAt = record.retrieval.indexedAt |> Option.map _.ToString("O") |> optionToString
           embeddingModel = record.retrieval.embeddingModel |> optionToString
           version = record.version }
@@ -284,6 +286,11 @@ module DurableMemory =
                 |> Option.ofObj
                 |> Option.bind Text.notEmpty
                 |> Option.defaultValue (indexTextFor kind title summary text entities tags)
+
+            let semanticDocumentIds =
+                match dto.semanticDocumentIds |> nonNullList with
+                | [] -> dto.colbertDocIds |> nonNullList
+                | values -> values
 
             Some
                 { memoryId =
@@ -325,7 +332,7 @@ module DurableMemory =
                       derivedFrom = dto.derivedFrom |> nonNullList }
                   retrieval =
                     { indexText = indexText
-                      colbertDocIds = dto.colbertDocIds |> nonNullList
+                      semanticDocumentIds = semanticDocumentIds
                       indexedAt = parseOptionDate dto.indexedAt
                       embeddingModel = nonEmptyOption dto.embeddingModel }
                   version = max 1 dto.version }
@@ -880,7 +887,7 @@ module DurableMemory =
               derivedFrom = proposal.provenance.sourceIds }
           retrieval =
             { indexText = indexTextFor proposal.kind title summary text proposal.entities proposal.tags
-              colbertDocIds = []
+              semanticDocumentIds = []
               indexedAt = None
               embeddingModel = None }
           version = 1 }

@@ -12,6 +12,7 @@ type DemoVoiceOrchestrationOptions =
     { settings: RuntimeSettings
       plugIn: FsVoice.Ctx.PlugInDefinition
       qaPlugIn: FsVoice.Ctx.IQaPlugIn
+      sourceIndexService: FsVoice.Ctx.ISourceIndexService
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list }
 
@@ -43,6 +44,7 @@ type private DemoVoiceSession
                 plugIn
                 options.qaPlugIn
                 plugInSettings
+                options.sourceIndexService
                 retrievalMode
                 voiceConnection
                 sources

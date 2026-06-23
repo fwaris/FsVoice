@@ -216,12 +216,49 @@ Index-folder options:
 
         Directory.CreateDirectory storageRoot |> ignore
         let answerWebSocketConfig = FsResponses.ResponseWebSocketConfig.create apiKey
+        let clients = clientsFromArgs parsed
+        let plugInProfile = plugInProfile parsed
+        let mode = retrievalMode parsed
+
+        let sourceIndexService =
+            let plugInFingerprint =
+                { PlugInDefinition.generic with
+                    id = plugInProfile.id
+                    displayName = plugInProfile.displayName
+                    description = plugInProfile.description
+                    profile = plugInProfile
+                    runtime =
+                        { PlugInRuntimeOptions.defaults with
+                            retrievalMode = mode
+                            enableQueryExpansion = hasFlag "llm-query-expansion" parsed
+                            elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
+                            autoWriteback = autoWriteback } }
+                |> PlugInDefinition.fingerprint
+
+            let options =
+                { FsColbertSourceIndexServiceOptions.create storageRoot with
+                    queryExpansionClient =
+                        if hasFlag "llm-query-expansion" parsed then
+                            clients.queryExpansion
+                        else
+                            None
+                    keywordGenerationClient = clients.queryExpansion
+                    plugInProfile = plugInProfile
+                    plugInFingerprint = plugInFingerprint
+                    keywordModelId = optionValue "small-model" QaDefaults.keywordModel parsed
+                    elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
+                    buildMissingIndexes = true
+                    report = fun msg -> Console.Error.WriteLine msg }
+
+            FsColbertSourceIndexService(options) :> ISourceIndexService
 
         let options =
             { QaSessionOptions.create storageRoot answerWebSocketConfig with
-                retrievalMode = retrievalMode parsed
-                clients = clientsFromArgs parsed
-                plugInProfile = plugInProfile parsed
+                retrievalMode = mode
+                sourceIngestionProfile = SourceIngestionProfile.defaults
+                sourceIndexService = Some sourceIndexService
+                clients = clients
+                plugInProfile = plugInProfile
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
                 keywordModelId = optionValue "small-model" QaDefaults.keywordModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)

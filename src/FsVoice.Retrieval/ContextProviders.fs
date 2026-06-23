@@ -56,6 +56,9 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
 
     member _.Retrieval = retrieval
 
+    interface ISemanticIndexResourceProvider with
+        member _.SemanticIndexResource = retrieval.encoder |> Option.map box
+
     interface IQaContextProvider with
         member _.ProviderId = "fsvoice.fscolbert"
 
@@ -128,3 +131,117 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                 options.keywordGenerationClient |> Option.iter _.Dispose()
 
             ValueTask()
+
+type FsColbertSourceIndexServiceOptions =
+    { storageRoot: string
+      queryExpansionClient: IChatClient option
+      keywordGenerationClient: IChatClient option
+      disposeQueryExpansionClient: bool
+      disposeKeywordGenerationClient: bool
+      plugInProfile: QaPlugInProfile
+      plugInFingerprint: string
+      keywordModelId: string
+      elaborateIndexKeywords: bool
+      pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
+      buildMissingIndexes: bool
+      logExpansions: bool
+      logChunks: bool
+      useLexicalFilter: bool
+      report: string -> unit }
+
+module FsColbertSourceIndexServiceOptions =
+    let create storageRoot =
+        { storageRoot = storageRoot
+          queryExpansionClient = None
+          keywordGenerationClient = None
+          disposeQueryExpansionClient = false
+          disposeKeywordGenerationClient = false
+          plugInProfile = QaPlugInProfile.generic
+          plugInFingerprint = ""
+          keywordModelId = QaDefaults.keywordModel
+          elaborateIndexKeywords = true
+          pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
+          buildMissingIndexes = true
+          logExpansions = false
+          logChunks = false
+          useLexicalFilter = true
+          report = ignore }
+
+type FsColbertSourceIndexService(options: FsColbertSourceIndexServiceOptions) =
+    let pdfOptions profile =
+        KnowledgeSources.PdfIngestionOptions.fromSourceProfile options.pdfVisualDescriptionOptions profile
+
+    let previewVector (vector: KnowledgeSources.IndexPreviewVectorSummary) : SourcePreviewVectorSummary =
+        { tokenCount = vector.tokenCount
+          embeddingDim = vector.embeddingDim
+          valueSample = vector.valueSample }
+
+    let previewRecord (record: KnowledgeSources.IndexPreviewRecord) : SourcePreviewRecord =
+        { index = record.index
+          sectionPath = record.sectionPath
+          contentRole = record.contentRole
+          pageNumbers = record.pageNumbers
+          layoutLabels = record.layoutLabels
+          captions = record.captions
+          text = record.text
+          keywords = record.keywords
+          terms = record.terms
+          vector = previewVector record.vector }
+
+    let preview (preview: KnowledgeSources.IndexPreview) : SourcePreview =
+        { source = preview.source
+          totalChunks = preview.totalChunks
+          sampledCount = preview.sampledCount
+          records = preview.records |> List.map previewRecord }
+
+    interface ISourceIndexService with
+        member _.CreateContextProvider(profile, mode, sources) =
+            let pdfOptions = pdfOptions profile
+
+            let providerOptions =
+                { FsColbertContextProviderOptions.create options.storageRoot mode sources with
+                    queryExpansionClient = options.queryExpansionClient
+                    keywordGenerationClient = options.keywordGenerationClient
+                    disposeQueryExpansionClient = options.disposeQueryExpansionClient
+                    disposeKeywordGenerationClient = options.disposeKeywordGenerationClient
+                    plugInProfile = options.plugInProfile
+                    plugInFingerprint = options.plugInFingerprint
+                    keywordModelId = options.keywordModelId
+                    elaborateIndexKeywords = options.elaborateIndexKeywords
+                    pdfParsingMode = pdfOptions.parsingMode
+                    enableOpticalParsing = pdfOptions.enableOpticalParsing
+                    enableAutoOpticalParsing = pdfOptions.enableAutoOpticalParsing
+                    pdfVisualDescriptionOptions = pdfOptions.visualDescriptions
+                    buildMissingIndexes = options.buildMissingIndexes
+                    logExpansions = options.logExpansions
+                    logChunks = options.logChunks
+                    useLexicalFilter = options.useLexicalFilter
+                    report = options.report }
+
+            new FsColbertContextProvider(providerOptions) :> IQaContextProvider
+
+        member _.PreviewAsync(profile, source, maxRecords, cancellationToken) =
+            task {
+                cancellationToken.ThrowIfCancellationRequested()
+
+                return
+                    KnowledgeSources.loadIndexPreviewWithOptions
+                        options.storageRoot
+                        options.report
+                        (pdfOptions profile)
+                        maxRecords
+                        source
+                    |> Result.map preview
+            }
+
+        member _.DeleteArtifactsAsync(source, cancellationToken) =
+            task {
+                try
+                    let! result =
+                        KnowledgeSources.clearPersistedIndexesForSource options.storageRoot source
+                        |> fun work -> Async.StartAsTask(work, cancellationToken = cancellationToken)
+
+                    return Ok result
+                with ex ->
+                    return Error ex
+            }

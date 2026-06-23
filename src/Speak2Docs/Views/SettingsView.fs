@@ -2,6 +2,7 @@ namespace Speak2Docs.Views
 
 open Fabulous.Maui
 open Speak2Docs
+open Speak2Docs.WorkFlow
 open Microsoft.Maui
 open Microsoft.Maui.Controls
 open Microsoft.Maui.Graphics
@@ -11,7 +12,7 @@ module SettingsView =
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
-        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        || model.sessionState <> RealtimeDisconnected
 
     let private canEditSettings model =
         not model.isBusy && not (isRealtimeActive model)

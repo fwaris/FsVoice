@@ -23,7 +23,7 @@ module Connect =
           "no realtime server events arrived after connection setup. Check OpenAI billing/quota and realtime model access." ]
         |> String.concat ""
 
-    let private realtimeState (state: RTOpenAI.WebRTC.State) =
+    let realtimeState (state: RTOpenAI.WebRTC.State) =
         if state.IsConnected then RealtimeConnected
         elif state.IsConnecting then RealtimeConnecting
         else RealtimeDisconnected
@@ -204,7 +204,16 @@ module Connect =
                                 log mailbox "Duplicate realtime connection request ignored."
                             else
                                 realtimeConnectionRequested <- true
-                                connectRealtime mailbox session token apiKey connectionId connection firstServerEvent realtimeSession
+
+                                connectRealtime
+                                    mailbox
+                                    session
+                                    token
+                                    apiKey
+                                    connectionId
+                                    connection
+                                    firstServerEvent
+                                    realtimeSession
                         | TranscriptFinalized _ -> ()
                         | OracleResponseReady(_, Some candidate) ->
                             log mailbox $"Oracle final response: {Text.normalizeWhitespace candidate.answer}"
@@ -249,7 +258,9 @@ module Connect =
                             let cancellation = new CancellationTokenSource()
                             let serverEvents = Channel.CreateUnbounded<JsonElement>()
                             let clientEvents = Channel.CreateUnbounded<JsonElement>()
-                            let firstServerEvent = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+                            let firstServerEvent =
+                                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
                             let voiceConnection =
                                 { VoiceConnection.receiver = serverEvents.Reader
@@ -268,7 +279,9 @@ module Connect =
                                     if state.IsConnected then
                                         applyAudioRoute settings
 
-                                    parms.mailbox.Writer.TryWrite(WebRTC_StateChanged(parms.connectionId, state))
+                                    parms.mailbox.Writer.TryWrite(
+                                        WebRTC_StateChanged(parms.connectionId, realtimeState state)
+                                    )
                                     |> ignore
 
                                     notifyHost session cancellation.Token (RealtimeStateChanged(realtimeState state)))
@@ -278,6 +291,7 @@ module Connect =
                                     Disposables = stateSubscription :: conn.Disposables }
 
                             startClientPump parms.mailbox conn clientEvents cancellation.Token
+
                             startServerPump
                                 parms.mailbox
                                 conn

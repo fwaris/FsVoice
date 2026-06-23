@@ -415,6 +415,9 @@ let private testResponseWebSocketConfig =
 let private testQaSessionOptions storageRoot =
     QaSessionOptions.create storageRoot testResponseWebSocketConfig
 
+let private testSourceIndexService storageRoot =
+    FsColbertSourceIndexService(FsColbertSourceIndexServiceOptions.create storageRoot) :> ISourceIndexService
+
 let private responsesTransportOverrideAsync handler =
     new TestResponsesTransport(
         (fun _ -> task { return () }),
@@ -2694,6 +2697,65 @@ let ``pdf parser index fingerprint includes layout quality revision`` () =
     Assert.False(String.Equals(hybrid, withoutLayout, StringComparison.Ordinal))
 
 [<Fact>]
+let ``source ingestion defaults map to hybrid parser with automatic text repair`` () =
+    let options =
+        KnowledgeSources.PdfIngestionOptions.fromSourceProfile
+            PdfVisualDescriptionOptions.disabled
+            SourceIngestionProfile.defaults
+
+    Assert.Equal(KnowledgeSources.PdfParsingMode.Hybrid, options.parsingMode)
+    Assert.False options.enableOpticalParsing
+    Assert.True options.enableAutoOpticalParsing
+    Assert.False options.visualDescriptions.enabled
+
+[<Fact>]
+let ``source ingestion profile maps layout visuals only when structured layout is enabled`` () =
+    let visualOptions =
+        { PdfVisualDescriptionOptions.defaults with
+            enabled = true
+            modelId = "visual-test-model" }
+
+    let withLayout =
+        { SourceIngestionProfile.defaults with
+            pdf =
+                { SourceIngestionProfile.defaults.pdf with
+                    textExtraction = StructuredText true
+                    describeVisuals = true } }
+
+    let withoutLayout =
+        { withLayout with
+            pdf =
+                { withLayout.pdf with
+                    textExtraction = StructuredText false } }
+
+    let layoutOptions =
+        KnowledgeSources.PdfIngestionOptions.fromSourceProfile visualOptions withLayout
+
+    let noLayoutOptions =
+        KnowledgeSources.PdfIngestionOptions.fromSourceProfile visualOptions withoutLayout
+
+    Assert.Equal(KnowledgeSources.PdfParsingMode.Hybrid, layoutOptions.parsingMode)
+    Assert.True layoutOptions.visualDescriptions.enabled
+    Assert.Equal("visual-test-model", layoutOptions.visualDescriptions.modelId)
+    Assert.Equal(KnowledgeSources.PdfParsingMode.HybridWithoutLayout, noLayoutOptions.parsingMode)
+    Assert.False noLayoutOptions.visualDescriptions.enabled
+
+[<Fact>]
+let ``source ingestion profile maps legacy parsing and sparse page OCR`` () =
+    let profile = SourceIngestionProfile.fromLegacyFlags false false true false true
+
+    let options =
+        KnowledgeSources.PdfIngestionOptions.fromSourceProfile
+            { PdfVisualDescriptionOptions.defaults with
+                enabled = true }
+            profile
+
+    Assert.Equal(KnowledgeSources.PdfParsingMode.Legacy, options.parsingMode)
+    Assert.True options.enableOpticalParsing
+    Assert.False options.enableAutoOpticalParsing
+    Assert.False options.visualDescriptions.enabled
+
+[<Fact>]
 let ``pdf source parsing fingerprint includes docling rasterizer and layout model`` () =
     let storageRoot = tempStorageRoot ()
     let path = Path.Combine(storageRoot, "fingerprint.pdf")
@@ -3875,6 +3937,57 @@ let ``clearing persisted indexes for a source preserves other source indexes`` (
             Directory.Delete(storageRoot, true)
 
 [<Fact>]
+let ``source index service deletes source artifacts idempotently`` () =
+    let storageRoot = tempStorageRoot ()
+    Directory.CreateDirectory storageRoot |> ignore
+
+    try
+        let sourcePath = Path.Combine(storageRoot, "service-source.md")
+        let otherPath = Path.Combine(storageRoot, "service-other.md")
+        File.WriteAllText(sourcePath, "Source")
+        File.WriteAllText(otherPath, "Other")
+
+        let source =
+            { kind = Markdown
+              location = sourcePath
+              enabled = true }
+
+        let other =
+            { kind = Markdown
+              location = otherPath
+              enabled = true }
+
+        let sourceIndexPath = writePersistedIndexStub storageRoot "service-source" source
+        let otherIndexPath = writePersistedIndexStub storageRoot "service-other" other
+        let service = testSourceIndexService storageRoot
+
+        let firstDelete =
+            service.DeleteArtifactsAsync(source, CancellationToken.None).Result
+
+        let secondDelete =
+            service.DeleteArtifactsAsync(source, CancellationToken.None).Result
+
+        match firstDelete with
+        | Error ex -> raise ex
+        | Ok(deleted, errors) ->
+            Assert.Empty errors
+            Assert.Equal(2, deleted)
+
+        match secondDelete with
+        | Error ex -> raise ex
+        | Ok(deleted, errors) ->
+            Assert.Empty errors
+            Assert.Equal(0, deleted)
+
+        Assert.False(File.Exists sourceIndexPath)
+        Assert.False(File.Exists($"{sourceIndexPath}.metadata.json"))
+        Assert.True(File.Exists otherIndexPath)
+        Assert.True(File.Exists($"{otherIndexPath}.metadata.json"))
+    finally
+        if Directory.Exists storageRoot then
+            Directory.Delete(storageRoot, true)
+
+[<Fact>]
 let ``legacy prebuilt manifest still loads persisted index keywords`` () =
     let storageRoot = tempStorageRoot ()
     let sourcePath = Path.Combine(storageRoot, "legacy.md")
@@ -4438,9 +4551,12 @@ let ``qa session does not call llm query expansion by default`` () =
                 """{"terms":["BLUE-42"],"rewrittenQueries":["BLUE-42"],"sectionName":null,"queryType":"Question"}"""
             )
 
+        let storageRoot = tempStorageRoot ()
+
         let options =
-            { testQaSessionOptions (tempStorageRoot ()) with
+            { testQaSessionOptions storageRoot with
                 autoWriteback = false
+                sourceIndexService = Some(testSourceIndexService storageRoot)
                 clients =
                     { QaModelClients.none with
                         queryExpansion = Some expansion } }
@@ -4508,7 +4624,8 @@ let ``qa session sends internal document index context to responses answer promp
 
         let options =
             { testQaSessionOptions storageRoot with
-                autoWriteback = false }
+                autoWriteback = false
+                sourceIndexService = Some(testSourceIndexService storageRoot) }
 
         use session = new QaSession(options, transport)
 
@@ -5204,6 +5321,63 @@ let ``durable memory types explicit user preference as directive`` () =
 
     Assert.Equal(Directive, proposals.Head.kind)
     Assert.Contains("concise", proposals.Head.text, StringComparison.OrdinalIgnoreCase)
+
+[<Fact>]
+let ``durable memory loads legacy colbert document ids into semantic ids`` () =
+    let storageRoot = tempStorageRoot ()
+    Directory.CreateDirectory storageRoot |> ignore
+    let path = Path.Combine(storageRoot, "legacy-memory.json")
+
+    File.WriteAllText(
+        path,
+        """
+{
+  "schemaVersion": 1,
+  "records": [
+    {
+      "memoryId": "mem_legacy",
+      "kind": "directive",
+      "title": "Legacy Memory",
+      "text": "Use concise answers.",
+      "summary": "Concise answers",
+      "scope": "session",
+      "namespaceId": "default",
+      "entities": [],
+      "tags": [],
+      "status": "current",
+      "confidence": 0.9,
+      "importance": 0.5,
+      "sensitivity": "normal",
+      "observedAt": "2026-01-01T00:00:00.0000000+00:00",
+      "validFrom": "2026-01-01T00:00:00.0000000+00:00",
+      "validTo": "",
+      "lastConfirmedAt": "2026-01-01T00:00:00.0000000+00:00",
+      "sourceType": "test",
+      "sourceIds": [],
+      "toolName": "",
+      "toolArgsHash": "",
+      "resultHash": "",
+      "supersedes": [],
+      "supersededBy": "",
+      "conflictsWith": [],
+      "derivedFrom": [],
+      "indexText": "Concise answers",
+      "colbertDocIds": [ "legacy-doc-1" ],
+      "indexedAt": "2026-01-01T00:00:00.0000000+00:00",
+      "embeddingModel": "legacy-model",
+      "version": 1
+    }
+  ]
+}
+"""
+    )
+
+    let store, logs = DurableMemory.load path
+    let record = Assert.Single store.records
+
+    Assert.Contains(logs, fun log -> log.Contains("Loaded 1 durable memory", StringComparison.OrdinalIgnoreCase))
+    Assert.Equal<string list>([ "legacy-doc-1" ], record.retrieval.semanticDocumentIds)
+    Assert.Equal(Some "legacy-model", record.retrieval.embeddingModel)
 
 [<Fact>]
 let ``durable memory hot overlay makes committed memory immediately recallable`` () =
@@ -6279,6 +6453,14 @@ let ``FsVoice Platform public contract stays dependency light`` () =
         fun name -> not (isNull name) && name.Contains("RTFlow", StringComparison.OrdinalIgnoreCase)
     )
 
+[<Fact>]
+let ``Ctx Runtime does not reference retrieval implementation`` () =
+    let references =
+        typeof<QaSession>.Assembly.GetReferencedAssemblies() |> Array.map _.Name
+
+    Assert.DoesNotContain("FsVoice.Retrieval", references)
+    Assert.DoesNotContain("FsVoice.Retrieval.PdfRasterization", references)
+
 let private demoVoiceConnectionWithChannels () =
     let inbound = Channel.CreateUnbounded<JsonElement>()
     let outbound = Channel.CreateUnbounded<JsonElement>()
@@ -6407,11 +6589,13 @@ let private demoRuntimeSettings values =
 
 let private demoOrchestration settings =
     let qaPlugIn = FsVoice.Ctx.GenericQaPlugIn() :> IQaPlugIn
+    let storageRoot = tempStorageRoot ()
 
     let options: Speak2Docs.WorkFlow.DemoVoiceOrchestrationOptions =
         { settings = settings
           plugIn = PlugInDefinition.generic
           qaPlugIn = qaPlugIn
+          sourceIndexService = testSourceIndexService storageRoot
           retrievalMode = Speak2Docs.InternalDocumentIndex
           sources = [] }
 

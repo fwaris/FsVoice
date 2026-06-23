@@ -2,7 +2,6 @@ namespace FsVoice.Ctx
 
 open System
 open FsVoice.Core
-open FsVoice.Retrieval
 
 type internal AnswerPrompt =
     { instructions: string
@@ -123,9 +122,9 @@ Return only the answer text."""
         (observations: QaToolObservation list)
         =
         let sourceContext =
-            KnowledgeSources.renderContextWithLimit options.maxContextChunks chunks
+            SourceRendering.renderContextWithLimit options.maxContextChunks chunks
 
-        let inventory = KnowledgeSources.renderInventory (contextSources ())
+        let inventory = SourceRendering.renderInventory (contextSources ())
         let typedMemory = renderTypedMemory decision memoryHits
         let toolObservations = renderObservations observations
 

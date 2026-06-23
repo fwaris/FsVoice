@@ -2,6 +2,7 @@ namespace Speak2Docs.Views
 
 open Fabulous.Maui
 open Speak2Docs
+open Speak2Docs.WorkFlow
 open Microsoft.Maui
 open Microsoft.Maui.Controls
 open Microsoft.Maui.Graphics
@@ -11,18 +12,19 @@ module ToolbarView =
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
-        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        || model.sessionState <> RealtimeDisconnected
 
     let private connectionColor model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connecting -> Colors.Orange
-        | RTOpenAI.WebRTC.State.Connected -> Colors.Magenta
-        | _ -> Theme.secondaryTextColor model.appTheme
+        | RealtimeConnecting -> Colors.Orange
+        | RealtimeConnected -> Colors.Magenta
+        | RealtimeDisconnected -> Theme.secondaryTextColor model.appTheme
 
     let private connectionIcon model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connected -> Icons.mic
-        | _ -> Icons.micOff
+        | RealtimeConnected -> Icons.mic
+        | RealtimeConnecting
+        | RealtimeDisconnected -> Icons.micOff
 
     let main model =
         (Grid(

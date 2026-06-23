@@ -52,7 +52,7 @@ type StartParams =
 
 and IndexPreviewState =
     | PreviewLoading of documentId: string
-    | PreviewReady of KnowledgeSources.IndexPreview
+    | PreviewReady of FsVoice.Ctx.SourcePreview
     | PreviewFailed of documentId: string * error: string
 
 and PickedSourceImportResult =
@@ -71,7 +71,7 @@ and Model =
       bundle: ConnectionBundle option
       pendingConnectionId: string option
       disconnectedConnectionIds: Set<string>
-      sessionState: RTOpenAI.WebRTC.State
+      sessionState: RealtimeConnectionState
       openAiKey: string
       activePlugIn: FsVoice.Ctx.PlugInDefinition
       qaPlugIn: FsVoice.Ctx.IQaPlugIn
@@ -150,12 +150,12 @@ and Msg =
     | PreviewIndex of string
     | RefreshIndexPreview
     | IndexPreviewBack
-    | IndexPreviewLoaded of string * Result<KnowledgeSources.IndexPreview, exn>
+    | IndexPreviewLoaded of string * Result<FsVoice.Ctx.SourcePreview, exn>
     | ApplySources
     | StartStop
     | StartCompleted of string * Result<ConnectionBundle, exn>
     | StopCompleted of string * Result<unit, exn>
-    | WebRTC_StateChanged of string * RTOpenAI.WebRTC.State
+    | WebRTC_StateChanged of string * RealtimeConnectionState
     | RealtimeConnectFailed of string * string
     | Log_Append of string
     | Log_Clear

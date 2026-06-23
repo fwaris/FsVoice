@@ -141,6 +141,25 @@ module KnowledgeSources =
 
         let defaults = create PdfParsingMode.Hybrid
 
+        let fromProfile visualDescriptions (profile: PdfIngestionProfile) =
+            let parsingMode, enableLayoutVisuals =
+                match profile.textExtraction with
+                | LegacyText -> PdfParsingMode.Legacy, false
+                | StructuredText true -> PdfParsingMode.Hybrid, true
+                | StructuredText false -> PdfParsingMode.HybridWithoutLayout, false
+
+            { parsingMode = parsingMode
+              enableOpticalParsing = profile.ocr.parseSparsePages
+              enableAutoOpticalParsing = profile.ocr.repairCorruptText
+              visualDescriptions =
+                if profile.describeVisuals && enableLayoutVisuals then
+                    visualDescriptions
+                else
+                    PdfVisualDescriptionOptions.disabled }
+
+        let fromSourceProfile visualDescriptions (profile: SourceIngestionProfile) =
+            fromProfile visualDescriptions profile.pdf
+
         let sanitize (options: PdfIngestionOptions) =
             { options with
                 visualDescriptions = PdfVisualDescriptionOptions.sanitize options.visualDescriptions }

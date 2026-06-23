@@ -18,6 +18,7 @@ module OracleAgent =
           plugIn: FsVoice.Ctx.PlugInDefinition
           qaPlugIn: FsVoice.Ctx.IQaPlugIn
           plugInSettings: Map<string, string>
+          sourceIndexService: FsVoice.Ctx.ISourceIndexService
           session: FsVoice.Ctx.IQaOrchestrator option
           retrievalMode: Speak2Docs.RetrievalMode
           sources: KnowledgeSource list
@@ -32,34 +33,8 @@ module OracleAgent =
         | InternalDocumentIndex -> FsVoice.Ctx.RetrievalMode.InternalDocumentIndex
         | FsColbertWithFallback -> FsVoice.Ctx.RetrievalMode.FsColbertWithFallback
 
-    let private pdfParsingMode flags =
-        if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif
-            flags.useHybridPdfParsing
-            && (flags.useOpticalParsing || flags.useAutoOcrFallback)
-        then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
-        else
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
-
     let private modelConfig role (plugIn: FsVoice.Ctx.PlugInDefinition) =
         FsVoice.Ctx.PlugInDefinition.model role plugIn
-
-    let private visualDescriptionOptions apiKey flags (plugIn: FsVoice.Ctx.PlugInDefinition) =
-        if
-            not flags.describePdfVisuals
-            || not flags.useHybridPdfParsing
-            || not flags.useLayoutAnalysis
-        then
-            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
-        else
-            let visualModel = modelConfig FsVoice.Ctx.VisualDescription plugIn
-
-            { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
-                enabled = true
-                client = Some(createClient apiKey visualModel.modelId)
-                modelId = visualModel.modelId }
 
     let private createSession (st: State) flags : FsVoice.Ctx.IQaOrchestrator =
         if String.IsNullOrWhiteSpace st.apiKey then
@@ -93,10 +68,8 @@ module OracleAgent =
                 answerTransportMode = Speak2Docs.RuntimeSettings.DefaultOracleAnswerTransportMode
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
-                pdfParsingMode = pdfParsingMode flags
-                enableOpticalParsing = flags.useOpticalParsing
-                enableAutoOpticalParsing = flags.useAutoOcrFallback
-                pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
+                sourceIngestionProfile = SourceFlags.ingestionProfile flags
+                sourceIndexService = Some st.sourceIndexService
                 enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
@@ -113,29 +86,7 @@ module OracleAgent =
 
     let private createContextProvider st flags mode sources : FsVoice.Ctx.IQaContextProvider =
         let qaMode = toQaMode mode
-
-        let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
-
-        let options =
-            { FsVoice.Retrieval.FsColbertContextProviderOptions.create st.storageRoot qaMode sources with
-                queryExpansionClient = None
-                keywordGenerationClient = None
-                disposeKeywordGenerationClient = false
-                plugInProfile = st.plugIn.profile
-                plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint st.plugIn
-                keywordModelId = keywordModel.modelId
-                elaborateIndexKeywords = flags.elaborateIndexKeywords
-                pdfParsingMode = pdfParsingMode flags
-                enableOpticalParsing = flags.useOpticalParsing
-                enableAutoOpticalParsing = flags.useAutoOcrFallback
-                pdfVisualDescriptionOptions = visualDescriptionOptions st.apiKey flags st.plugIn
-                buildMissingIndexes = false
-                logExpansions = flags.logExpansions
-                logChunks = flags.logChunks
-                useLexicalFilter = flags.useLexicalFilter
-                report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
-
-        new FsVoice.Retrieval.FsColbertContextProvider(options) :> FsVoice.Ctx.IQaContextProvider
+        st.sourceIndexService.CreateContextProvider(SourceFlags.ingestionProfile flags, qaMode, sources)
 
     let private createPlugInContextProviders st =
         try
@@ -179,8 +130,6 @@ module OracleAgent =
 
     let private configureSession st flags mode sources (session: FsVoice.Ctx.IQaOrchestrator) =
         async {
-            KnowledgeSources.configurePdfParser flags.useLayoutAnalysis flags.useOpticalParsing flags.useAutoOcrFallback
-
             let provider = createContextProvider st flags mode sources
             let providers = createPlugInContextProviders st @ [ provider ]
             let! errors = session.ConfigureAsync(providers, CancellationToken.None) |> Async.AwaitTask
@@ -341,7 +290,7 @@ module OracleAgent =
             | _ -> return st
         }
 
-    let start storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus =
+    let start storageRoot apiKey plugIn qaPlugIn plugInSettings sourceIndexService retrievalMode sources flags bus =
         let st0 =
             { bus = bus
               storageRoot = storageRoot
@@ -349,6 +298,7 @@ module OracleAgent =
               plugIn = FsVoice.Ctx.PlugInDefinition.sanitize plugIn
               qaPlugIn = qaPlugIn
               plugInSettings = plugInSettings
+              sourceIndexService = sourceIndexService
               session = None
               retrievalMode = retrievalMode
               sources = sources

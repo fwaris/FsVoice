@@ -3,7 +3,6 @@ namespace FsVoice.Ctx
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.AI
-open FsVoice.Retrieval
 
 type QaModelClients =
     { queryExpansion: IChatClient option
@@ -24,14 +23,25 @@ module QaAnswerTransportMode =
 
     let storageName = FsResponses.ResponsesTransportMode.storageName
 
+type IAnswerTransportFactory =
+    abstract Create: FsResponses.ResponsesTransportOptions -> FsResponses.IResponsesTransport
+
+type DefaultAnswerTransportFactory() =
+    interface IAnswerTransportFactory with
+        member _.Create options =
+            new FsResponses.ResponsesTransport(options) :> FsResponses.IResponsesTransport
+
 type QaSessionOptions =
     { storageRoot: string
       memoryStorePath: string option
       toolProviderDirectory: string option
       retrievalMode: RetrievalMode
+      sourceIngestionProfile: SourceIngestionProfile
+      sourceIndexService: ISourceIndexService option
       clients: QaModelClients
       answerResponseWebSocketConfig: FsResponses.ResponseWebSocketConfig
       answerTransportMode: FsResponses.ResponsesTransportMode
+      answerTransportFactory: IAnswerTransportFactory
       answerRequireToolCall: bool
       answerPromptCacheKey: string option
       answerPromptCacheRetention: string option
@@ -41,10 +51,6 @@ type QaSessionOptions =
       answerModelId: string
       keywordModelId: string
       elaborateIndexKeywords: bool
-      pdfParsingMode: KnowledgeSources.PdfParsingMode
-      enableOpticalParsing: bool
-      enableAutoOpticalParsing: bool
-      pdfVisualDescriptionOptions: PdfVisualDescriptionOptions
       memoryCandidateChunks: int
       maxContextChunks: int
       memoryService: IMemoryService option
@@ -67,9 +73,12 @@ module QaSessionOptions =
           memoryStorePath = None
           toolProviderDirectory = None
           retrievalMode = FsColbertWithFallback
+          sourceIngestionProfile = SourceIngestionProfile.defaults
+          sourceIndexService = None
           clients = QaModelClients.none
           answerResponseWebSocketConfig = answerResponseWebSocketConfig
           answerTransportMode = FsResponses.ResponsesTransportMode.PersistentWebSocket
+          answerTransportFactory = DefaultAnswerTransportFactory() :> IAnswerTransportFactory
           answerRequireToolCall = false
           answerPromptCacheKey = None
           answerPromptCacheRetention = None
@@ -79,10 +88,6 @@ module QaSessionOptions =
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.keywordModel
           elaborateIndexKeywords = true
-          pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
-          enableOpticalParsing = false
-          enableAutoOpticalParsing = true
-          pdfVisualDescriptionOptions = PdfVisualDescriptionOptions.disabled
           memoryCandidateChunks = QaDefaults.memoryCandidateChunks
           maxContextChunks = QaDefaults.maxContextChunks
           memoryService = None

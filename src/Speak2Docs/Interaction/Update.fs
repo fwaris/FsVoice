@@ -125,7 +125,7 @@ module Update =
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
-        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        || model.sessionState <> RealtimeDisconnected
 
     let private setKeepScreenOn enabled =
         let apply () =
@@ -353,6 +353,37 @@ module Update =
                     client = None
                     modelId = visualModel.modelId }
 
+    let private sourceIngestionProfile (model: Model) =
+        FsVoice.Ctx.SourceIngestionProfile.fromLegacyFlags
+            true
+            model.useLayoutAnalysis
+            model.useOpticalParsing
+            model.autoOcrFallback
+            model.describePdfVisuals
+
+    let private sourceIndexService buildMissingIndexes report (model: Model) =
+        let plugIn = composePlugIn model
+        let keywordModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Keyword plugIn
+
+        let options =
+            { FsVoice.Retrieval.FsColbertSourceIndexServiceOptions.create FileSystem.AppDataDirectory with
+                queryExpansionClient = None
+                keywordGenerationClient = None
+                plugInProfile = plugIn.profile
+                plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn
+                keywordModelId = keywordModel.modelId
+                elaborateIndexKeywords = model.elaborateIndexKeywords
+                pdfVisualDescriptionOptions =
+                    { visualDescriptionOptions model with
+                        client = None }
+                buildMissingIndexes = buildMissingIndexes
+                logExpansions = model.logExpansions
+                logChunks = model.logChunks
+                useLexicalFilter = model.useLexicalFilter
+                report = report }
+
+        FsVoice.Retrieval.FsColbertSourceIndexService(options) :> FsVoice.Ctx.ISourceIndexService
+
     let private withKeywordCancellation token (options: FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions) =
         { options with
             cancellationToken = Some token }
@@ -441,16 +472,16 @@ module Update =
                 cancellationToken.ThrowIfCancellationRequested()
 
                 let! outcome =
-                    PdfLibrary.processDocuments
-                        report
-                        keywordOptions
-                        visualOptions
-                        true
-                        useLayoutAnalysis
-                        useOpticalParsing
-                        useAutoOcrFallback
-                        cancellationToken
-                        docs
+                    SourceLibraryService.processDocuments
+                        { report = report
+                          keywordOptions = keywordOptions
+                          visualOptions = visualOptions
+                          useHybridPdfParsing = true
+                          useLayoutAnalysis = useLayoutAnalysis
+                          useOpticalParsing = useOpticalParsing
+                          useAutoOcrFallback = useAutoOcrFallback
+                          cancellationToken = cancellationToken
+                          documents = docs }
 
                 report $"Document processing command completed for {docs.Length} document(s)."
                 return Ok outcome
@@ -483,24 +514,28 @@ module Update =
                 return Error ex
         }
 
-    let private deleteDocumentAndIndexes (doc: PdfDocumentSource) =
+    let private deleteDocumentAndIndexes (model: Model) (doc: PdfDocumentSource) =
         async {
             try
                 let source = sourceFromDocument doc
 
-                let! removedFile, prebuiltIndexCount, prebuiltErrors =
-                    PdfLibrary.deleteStoredDocumentAndPrebuiltIndexes doc
+                let sourceIndexService =
+                    let report msg =
+                        Debug.WriteLine msg
+                        Console.WriteLine msg
 
-                let! persistedIndexCount, persistedErrors =
-                    FsVoice.Retrieval.KnowledgeSources.clearPersistedIndexesForSource FileSystem.AppDataDirectory source
+                    sourceIndexService false report model
+
+                let! removedFile, removedIndexCount, indexErrors =
+                    SourceLibraryService.deleteDocumentAndArtifacts sourceIndexService doc source CancellationToken.None
 
                 return
                     Ok
                         { id = doc.id
                           displayName = doc.displayName
                           removedFile = removedFile
-                          removedIndexCount = prebuiltIndexCount + persistedIndexCount
-                          indexErrors = prebuiltErrors @ persistedErrors }
+                          removedIndexCount = removedIndexCount
+                          indexErrors = indexErrors }
             with ex ->
                 return Error ex
         }
@@ -528,17 +563,18 @@ module Update =
                         Debug.WriteLine msg
                         Console.WriteLine msg
 
-                    return
-                        KnowledgeSources.loadIndexPreviewWithVisualOptions
-                            FileSystem.AppDataDirectory
-                            report
-                            (visualDescriptionOptions model)
-                            true
-                            model.useLayoutAnalysis
-                            model.useOpticalParsing
-                            model.autoOcrFallback
+                    let sourceIndexService = sourceIndexService false report model
+
+                    let! previewResult =
+                        SourceLibraryService.previewAsync
+                            sourceIndexService
+                            (sourceIngestionProfile model)
                             20
                             source
+                            CancellationToken.None
+
+                    return
+                        previewResult
                         |> Result.mapError (fun err -> InvalidOperationException(err) :> exn)
             with ex ->
                 return Error ex
@@ -781,7 +817,7 @@ module Update =
                 ->
                 { model with
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = true
                     log = log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -790,7 +826,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -799,7 +835,7 @@ module Update =
     let private handleRealtimeStateChanged connectionId state model =
         if not (isCurrentRealtimeConnection connectionId model) then
             model, Cmd.none
-        elif state = RTOpenAI.WebRTC.State.Disconnected then
+        elif state = RealtimeDisconnected then
             let model = markRealtimeDisconnected connectionId model
 
             match model.bundle with
@@ -822,9 +858,13 @@ module Update =
         refreshRuntimeSettings model |> ignore
 
         let orchestrationOptions =
+            let sourceIndexService =
+                sourceIndexService false (fun msg -> model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore) model
+
             { settings = model.runtimeSettings
               plugIn = model.activePlugIn
               qaPlugIn = model.qaPlugIn
+              sourceIndexService = sourceIndexService
               retrievalMode = model.retrievalMode
               sources = sources model }
 
@@ -850,7 +890,7 @@ module Update =
             isBusy = true
             pendingConnectionId = Some connectionId
             disconnectedConnectionIds = model.disconnectedConnectionIds |> Set.remove connectionId
-            sessionState = RTOpenAI.WebRTC.State.Connecting
+            sessionState = RealtimeConnecting
             openAiDisclosure = None
             log = "Starting realtime Speak2Docs flow..." :: model.log },
         Cmd.OfAsync.either
@@ -894,7 +934,7 @@ module Update =
               bundle = None
               pendingConnectionId = None
               disconnectedConnectionIds = Set.empty
-              sessionState = RTOpenAI.WebRTC.State.Disconnected
+              sessionState = RealtimeDisconnected
               openAiKey = Settings.openAiKey ()
               activePlugIn = loadedPlugIn.definition
               qaPlugIn = loadedPlugIn.plugIn
@@ -1626,7 +1666,7 @@ module Update =
                         model, Cmd.none
                 | Some doc ->
                     { model with isBusy = true },
-                    Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError
+                    Cmd.OfAsync.either (deleteDocumentAndIndexes model) doc DeletePdfCompleted EventError
         | DeletePdfCompleted(Ok result) ->
             let pdfDocuments =
                 model.pdfDocuments |> List.filter (fun doc -> doc.id <> result.id)
@@ -1823,13 +1863,13 @@ module Update =
             | Some pendingId when String.Equals(pendingId, connectionId, StringComparison.OrdinalIgnoreCase) ->
                 let wasDisconnected = model.disconnectedConnectionIds |> Set.contains connectionId
 
-                let actualState = bundle.connection.WebRtcClient.State
+                let actualState = Connect.realtimeState bundle.connection.WebRtcClient.State
 
                 if wasDisconnected then
                     { model with
                         bundle = None
                         pendingConnectionId = Some connectionId
-                        sessionState = RTOpenAI.WebRTC.State.Disconnected
+                        sessionState = RealtimeDisconnected
                         isBusy = true
                         log =
                             "Realtime connection closed before session could start." :: model.log
@@ -1838,8 +1878,8 @@ module Update =
                     stopBundleCommand bundle
                 else
                     let activeState =
-                        if actualState = RTOpenAI.WebRTC.State.Disconnected then
-                            RTOpenAI.WebRTC.State.Connecting
+                        if actualState = RealtimeDisconnected then
+                            RealtimeConnecting
                         else
                             actualState
 
@@ -1858,7 +1898,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Start failed: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1870,7 +1910,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = "Realtime flow stopped." :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1879,7 +1919,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = "Realtime cleanup completed." :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1891,7 +1931,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Stop cleanup reported an issue: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1900,7 +1940,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Stop cleanup reported an issue: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1976,12 +2016,12 @@ module Update =
 
     let internal statusText model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connected -> "Connected"
-        | RTOpenAI.WebRTC.State.Connecting -> "Connecting"
-        | _ -> "Disconnected"
+        | RealtimeConnected -> "Connected"
+        | RealtimeConnecting -> "Connecting"
+        | RealtimeDisconnected -> "Disconnected"
 
     let internal statusColor model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connected -> Colors.SeaGreen
-        | RTOpenAI.WebRTC.State.Connecting -> Colors.DarkOrange
-        | _ -> Colors.DimGray
+        | RealtimeConnected -> Colors.SeaGreen
+        | RealtimeConnecting -> Colors.DarkOrange
+        | RealtimeDisconnected -> Colors.DimGray

@@ -85,6 +85,7 @@
     <Compile Include="Audio.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
+    <Compile Include="SourceLibraryService.fs" />
     <Compile Include="Interaction\Connect.fs" />
     <Compile Include="Interaction\Update.fs" />
     <Compile Include="Views\Theme.fs" />

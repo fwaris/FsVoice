@@ -5,7 +5,6 @@ open System.Diagnostics
 open System.Threading
 open System.Threading.Tasks
 open FsVoice.Core
-open FsVoice.Retrieval
 
 type QaSession private (options: QaSessionOptions, injectedTransport: FsResponses.IResponsesTransport option) =
     let mutable contextProviders = options.contextProviders
@@ -18,7 +17,11 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
         contextProviders
         |> List.tryPick (fun provider ->
             match provider with
-            | :? FsColbertContextProvider as fsColbert -> fsColbert.Retrieval.encoder
+            | :? ISemanticIndexResourceProvider as semanticProvider ->
+                semanticProvider.SemanticIndexResource
+                |> Option.bind (function
+                    | :? FsColbert.OnnxColbertEncoder as encoder -> Some encoder
+                    | _ -> None)
             | _ -> None)
 
     let memoryService =
@@ -40,7 +43,7 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
                     mode = options.answerTransportMode
                     report = report }
 
-            new FsResponses.ResponsesTransport(transportOptions) :> FsResponses.IResponsesTransport)
+            options.answerTransportFactory.Create transportOptions)
 
     let retrieveContext question maxResults cancellationToken =
         async {
@@ -106,7 +109,7 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
                 task {
                     let! chunks = retrieveContext question maxResults cancellationToken |> Async.StartAsTask
 
-                    return KnowledgeSources.renderContextWithLimit options.maxContextChunks chunks
+                    return SourceRendering.renderContextWithLimit options.maxContextChunks chunks
                 }
 
             member _.SourceInventoryAsync cancellationToken = contextInventory cancellationToken
@@ -225,48 +228,15 @@ type QaSession private (options: QaSessionOptions, injectedTransport: FsResponse
 
     member this.LoadSourcesAsync(mode, sources, cancellationToken) =
         task {
-            let providerOptions =
-                { FsColbertContextProviderOptions.create options.storageRoot mode sources with
-                    queryExpansionClient =
-                        if options.enableQueryExpansion then
-                            options.clients.queryExpansion
-                        else
-                            None
-                    keywordGenerationClient = options.clients.queryExpansion
-                    plugInProfile = options.plugInProfile
-                    plugInFingerprint =
-                        { PlugInDefinition.generic with
-                            id = options.plugInProfile.id
-                            displayName = options.plugInProfile.displayName
-                            description = options.plugInProfile.description
-                            profile = options.plugInProfile
-                            prompts = options.prompts
-                            models = options.modelRoles
-                            runtime =
-                                { PlugInRuntimeOptions.defaults with
-                                    retrievalMode = mode
-                                    enableQueryExpansion = options.enableQueryExpansion
-                                    elaborateIndexKeywords = options.elaborateIndexKeywords
-                                    useLexicalFilter = options.useLexicalFilter
-                                    autoWriteback = options.autoWriteback } }
-                        |> PlugInDefinition.fingerprint
-                    keywordModelId = options.keywordModelId
-                    elaborateIndexKeywords = options.elaborateIndexKeywords
-                    pdfParsingMode = options.pdfParsingMode
-                    enableOpticalParsing = options.enableOpticalParsing
-                    enableAutoOpticalParsing = options.enableAutoOpticalParsing
-                    pdfVisualDescriptionOptions =
-                        { options.pdfVisualDescriptionOptions with
-                            client =
-                                options.pdfVisualDescriptionOptions.client
-                                |> Option.orElse options.clients.visualDescription }
-                    logExpansions = options.logExpansions
-                    logChunks = options.logChunks
-                    useLexicalFilter = options.useLexicalFilter
-                    report = report }
+            match options.sourceIndexService with
+            | None ->
+                return
+                    [ "No source index service is configured for LoadSourcesAsync. Create an IQaContextProvider through the host source-index service and call ConfigureAsync instead." ]
+            | Some service ->
+                let provider =
+                    service.CreateContextProvider(options.sourceIngestionProfile, mode, sources)
 
-            let provider = FsColbertContextProvider providerOptions :> IQaContextProvider
-            return! this.ConfigureAsync([ provider ], cancellationToken)
+                return! this.ConfigureAsync([ provider ], cancellationToken)
         }
 
     member _.AnswerAsync(request: QaTurnRequest, cancellationToken) =
