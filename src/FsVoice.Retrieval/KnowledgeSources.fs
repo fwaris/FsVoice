@@ -2114,6 +2114,7 @@ Passages:
           isExactFingerprint: bool
           hasMetadata: bool
           parserMatches: bool
+          parserTextMatches: bool
           modifiedTicks: int64 }
 
     let private indexKeywordCount (index: FsColbert.ColbertIndex) =
@@ -2179,13 +2180,35 @@ Passages:
         match tryLoadPersistedIndex path with
         | Ok(Some index) when indexMatchesSource source index ->
             let metadata = tryReadIndexMetadata path
+            let currentParserFingerprint = sourceParsingFingerprint pdfOptions source
+
+            let withoutVisualFingerprint (value: string) =
+                (defaultArg (Option.ofObj value) "")
+                    .Replace("\r\n", "\n")
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                |> Array.filter (fun line -> not (line.StartsWith("pdfVisualDescription", StringComparison.Ordinal)))
+                |> String.concat "\n"
 
             let parserMatches =
                 match source.kind, metadata with
                 | Pdf, Some metadata ->
                     metadata.parserFingerprint
                     |> Option.exists (fun value ->
-                        String.Equals(value, sourceParsingFingerprint pdfOptions source, StringComparison.Ordinal))
+                        String.Equals(value, currentParserFingerprint, StringComparison.Ordinal))
+                | Pdf, None -> false
+                | Markdown, _
+                | Json, _ -> true
+
+            let parserTextMatches =
+                match source.kind, metadata with
+                | Pdf, Some metadata ->
+                    metadata.parserFingerprint
+                    |> Option.exists (fun value ->
+                        String.Equals(
+                            withoutVisualFingerprint value,
+                            withoutVisualFingerprint currentParserFingerprint,
+                            StringComparison.Ordinal
+                        ))
                 | Pdf, None -> false
                 | Markdown, _
                 | Json, _ -> true
@@ -2207,6 +2230,7 @@ Passages:
                       isExactFingerprint = String.Equals(path, exactPath, StringComparison.OrdinalIgnoreCase)
                       hasMetadata = metadata.IsSome
                       parserMatches = parserMatches
+                      parserTextMatches = parserTextMatches
                       modifiedTicks =
                         try
                             File.GetLastWriteTimeUtc(path).Ticks
@@ -2225,6 +2249,7 @@ Passages:
             |> Seq.choose (persistedIndexCandidate pdfOptions source exactPath)
             |> Seq.sortByDescending (fun candidate ->
                 candidate.parserMatches,
+                candidate.parserTextMatches,
                 candidate.hasMetadata,
                 candidate.keywordCount,
                 candidate.isExactFingerprint,
@@ -2250,7 +2275,7 @@ Passages:
             report $"Loaded FsColbert index for {source.DisplayName}; indexKeywords={candidate.keywordCount}."
 
             Ok(Some candidate.index)
-        | Ok(Some candidate) ->
+        | Ok(Some candidate) when candidate.parserTextMatches ->
             let metadataDescription =
                 if candidate.hasMetadata then
                     "older or different parser metadata"
@@ -2261,6 +2286,17 @@ Passages:
                 $"Loaded FsColbert index for {source.DisplayName} with {metadataDescription}; reprocess this source to refresh with the current {PdfParsingModes.displayName pdfOptions.parsingMode} PDF parser and visual-description settings."
 
             Ok(Some candidate.index)
+        | Ok(Some candidate) ->
+            let metadataDescription =
+                if candidate.hasMetadata then
+                    "older or different PDF text-parser metadata"
+                else
+                    "no PDF parser metadata"
+
+            report
+                $"Ignored persisted FsColbert index for {source.DisplayName} with {metadataDescription}; reprocess this source to rebuild with the current OCR fallback parser."
+
+            Ok None
         | Ok None -> Ok None
         | Error err -> Error err
 
@@ -2389,7 +2425,7 @@ Passages:
             | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches ->
                 report $"Loaded persisted FsColbert index preview for {source.DisplayName}."
                 Ok candidate.index
-            | Ok(Some candidate) ->
+            | Ok(Some candidate) when candidate.parserTextMatches ->
                 let metadataDescription =
                     if candidate.hasMetadata then
                         "older or different parser metadata"
@@ -2400,6 +2436,17 @@ Passages:
                     $"Loaded persisted FsColbert index preview for {source.DisplayName} with {metadataDescription}; reprocess this source to refresh with the current {PdfParsingModes.displayName pdfOptions.parsingMode} PDF parser and visual-description settings."
 
                 Ok candidate.index
+            | Ok(Some candidate) ->
+                let metadataDescription =
+                    if candidate.hasMetadata then
+                        "older or different PDF text-parser metadata"
+                    else
+                        "no PDF parser metadata"
+
+                report
+                    $"Ignored persisted FsColbert index preview for {source.DisplayName} with {metadataDescription}; reprocess this source to rebuild with the current OCR fallback parser."
+
+                Error $"No current FsColbert index is available for {source.DisplayName}."
             | Ok None -> Error $"No FsColbert index is available for {source.DisplayName}."
             | Error err -> Error err
 

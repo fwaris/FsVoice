@@ -801,7 +801,7 @@ Rules:
         | _ -> None
 
     let private tryCreateRapidOcrProvider options storageRoot =
-        if not options.enableOcr then
+        if not (options.enableOcr || options.enableAutoOpticalParsing) then
             Ok None
         else
             rapidOcrModelFolders storageRoot
@@ -1395,17 +1395,18 @@ Rules:
         $"pdfRasterizer={id}"
 
     [<Literal>]
-    let private nativeTextQualityHeuristicVersion = "native-text-quality-v2"
+    let private nativeTextQualityHeuristicVersion = "native-text-quality-v3"
 
     let parserRuntimeFingerprint (options: DoclingHybridOptions) =
-        let autoOcrFallbackEnabled = options.enableOcr && options.enableAutoOpticalParsing
+        let autoOcrFallbackEnabled = options.enableAutoOpticalParsing
+        let usesOcrProvider = options.enableOcr || autoOcrFallbackEnabled
 
         [ yield $"pdfLayoutAnalysis={options.enableLayoutAnalysis.ToString().ToLowerInvariant()}"
           yield $"pdfOpticalParsing={options.enableOcr.ToString().ToLowerInvariant()}"
           yield $"pdfAutoOcrFallback={autoOcrFallbackEnabled.ToString().ToLowerInvariant()}"
           if autoOcrFallbackEnabled then
               yield $"pdfNativeTextQualityHeuristic={nativeTextQualityHeuristicVersion}"
-          if options.enableOcr then
+          if usesOcrProvider then
               yield "pdfOcrEngine=RapidOcrNet"
               yield "pdfOcrModel=rapidocr/pp-ocrv5-latin"
           yield layoutModelFingerprint options
@@ -1746,9 +1747,36 @@ Rules:
                             return ocrResult
                         }
 
-                    let availableOcrProvider = if options.enableOcr then ocrProvider else None
+                    let opticalOcrProvider = if options.enableOcr then ocrProvider else None
 
-                    let autoOcrFallbackEnabled = options.enableOcr && options.enableAutoOpticalParsing
+                    let autoOcrFallbackEnabled = options.enableAutoOpticalParsing
+
+                    let autoOcrProvider = if autoOcrFallbackEnabled then ocrProvider else None
+
+                    let pageInput (page: DoclingRasterPage) cells : DoclingPageInput =
+                        { pageNo = page.pageNo
+                          image = page.image
+                          ocrCells = cells }
+
+                    let dropCorruptNative (page: DoclingRasterPage) (reason: string) =
+                        report
+                            $"Auto OCR fallback page {page.pageNo}: native text looked garbled; {reason}; dropping native text."
+
+                        pageInput page []
+
+                    let selectCorruptNativeRepairCells (page: DoclingRasterPage) (ocrCells: DoclingOcrCell list) =
+                        let useOcr, _ =
+                            ocrQualityUsableForCorruptNative options.minNativeCharsPerPage ocrCells
+
+                        if useOcr then
+                            report $"Auto OCR fallback page {page.pageNo}: native text looked garbled; using OCR text."
+
+                            ocrCells
+                        else
+                            report
+                                $"Auto OCR fallback page {page.pageNo}: native text looked garbled; OCR returned no usable text; dropping native text."
+
+                            []
 
                     let rec loop (pages: DoclingRasterPage list) (acc: DoclingPageInput list) =
                         async {
@@ -1776,51 +1804,55 @@ Rules:
                                 let nativeQuality = nativeTextQuality options.minNativeCharsPerPage nativeCells
 
                                 if nativeHasEnoughText then
-                                    match autoOcrFallbackEnabled, nativeQuality.looksGarbled, availableOcrProvider with
+                                    match autoOcrFallbackEnabled, nativeQuality.looksGarbled, autoOcrProvider with
                                     | true, true, Some ocrProvider ->
                                         let! ocrResult = recognizeWithOcr page ocrProvider
 
                                         match ocrResult with
-                                        | Error err -> return Error err
-                                        | Ok ocrCells ->
-                                            let useOcr, _ =
-                                                ocrQualityUsableForCorruptNative options.minNativeCharsPerPage ocrCells
-
-                                            let selectedCells =
-                                                if useOcr then
-                                                    report
-                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled; using OCR text."
-
-                                                    ocrCells
-                                                else
-                                                    report
-                                                        $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR text was not usable; keeping native text."
-
-                                                    nativeCells
-
-                                            let input: DoclingPageInput =
-                                                { pageNo = page.pageNo
-                                                  image = page.image
-                                                  ocrCells = selectedCells }
+                                        | Error err ->
+                                            let input = dropCorruptNative page $"OCR failed with {err}"
 
                                             return! loop rest (input :: acc)
-                                    | _ ->
-                                        if autoOcrFallbackEnabled && nativeQuality.looksGarbled then
-                                            report
-                                                $"Auto OCR fallback page {page.pageNo}: native text looked garbled, but OCR is not available; keeping native text."
+                                        | Ok ocrCells ->
+                                            let selectedCells = selectCorruptNativeRepairCells page ocrCells
+                                            let input = pageInput page selectedCells
 
-                                        let input: DoclingPageInput =
-                                            { pageNo = page.pageNo
-                                              image = page.image
-                                              ocrCells = nativeCells }
+                                            return! loop rest (input :: acc)
+                                    | true, true, None ->
+                                        let input = dropCorruptNative page "OCR is not available"
+
+                                        return! loop rest (input :: acc)
+                                    | _ ->
+                                        let input = pageInput page nativeCells
 
                                         return! loop rest (input :: acc)
                                 else
-                                    match availableOcrProvider with
+                                    match opticalOcrProvider with
                                     | None ->
-                                        return
-                                            Error
-                                                $"Page {page.pageNo} has insufficient native PDF text and no RapidOCR model is configured."
+                                        match
+                                            autoOcrFallbackEnabled, nativeQuality.corruptionSignals > 0, autoOcrProvider
+                                        with
+                                        | true, true, Some ocrProvider ->
+                                            let! ocrResult = recognizeWithOcr page ocrProvider
+
+                                            match ocrResult with
+                                            | Error err ->
+                                                let input = dropCorruptNative page $"OCR failed with {err}"
+
+                                                return! loop rest (input :: acc)
+                                            | Ok ocrCells ->
+                                                let selectedCells = selectCorruptNativeRepairCells page ocrCells
+                                                let input = pageInput page selectedCells
+
+                                                return! loop rest (input :: acc)
+                                        | true, true, None ->
+                                            let input = dropCorruptNative page "OCR is not available"
+
+                                            return! loop rest (input :: acc)
+                                        | _ ->
+                                            return
+                                                Error
+                                                    $"Page {page.pageNo} has insufficient native PDF text and no RapidOCR model is configured."
                                     | Some ocrProvider ->
                                         let! ocrResult = recognizeWithOcr page ocrProvider
 
@@ -1840,10 +1872,7 @@ Rules:
                                                         nativeCells
                                                         ocrCells
 
-                                            let input: DoclingPageInput =
-                                                { pageNo = page.pageNo
-                                                  image = page.image
-                                                  ocrCells = merged }
+                                            let input = pageInput page merged
 
                                             return! loop rest (input :: acc)
                         }
@@ -2483,6 +2512,38 @@ Rules:
 
         kept
 
+    let private dropGarbledPassagesAndReport report fileName label (passages: PassageRef list) =
+        let kept, dropped =
+            passages
+            |> List.partition (fun passage ->
+                let text = defaultArg (Option.ofObj passage.text) ""
+                not (nativeTextLooksGarbledForTesting defaults.minNativeCharsPerPage text))
+
+        if not (List.isEmpty dropped) then
+            let pages =
+                dropped
+                |> List.collect _.pageNumbers
+                |> List.distinct
+                |> List.sort
+                |> List.map string
+                |> String.concat ", "
+
+            let suffix =
+                if String.IsNullOrWhiteSpace pages then
+                    ""
+                else
+                    $" on page(s) {pages}"
+
+            report
+                $"Dropped {dropped.Length} {label} passage(s){suffix} because the text looked garbled for {fileName}."
+
+        kept |> List.mapi (fun index passage -> { passage with index = index })
+
+    let private finalizePassages report fileName label passages =
+        passages
+        |> dropChecklistAndReport report fileName label
+        |> dropGarbledPassagesAndReport report fileName label
+
     let private layoutFallbackReason (layoutPassages: PassageRef list) (nativePassages: PassageRef list) =
         let layoutChars = passageTextLength layoutPassages
         let nativeChars = passageTextLength nativePassages
@@ -2521,7 +2582,7 @@ Rules:
                 let nativePassages = enrichNativePassagesWithLayout layoutPassages nativePassages
 
                 match layoutFallbackReason layoutPassages nativePassages with
-                | None -> Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
+                | None -> Ok(finalizePassages report fileName "layout" layoutPassages)
                 | Some reason ->
                     report $"{reason} for {fileName}; checking native-text conversion."
 
@@ -2533,19 +2594,19 @@ Rules:
                             $"Using document structure native-text conversion for {fileName} because it produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
                         appendVisualDescriptionPassages layoutPassages nativePassages
-                        |> dropChecklistAndReport report fileName "native-text"
+                        |> finalizePassages report fileName "native-text"
                         |> Ok
                     else
                         report
                             $"Keeping document structure layout conversion for {fileName}; native-text conversion produced {nativePassages.Length} passage(s) and {passageTextLength nativePassages} chars."
 
-                        Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
+                        Ok(finalizePassages report fileName "layout" layoutPassages)
             | Error nativeError ->
                 if layoutPassages.Length <= 1 then
                     report
                         $"Document structure native-text fallback failed for {fileName}; keeping layout result: {nativeError}"
 
-                Ok(dropChecklistAndReport report fileName "layout" layoutPassages)
+                Ok(finalizePassages report fileName "layout" layoutPassages)
 
     let readPdfPassagesWithProvidersAndCancellation
         options
@@ -2594,7 +2655,10 @@ Rules:
                     return keepLayoutUnlessCollapsed report chunkOptions passageSource path pageInputs layoutResult
                 else
                     throwIfCanceled cancellationToken
-                    return convertNativeTextOnly true report chunkOptions passageSource path pageInputs
+
+                    return
+                        convertNativeTextOnly true report chunkOptions passageSource path pageInputs
+                        |> Result.map (finalizePassages report (Path.GetFileName path) "native-text")
         }
 
     let readPdfPassagesWithProviders
@@ -2757,9 +2821,14 @@ Rules:
         (legacyReader: unit -> Async<Result<PassageRef list, string>>)
         =
         async {
+            let finalize fileName label passages =
+                dropGarbledPassagesAndReport report fileName label passages
+
             match! hybrid with
             | Ok passages ->
                 let fileName = Path.GetFileName path
+                let passages = finalize fileName "document-structure" passages
+
                 report $"Document structure PDF parser produced {passages.Length} passage(s) for {fileName}."
 
                 if passages.Length > 1 then
@@ -2773,6 +2842,8 @@ Rules:
                     return
                         match legacy with
                         | Ok legacyPassages when legacyPassages.Length > passages.Length ->
+                            let legacyPassages = finalize fileName "PdfPig fallback" legacyPassages
+
                             report
                                 $"Using PdfPig fallback for {fileName} because it produced {legacyPassages.Length} passage(s)."
 
@@ -2790,7 +2861,9 @@ Rules:
 
                 return
                     match legacy with
-                    | Ok passages -> Ok passages
+                    | Ok passages ->
+                        let fileName = Path.GetFileName path
+                        Ok(finalize fileName "PdfPig fallback" passages)
                     | Error legacyError ->
                         Error
                             $"Document structure PDF parser failed: {hybridError}{Environment.NewLine}Legacy PdfPig parser also failed: {legacyError}"

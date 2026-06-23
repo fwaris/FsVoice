@@ -2467,6 +2467,61 @@ let ``docling hybrid page input builder auto ocrs garbled native pdf text`` () =
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling hybrid page input builder auto ocrs garbled native pdf text when optical parsing is disabled`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let garbledText =
+            String(Array.create 12 '\uE000')
+            + " "
+            + String(Array.create 4 '\uFFFD')
+            + " "
+            + String(Array.create 12 '\u25A0')
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell garbledText 10.0 145.0 190.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let reports = ResizeArray<string>()
+
+        let ocr =
+            CountingDoclingOcr [ doclingOcrCell "Readable OCR fallback text with normal words" 20.0 80.0 220.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    enableOcr = false
+                    enableAutoOpticalParsing = true }
+                reports.Add
+                "/tmp/garbled-auto-without-optical.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+
+            Assert.Equal<string list>(
+                [ "Readable OCR fallback text with normal words" ],
+                input.ocrCells |> List.map _.text
+            )
+
+            Assert.Contains(reports, fun message -> message.Contains("Auto OCR fallback page 1"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling hybrid page input builder keeps garbled native pdf text when auto ocr is disabled`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
@@ -2513,7 +2568,7 @@ let ``docling hybrid page input builder keeps garbled native pdf text when auto 
     |> Async.RunSynchronously
 
 [<Fact>]
-let ``docling hybrid page input builder rejects auto ocr when ocr text quality is worse`` () =
+let ``docling hybrid page input builder drops garbled native pdf text when ocr text quality is worse`` () =
     async {
         let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
         let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
@@ -2556,8 +2611,63 @@ let ``docling hybrid page input builder rejects auto ocr when ocr text quality i
         | Ok inputs ->
             let input = Assert.Single inputs
             Assert.Equal(1, ocr.Calls)
-            Assert.Equal<string list>([ garbledText ], input.ocrCells |> List.map _.text)
-            Assert.Contains(reports, fun message -> message.Contains("OCR text was not usable"))
+            Assert.Empty(input.ocrCells)
+
+            Assert.Contains(
+                reports,
+                fun message -> message.Contains("OCR returned no usable text; dropping native text")
+            )
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder drops garbled native pdf text when ocr text is empty`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let garbledText =
+            String(Array.create 12 '\uE000')
+            + " "
+            + String(Array.create 4 '\uFFFD')
+            + " "
+            + String(Array.create 12 '\u25A0')
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells = [ doclingNativeCell garbledText 10.0 145.0 190.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let reports = ResizeArray<string>()
+        let ocr = CountingDoclingOcr []
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8
+                    enableAutoOpticalParsing = true }
+                reports.Add
+                "/tmp/garbled-empty-ocr.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(1, ocr.Calls)
+            Assert.Empty(input.ocrCells)
+
+            Assert.Contains(
+                reports,
+                fun message -> message.Contains("OCR returned no usable text; dropping native text")
+            )
     }
     |> Async.RunSynchronously
 
@@ -2605,8 +2715,10 @@ let ``pdf source parsing fingerprint includes docling rasterizer and layout mode
         Assert.Contains("pdfLayoutAnalysis=true", withoutRasterizer)
         Assert.Contains("pdfLayoutModel=pp-doclayout-m", withoutRasterizer)
         Assert.Contains("pdfRasterizer=none", withoutRasterizer)
-        Assert.Contains("pdfAutoOcrFallback=false", withoutRasterizer)
-        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v2", withoutRasterizer)
+        Assert.Contains("pdfAutoOcrFallback=true", withoutRasterizer)
+        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v3", withoutRasterizer)
+        Assert.Contains("pdfOcrEngine=RapidOcrNet", withoutRasterizer)
+        Assert.Contains("pdfOcrModel=rapidocr/pp-ocrv5-latin", withoutRasterizer)
 
         let withOpticalAuto =
             KnowledgeSources.sourceParsingFingerprint
@@ -2623,11 +2735,11 @@ let ``pdf source parsing fingerprint includes docling rasterizer and layout mode
                 source
 
         Assert.Contains("pdfAutoOcrFallback=true", withOpticalAuto)
-        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v2", withOpticalAuto)
+        Assert.Contains("pdfNativeTextQualityHeuristic=native-text-quality-v3", withOpticalAuto)
         Assert.Contains("pdfOcrEngine=RapidOcrNet", withOpticalAuto)
         Assert.Contains("pdfOcrModel=rapidocr/pp-ocrv5-latin", withOpticalAuto)
         Assert.Contains("pdfAutoOcrFallback=false", autoFallbackDisabled)
-        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v2", autoFallbackDisabled)
+        Assert.DoesNotContain("pdfNativeTextQualityHeuristic=native-text-quality-v3", autoFallbackDisabled)
         Assert.False(String.Equals(withOpticalAuto, autoFallbackDisabled, StringComparison.Ordinal))
 
         DoclingHybrid.setRasterizerFactoryWithInfo "test-rasterizer-v1" "Test rasterizer" (fun _ ->
@@ -3635,6 +3747,55 @@ let ``docling hybrid fallback uses legacy pdf reader when provider path fails`` 
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``docling hybrid fallback drops garbled legacy pdf passages`` () =
+    async {
+        let source =
+            FsColbert.PassageSource.create "fallback" "Fallback" "/tmp/fallback.pdf"
+
+        let reports = ResizeArray<string>()
+
+        let passage index pageNumbers text : FsColbert.PassageRef =
+            { sourceId = source.id
+              sourceDisplayName = source.displayName
+              sourceLocation = source.location
+              index = index
+              sectionPath = []
+              contentRole = FsColbert.PassageContentRole.Unknown
+              pageNumbers = pageNumbers
+              layoutLabels = []
+              captions = []
+              text = text
+              keywords = [] }
+
+        let garbledText =
+            "Characters for Embedded characters: "
+            + String.replicate 8 "ÀÁÂÃÄÅÆÇÈËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞß ĀĂĄĆĊČĎĐĒĖĘĚĞĠĢĪĮİĶĹĻĽŃŅŇŌŐŔŖŘŚŞŢŤŪŮŰŲŴŶŹŻ "
+
+        let legacyReader () =
+            async { return Ok [ passage 0 [ 4 ] garbledText; passage 1 [ 2 ] "Legacy clean rail guide text" ] }
+
+        let! result =
+            DoclingHybrid.fallbackToLegacy
+                reports.Add
+                source.location
+                (async { return Error "layout model missing" })
+                legacyReader
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage = Assert.Single passages
+            Assert.Equal(0, passage.index)
+            Assert.Equal("Legacy clean rail guide text", passage.text)
+
+            Assert.Contains(
+                reports,
+                fun message -> message.Contains("Dropped 1 PdfPig fallback passage", StringComparison.Ordinal)
+            )
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``docling hybrid fallback uses legacy pdf reader when hybrid returns one passage`` () =
     async {
         let source =
@@ -3965,6 +4126,21 @@ let ``visual descriptions setting falls back to existing persisted pdf index`` (
     fakeColbertIndex [ fakeIndexedPassage source 0 "Existing PDF passage should remain searchable." [] ]
     |> FsColbert.IndexPersistence.save indexPath
 
+    let oldPdfOptions =
+        KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid
+
+    let metadata =
+        {| sourceFingerprint = ""
+           sourceLocation = sourcePath
+           sourceDisplayName = source.DisplayName
+           sourceKind = "pdf"
+           parserFingerprint = KnowledgeSources.sourceParsingFingerprint oldPdfOptions source
+           pdfParsingMode = KnowledgeSources.PdfParsingModes.fingerprint oldPdfOptions.parsingMode
+           keywordFingerprint = ""
+           createdAtUtc = DateTimeOffset.UtcNow |}
+
+    File.WriteAllText($"{indexPath}.metadata.json", JsonSerializer.Serialize(metadata))
+
     let reports = ResizeArray<string>()
 
     let pdfOptions =
@@ -3984,6 +4160,60 @@ let ``visual descriptions setting falls back to existing persisted pdf index`` (
         Assert.Contains(
             reports,
             fun message -> message.Contains("reprocess this source to refresh", StringComparison.OrdinalIgnoreCase)
+        )
+
+[<Fact>]
+let ``pdf preview ignores persisted index with stale text parser metadata`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "preview-stale-parser.pdf")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Preview stale parser PDF source.")
+
+    let source =
+        { kind = Pdf
+          location = sourcePath
+          enabled = true }
+
+    let indexPath =
+        Path.Combine(persistedIndexFolder storageRoot, "preview-stale-parser.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Stale PDF passage should not be shown." [] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let staleParserFingerprint =
+        KnowledgeSources.sourceParsingFingerprint KnowledgeSources.PdfIngestionOptions.defaults source
+        |> fun value -> value.Replace("native-text-quality-v3", "native-text-quality-v2")
+
+    let metadata =
+        {| sourceFingerprint = ""
+           sourceLocation = sourcePath
+           sourceDisplayName = source.DisplayName
+           sourceKind = "pdf"
+           parserFingerprint = staleParserFingerprint
+           pdfParsingMode = KnowledgeSources.PdfParsingModes.fingerprint KnowledgeSources.PdfParsingMode.Hybrid
+           keywordFingerprint = ""
+           createdAtUtc = DateTimeOffset.UtcNow |}
+
+    File.WriteAllText($"{indexPath}.metadata.json", JsonSerializer.Serialize(metadata))
+
+    let reports = ResizeArray<string>()
+
+    match
+        KnowledgeSources.loadIndexPreviewWithOptions
+            storageRoot
+            reports.Add
+            KnowledgeSources.PdfIngestionOptions.defaults
+            20
+            source
+    with
+    | Ok preview -> failwith $"Expected stale parser index to be ignored, but loaded {preview.totalChunks} chunk(s)."
+    | Error err ->
+        Assert.Contains("No current FsColbert index is available", err)
+
+        Assert.Contains(
+            reports,
+            fun message ->
+                message.Contains("Ignored persisted FsColbert index preview", StringComparison.OrdinalIgnoreCase)
         )
 
 [<Fact>]

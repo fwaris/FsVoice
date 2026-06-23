@@ -89,10 +89,10 @@ module PdfLibrary =
                 return Error $"Unable to read JSON knowledge source '{path}': {ex.Message}"
         }
 
-    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing =
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif useHybridPdfParsing && useOpticalParsing then
+        elif useHybridPdfParsing && (useOpticalParsing || useAutoOcrFallback) then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
@@ -121,7 +121,7 @@ module PdfLibrary =
         FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithOptionsWithCancellation
             FileSystem.AppDataDirectory
             report
-            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing
+            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback
               enableOpticalParsing = useOpticalParsing
               enableAutoOpticalParsing = useAutoOcrFallback
               visualDescriptions =
@@ -901,7 +901,8 @@ module PdfLibrary =
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions
-                        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing
+                        { parsingMode =
+                            pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback
                           enableOpticalParsing = useOpticalParsing
                           enableAutoOpticalParsing = useAutoOcrFallback
                           visualDescriptions =

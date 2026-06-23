@@ -276,7 +276,10 @@ module SettingsView =
                     model.useOpticalParsing
                     UseOpticalParsingToggled
                     canEdit
-                    (if model.useOpticalParsing then "On - slower" else "Off"))
+                    (if model.useOpticalParsing then
+                         "On - OCR sparse pages"
+                     else
+                         "Off"))
                     .gridRow(1)
                     .gridColumn(1)
                     .gridColumnSpan(2)
@@ -287,8 +290,11 @@ module SettingsView =
                 (switchWithText
                     model.autoOcrFallback
                     AutoOcrFallbackToggled
-                    (canEdit && model.useOpticalParsing)
-                    (if model.autoOcrFallback then "On" else "Off"))
+                    canEdit
+                    (if model.autoOcrFallback then
+                         "On - repair garbled text"
+                     else
+                         "Off"))
                     .gridRow(2)
                     .gridColumn(1)
                     .gridColumnSpan(2)
