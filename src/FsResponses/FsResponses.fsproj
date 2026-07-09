@@ -13,11 +13,11 @@
     <Compile Include="Log.fs" />
     <Compile Include="FsResponses.fs" />
     <Compile Include="WebSocket.fs" />
+    <Compile Include="ResponsesTransport.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="FSharp.SystemTextJson" />
-    <PackageReference Include="FSharp.Control.Websockets.TPL" />
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
   </ItemGroup>

@@ -7,6 +7,7 @@ The app may also include or download local model assets used for document layout
 Notable bundled notice:
 
 - PP-DocLayout-M notice: `src/FsVoice.Retrieval/PackageNotices/PP-DocLayout-M-NOTICE.md`
+- RapidOCR PP-OCRv4 mobile model notice: `src/FsVoice.Retrieval.RapidOcrModels/THIRD-PARTY-NOTICES.md`
 
 Speak2Docs source code is licensed under MIT. Third-party packages retain their respective licenses.
 
@@ -18,4 +19,4 @@ Source: https://arxiv.org/abs/2508.03436
 
 PDF: https://arxiv.org/pdf/2508.03436
 
-The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text for offline retrieval inside the app.
+The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text and compact visual-description passages for offline retrieval inside the app.

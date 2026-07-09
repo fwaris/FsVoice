@@ -55,9 +55,23 @@ module VoiceAgent =
         | Silent
         | Speaking
 
+    type private ResponseKind =
+        | RegularResponse
+        | StartupGreeting
+
+    type private ActiveResponse =
+        { id: string option
+          kind: ResponseKind
+          outputAudioStarted: bool }
+
     type private ResponseCreatedState =
         | NoActiveResponse
-        | ActiveResponse of {| id: string option |}
+        | ActiveResponse of ActiveResponse
+
+    type private VadPhase =
+        | ServerVad
+        | StartupGreetingProtected
+        | ServerVadSwitchRequested
 
     type private VoicePlugInConfig =
         { realtimeModel: string
@@ -82,6 +96,7 @@ module VoiceAgent =
           pendingSpeakByCallId: Map<string, string>
           userSpeechState: UserSpeechState
           responseCreatedState: ResponseCreatedState
+          vadPhase: VadPhase
           pendingGreeting: string option
           pendingSpeakTexts: string list
           outputQueue: AsyncPriorityQueue<Q>
@@ -115,30 +130,40 @@ module VoiceAgent =
           memoryRequestTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.realtimeMemoryTimeoutMs)
           functionCallTimeout = TimeSpan.FromMilliseconds(float plugIn.runtime.functionCallTimeoutMs) }
 
-    let private speakerphoneTurnDetection =
+    let private serverTurnDetection interruptResponse =
         VAD.Server_Vad
             {| create_response = true
                idle_timeout_ms = Skip
-               interrupt_response = true
+               interrupt_response = interruptResponse
                prefix_padding_ms = 300
                silence_duration_ms = 350
                threshold = 0.7 |}
 
-    let private sessionAudio config =
+    let private startupTurnDetection = Some(serverTurnDetection false)
+
+    let private interruptingTurnDetection = Some(serverTurnDetection true)
+
+    let private calmerSpeakerOutput =
+        { AudioOutput.Default with
+            speed = Include(Some 1.0)
+            voice = "marin" }
+
+    let private sessionAudio turnDetection config =
         { Audio.Default with
             input =
                 Include(
                     Some
                         { AudioInput.Default with
-                            noise_reduction = Include(Some { ``type`` = "far_field" })
+                            noise_reduction = Include(Some { ``type`` = "near_field" })
                             transcription =
                                 { language = "en"
                                   model = config.transcriberModel
                                   prompt = Some config.transcriberPrompt }
                                 |> Some
                                 |> Include
-                            turn_detection = Include(Some speakerphoneTurnDetection) }
-                ) }
+                            turn_detection = Include turnDetection }
+                )
+            output = Include(Some calmerSpeakerOutput) }
 
     let private oracleTool =
         { Tool.Default with
@@ -188,16 +213,19 @@ module VoiceAgent =
                         |> Map.ofList
                     required = [ "question" ] } }
 
-    let private updateSession config (session: Session) =
+    let private updateSessionWithTurnDetection config turnDetection (session: Session) =
         { session with
             id = Skip
             ``object`` = Skip
             model = Some config.realtimeModel
-            audio = Include(Some(sessionAudio config))
+            audio = Include(Some(sessionAudio turnDetection config))
             instructions = Some config.instructions
             tool_choice = Include(Some "auto")
             tools = Include(Some [ oracleTool ])
             expires_at = Skip }
+
+    let private updateSession config session =
+        updateSessionWithTurnDetection config startupTurnDetection session
 
     let private enqueueOutbound (outputQueue: AsyncPriorityQueue<Q>) priority work = outputQueue.Enqueue(work, priority)
 
@@ -221,18 +249,38 @@ module VoiceAgent =
             session = updateSession config session }
         |> ClientEvent.SessionUpdate
 
-    let private responseCreateEvent (responseInstructions: string) =
-        let response =
-            { Response.Default with
-                instructions = Include(Some responseInstructions)
-                output_modalities = Include(Some [ "audio" ])
-                tool_choice = Include(Some "none")
-                tools = Include(Some []) }
+    let private serverVadSessionUpdateEvent config (session: Session) =
+        { SessionUpdate.Default with
+            event_id = Utils.newId ()
+            session = updateSessionWithTurnDetection config interruptingTurnDetection session }
+        |> ClientEvent.SessionUpdate
 
+    let private startupGreetingResponseMetadata =
+        [ "fsvoice_response_kind", "startup_greeting" ] |> Map.ofList
+
+    let private audioResponse responseInstructions =
+        { Response.Default with
+            instructions = Include(Some responseInstructions)
+            output_modalities = Include(Some [ "audio" ])
+            tool_choice = Include(Some "none")
+            tools = Include(Some []) }
+
+    let private responseCreateEvent response =
         { ResponseCreate.Default with
             event_id = Utils.newId ()
             response = Include(Some response) }
         |> ClientEvent.ResponseCreate
+
+    let private spokenResponseCreateEvent (responseInstructions: string) =
+        responseInstructions |> audioResponse |> responseCreateEvent
+
+    let private startupGreetingResponseCreateEvent (responseInstructions: string) =
+        let response =
+            { audioResponse responseInstructions with
+                conversation = Include(Some "none")
+                metadata = Include(Some startupGreetingResponseMetadata) }
+
+        responseCreateEvent response
 
     let private responseInstructionsForOracleAnswer baseInstructions answer =
         $"{baseInstructions}\n\nOracle answer to speak exactly, without adding facts:\n\n{answer}"
@@ -327,7 +375,7 @@ module VoiceAgent =
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
         | Silent, NoActiveResponse, text :: remaining ->
-            responseCreateEvent (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
+            spokenResponseCreateEvent (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
@@ -336,26 +384,94 @@ module VoiceAgent =
             )
 
             { st with
-                responseCreatedState = ActiveResponse {| id = None |}
+                responseCreatedState =
+                    ActiveResponse
+                        { id = None
+                          kind = RegularResponse
+                          outputAudioStarted = false }
                 pendingSpeakTexts = remaining }
         | _ -> st
 
     let private tryScheduleGreeting (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingGreeting with
         | Silent, NoActiveResponse, Some greeting ->
-            responseCreateEvent (responseInstructionsForGreeting st.config.speechResultInstructions greeting)
+            let responseKind =
+                if st.vadPhase = StartupGreetingProtected then
+                    StartupGreeting
+                else
+                    RegularResponse
+
+            let responseEvent =
+                match responseKind with
+                | StartupGreeting ->
+                    startupGreetingResponseCreateEvent (
+                        responseInstructionsForGreeting st.config.speechResultInstructions greeting
+                    )
+                | RegularResponse ->
+                    spokenResponseCreateEvent (
+                        responseInstructionsForGreeting st.config.speechResultInstructions greeting
+                    )
+
+            responseEvent
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
-            st.bus.PostToAgent(Ag_Log $"Realtime greeting requested: sources={st.config.initialSourceCount}.")
+            match responseKind with
+            | StartupGreeting ->
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"Realtime protected startup greeting requested out-of-band: sources={st.config.initialSourceCount}."
+                )
+            | RegularResponse ->
+                st.bus.PostToAgent(Ag_Log $"Realtime greeting requested: sources={st.config.initialSourceCount}.")
 
             { st with
                 pendingGreeting = None
-                responseCreatedState = ActiveResponse {| id = None |} }
+                responseCreatedState =
+                    ActiveResponse
+                        { id = None
+                          kind = responseKind
+                          outputAudioStarted = false } }
         | _ -> st
 
     let private tryScheduleAudio (st: VoiceState) =
         st |> tryScheduleGreeting |> tryScheduleSpeak
+
+    let private responseId (response: Response) =
+        match response.id with
+        | Include(Some value) when not (String.IsNullOrWhiteSpace value) -> Some value
+        | _ -> None
+
+    let private responseIdText responseId =
+        responseId |> Option.defaultValue "<pending>"
+
+    let private matchesResponseId eventResponseId active =
+        match active.id, eventResponseId with
+        | Some expected, Some actual -> String.Equals(expected, actual, StringComparison.Ordinal)
+        | Some _, None -> false
+        | None, _ -> true
+
+    let private protectedStartupGreeting st =
+        match st.vadPhase, st.responseCreatedState with
+        | StartupGreetingProtected, ActiveResponse active when active.kind = StartupGreeting -> Some active
+        | _ -> None
+
+    let private startupProtectionActive st =
+        match st.vadPhase with
+        | StartupGreetingProtected -> protectedStartupGreeting st |> Option.isSome
+        | _ -> false
+
+    let private completeStartupGreetingProtection reason (st: VoiceState) =
+        serverVadSessionUpdateEvent st.config st.realtimeSession
+        |> enqueueClientEvent st
+
+        st.bus.PostToAgent(
+            Ag_Log $"Startup greeting finished via {reason}; realtime Server VAD interruption requested."
+        )
+
+        { st with
+            vadPhase = ServerVadSwitchRequested
+            responseCreatedState = NoActiveResponse }
 
     let private toolQuestion (content: string) =
         let content =
@@ -636,6 +752,9 @@ module VoiceAgent =
             match ev with
             | ServerEvent.SessionCreated s when not st.initialized ->
                 sessionUpdateEvent st.config s.session |> enqueueClientEvent st
+
+                st.bus.PostToAgent(Ag_Log "Realtime startup Server VAD is non-interrupting for the protected greeting.")
+
                 st.bus.PostToAgent(Ag_Log "Realtime session created.")
 
                 return
@@ -643,60 +762,165 @@ module VoiceAgent =
                         initialized = true
                         realtimeSession = s.session }
             | ServerEvent.SessionUpdated ev ->
-                st.bus.PostToAgent(Ag_Log "Realtime session updated.")
-                return { st with realtimeSession = ev.session } |> tryScheduleGreeting
+                let st = { st with realtimeSession = ev.session }
+
+                let st =
+                    match st.vadPhase with
+                    | StartupGreetingProtected ->
+                        st.bus.PostToAgent(Ag_Log "Realtime startup protected greeting Server VAD active.")
+                        st
+                    | ServerVadSwitchRequested ->
+                        st.bus.PostToAgent(Ag_Log "Realtime Server VAD active.")
+
+                        { st with vadPhase = ServerVad }
+                    | ServerVad ->
+                        st.bus.PostToAgent(Ag_Log "Realtime session updated.")
+                        st
+
+                return st |> tryScheduleGreeting
             | ServerEvent.ConversationItemAdded ev ->
                 return acknowledgeFunctionOutput st "conversation.item.added" ev.item
             | ServerEvent.ConversationItemDone ev ->
                 return acknowledgeFunctionOutput st "conversation.item.done" ev.item
             | ServerEvent.ResponseCreated ev ->
-                let responseId =
-                    match ev.response.id with
-                    | Include(Some value) when not (String.IsNullOrWhiteSpace value) -> Some value
-                    | _ -> None
+                let responseId = responseId ev.response
+
+                let active =
+                    match st.responseCreatedState with
+                    | ActiveResponse active ->
+                        { active with
+                            id = responseId |> Option.orElse active.id }
+                    | NoActiveResponse ->
+                        { id = responseId
+                          kind = RegularResponse
+                          outputAudioStarted = false }
+
+                if active.kind = StartupGreeting then
+                    st.bus.PostToAgent(
+                        Ag_Log $"Realtime protected startup greeting active: response_id={responseIdText responseId}."
+                    )
+                else
+                    st.bus.PostToAgent(Ag_Log $"Realtime response created: response_id={responseIdText responseId}.")
 
                 return
                     { st with
-                        responseCreatedState = ActiveResponse {| id = responseId |} }
+                        responseCreatedState = ActiveResponse active }
+            | ServerEvent.OutputAudioBufferStarted ev ->
+                match protectedStartupGreeting st with
+                | Some active when matchesResponseId (Some ev.response_id) active ->
+                    st.bus.PostToAgent(
+                        Ag_Log $"Realtime protected startup greeting audio started: response_id={ev.response_id}."
+                    )
+
+                    return
+                        { st with
+                            responseCreatedState =
+                                ActiveResponse
+                                    { active with
+                                        outputAudioStarted = true } }
+                | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when
+                        active.kind = RegularResponse && matchesResponseId (Some ev.response_id) active
+                        ->
+                        st.bus.PostToAgent(Ag_Log $"Realtime response audio started: response_id={ev.response_id}.")
+
+                        return
+                            { st with
+                                responseCreatedState =
+                                    ActiveResponse
+                                        { active with
+                                            id = active.id |> Option.orElse (Some ev.response_id)
+                                            outputAudioStarted = true } }
+                    | _ -> return st
+            | ServerEvent.OutputAudioBufferStopped ev ->
+                match protectedStartupGreeting st with
+                | Some active when matchesResponseId (Some ev.response_id) active ->
+                    return st |> completeStartupGreetingProtection "output_audio_buffer.stopped"
+                | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when
+                        active.kind = RegularResponse && matchesResponseId (Some ev.response_id) active
+                        ->
+                        st.bus.PostToAgent(Ag_Log $"Realtime response audio stopped: response_id={ev.response_id}.")
+                        return st
+                    | _ -> return st
             | ServerEvent.ResponseOutputItemDone responseItem ->
                 match responseItem.item with
                 | Function_call fc -> return dispatchToolCall st fc
                 | _ -> return st
-            | ServerEvent.ResponseDone _ ->
-                return
-                    { st with
-                        responseCreatedState = NoActiveResponse }
-                    |> tryScheduleAudio
+            | ServerEvent.ResponseDone ev ->
+                let responseId = responseId ev.response
+
+                match protectedStartupGreeting st with
+                | Some active when matchesResponseId responseId active && active.outputAudioStarted -> return st
+                | Some active when matchesResponseId responseId active ->
+                    return st |> completeStartupGreetingProtection "response.done"
+                | _ ->
+                    match st.responseCreatedState with
+                    | ActiveResponse active when active.kind = RegularResponse && matchesResponseId responseId active ->
+                        st.bus.PostToAgent(
+                            Ag_Log
+                                $"Realtime response done: response_id={responseIdText responseId}; audioStarted={active.outputAudioStarted}."
+                        )
+                    | _ -> ()
+
+                    return
+                        { st with
+                            responseCreatedState = NoActiveResponse }
+                        |> tryScheduleAudio
             | ServerEvent.InputAudioBufferSpeechStarted _ ->
-                return
-                    { st with
-                        userSpeechState = Speaking
-                        lastFinalUserTranscript = None
-                        pendingGreeting = None }
+                if startupProtectionActive st then
+                    st.bus.PostToAgent(Ag_Log "Ignoring startup input while protected greeting active: speech_started.")
+                    return st
+                else
+                    return
+                        { st with
+                            userSpeechState = Speaking
+                            lastFinalUserTranscript = None
+                            pendingGreeting = None }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
-                return { st with userSpeechState = Silent } |> tryScheduleAudio
+                if startupProtectionActive st then
+                    st.bus.PostToAgent(Ag_Log "Ignoring startup input while protected greeting active: speech_stopped.")
+                    return st
+                else
+                    return { st with userSpeechState = Silent } |> tryScheduleAudio
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
-                let previous =
-                    st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
+                if startupProtectionActive st then
+                    return st
+                else
+                    let previous =
+                        st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
 
-                let text = previous + ev.delta
-                let revision, _ = makeTranscriptSnapshot st ev.item_id text false
+                    let text = previous + ev.delta
+                    let revision, _ = makeTranscriptSnapshot st ev.item_id text false
 
-                return
-                    { st with
-                        revision = revision
-                        transcriptByItem = st.transcriptByItem |> Map.add ev.item_id text }
+                    return
+                        { st with
+                            revision = revision
+                            transcriptByItem = st.transcriptByItem |> Map.add ev.item_id text }
             | ServerEvent.ConversationItemInputAudioTranscriptionCompleted ev ->
                 let text = Speak2Docs.Text.normalizeWhitespace ev.transcript
-                st.bus.PostToAgent(Ag_Log $"User: {text}")
-                let revision, snapshot = makeTranscriptSnapshot st ev.item_id text true
-                st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
 
-                return
-                    { st with
-                        revision = revision
-                        lastFinalUserTranscript = Some snapshot
-                        transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
+                if startupProtectionActive st then
+                    st.bus.PostToAgent(
+                        Ag_Log
+                            $"Ignoring startup transcript while protected greeting active: transcript_chars={text.Length}."
+                    )
+
+                    return
+                        { st with
+                            transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
+                else
+                    st.bus.PostToAgent(Ag_Log $"User: {text}")
+                    let revision, snapshot = makeTranscriptSnapshot st ev.item_id text true
+                    st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
+
+                    return
+                        { st with
+                            revision = revision
+                            lastFinalUserTranscript = Some snapshot
+                            transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
             | ServerEvent.Error e ->
                 if not (isActiveResponseInProgressError e.error.message) then
                     st.bus.PostToAgent(Ag_Log $"Realtime API error: {e.error.message}")
@@ -758,6 +982,7 @@ module VoiceAgent =
               pendingSpeakByCallId = Map.empty
               userSpeechState = Silent
               responseCreatedState = NoActiveResponse
+              vadPhase = StartupGreetingProtected
               pendingGreeting = Some(greetingForSourceCount config.initialSourceCount)
               pendingSpeakTexts = []
               outputQueue = outputQueue

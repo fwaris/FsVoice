@@ -47,6 +47,16 @@ module Program =
         opts.Converters.Add(JsonFSharpConverter())
         opts
 
+    let private sourceContentRole (role: FsColbert.PassageContentRole) =
+        match role with
+        | FsColbert.PassageContentRole.FrontMatter -> SourceContentRole.FrontMatter
+        | FsColbert.PassageContentRole.Abstract -> SourceContentRole.Abstract
+        | FsColbert.PassageContentRole.MainBody -> SourceContentRole.MainBody
+        | FsColbert.PassageContentRole.References -> SourceContentRole.References
+        | FsColbert.PassageContentRole.Appendix -> SourceContentRole.Appendix
+        | FsColbert.PassageContentRole.SubmissionChecklist -> SourceContentRole.SubmissionChecklist
+        | _ -> SourceContentRole.Unknown
+
     let jsonLineOptions =
         let opts = JsonSerializerOptions()
         opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
@@ -69,12 +79,12 @@ Commands:
   index-folder --input docs --output bundle-dir-or.zip --bundle-id id [--bundle-version 1.0.0]
   insuranceqa-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert] [--no-judge]
   insuranceqa-search-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert]
-  insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-nano]
+  insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-mini]
 
 Common options:
   --api-key value          Defaults to OPENAI_API_KEY.
   --answer-model value     Defaults to gpt-5.5.
-  --small-model value      Defaults to gpt-5-nano.
+  --small-model value      Defaults to gpt-5-nano; index elaboration defaults to gpt-5-mini.
   --storage-root path      Defaults to temp/fsvoice-cli.
   --index-path path        Optional persisted FsColbert .fsci file for search eval.
   --answers-source path    Optional JSON/Markdown InsuranceQA answer source to index/evaluate.
@@ -85,12 +95,14 @@ Common options:
   --expansion-replay-path path  Replay saved LLM expansion JSONL for fusion tests.
   --fusion-mode value      Search eval fusion mode: standard|direct-local|direct-llm|rrf|tail.
   --candidate-limit value  Search eval candidate pool size for direct/fusion modes. Defaults to 256.
-  --no-index-elaboration  Do not generate missing index-time keyword metadata with the small model.
+  --no-index-elaboration  Do not generate missing index-time keyword metadata.
 
 Index-folder options:
   --index-keywords       Generate index-time keyword metadata with OpenAI.
-  --keyword-model value  Keyword enrichment model. Defaults to --small-model or gpt-5-nano.
-  --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to heron.
+  --keyword-model value  Keyword enrichment model. Defaults to gpt-5-mini.
+  --describe-visuals    Generate compact descriptions for detected PDF figures/charts/images.
+  --visual-model value  Visual description model. Defaults to gpt-5-mini.
+  --layout-model value   Built-in document structure layout model: heron|pp-doclayout-m. Defaults to pp-doclayout-m.
   --layout-plugin path   Trusted .NET assembly containing a document structure layout provider.
   --layout-plugin-type value  Full provider type name in --layout-plugin.
 """
@@ -156,7 +168,8 @@ Index-folder options:
             let smallModel = optionValue "small-model" QaDefaults.nanoModel parsed
             let small = createClient key smallModel
 
-            { queryExpansion = Some small }
+            { queryExpansion = Some small
+              visualDescription = None }
 
     let retrievalMode parsed =
         match
@@ -203,14 +216,51 @@ Index-folder options:
 
         Directory.CreateDirectory storageRoot |> ignore
         let answerWebSocketConfig = FsResponses.ResponseWebSocketConfig.create apiKey
+        let clients = clientsFromArgs parsed
+        let plugInProfile = plugInProfile parsed
+        let mode = retrievalMode parsed
+
+        let sourceIndexService =
+            let plugInFingerprint =
+                { PlugInDefinition.generic with
+                    id = plugInProfile.id
+                    displayName = plugInProfile.displayName
+                    description = plugInProfile.description
+                    profile = plugInProfile
+                    runtime =
+                        { PlugInRuntimeOptions.defaults with
+                            retrievalMode = mode
+                            enableQueryExpansion = hasFlag "llm-query-expansion" parsed
+                            elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
+                            autoWriteback = autoWriteback } }
+                |> PlugInDefinition.fingerprint
+
+            let options =
+                { FsColbertSourceIndexServiceOptions.create storageRoot with
+                    queryExpansionClient =
+                        if hasFlag "llm-query-expansion" parsed then
+                            clients.queryExpansion
+                        else
+                            None
+                    keywordGenerationClient = clients.queryExpansion
+                    plugInProfile = plugInProfile
+                    plugInFingerprint = plugInFingerprint
+                    keywordModelId = optionValue "small-model" QaDefaults.keywordModel parsed
+                    elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
+                    buildMissingIndexes = true
+                    report = fun msg -> Console.Error.WriteLine msg }
+
+            FsColbertSourceIndexService(options) :> ISourceIndexService
 
         let options =
             { QaSessionOptions.create storageRoot answerWebSocketConfig with
-                retrievalMode = retrievalMode parsed
-                clients = clientsFromArgs parsed
-                plugInProfile = plugInProfile parsed
+                retrievalMode = mode
+                sourceIngestionProfile = SourceIngestionProfile.defaults
+                sourceIndexService = Some sourceIndexService
+                clients = clients
+                plugInProfile = plugInProfile
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
-                keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed
+                keywordModelId = optionValue "small-model" QaDefaults.keywordModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
                 enableQueryExpansion = hasFlag "llm-query-expansion" parsed
                 toolProviderDirectory = optionValues "tool-dir" parsed |> List.tryLast
@@ -285,7 +335,7 @@ Index-folder options:
                 with ex ->
                     Error $"Unable to load layout plugin '{pluginPath}': {ex.Message}"
         | _ ->
-            let modelId = optionValue "layout-model" "heron" parsed
+            let modelId = optionValue "layout-model" "pp-doclayout-m" parsed
 
             match DoclingHybrid.tryBuiltInLayoutProvider modelId with
             | Some provider -> Ok provider
@@ -298,8 +348,7 @@ Index-folder options:
             match apiKey parsed with
             | None -> Error "--index-keywords requires --api-key or OPENAI_API_KEY."
             | Some key ->
-                let modelId =
-                    optionValueAny [ "keyword-model"; "small-model" ] QaDefaults.nanoModel parsed
+                let modelId = optionValue "keyword-model" QaDefaults.keywordModel parsed
 
                 Ok
                     { KnowledgeSources.KeywordGenerationOptions.defaults with
@@ -307,6 +356,22 @@ Index-folder options:
                         client = Some(createClient key modelId)
                         modelId = modelId
                         plugInProfile = plugInProfile parsed }
+
+    let private visualDescriptionOptionsForIndexFolder parsed =
+        if not (hasFlag "describe-visuals" parsed) then
+            Ok PdfVisualDescriptionOptions.disabled
+        else
+            match apiKey parsed with
+            | None -> Error "--describe-visuals requires --api-key or OPENAI_API_KEY."
+            | Some key ->
+                let modelId = optionValue "visual-model" "gpt-5-mini" parsed
+
+                Ok
+                    { PdfVisualDescriptionOptions.defaults with
+                        enabled = true
+                        client = Some(createClient key modelId)
+                        modelId = modelId
+                        cacheStorageRoot = Some(storageRoot parsed) }
 
     let private documentBundlePath (outputRoot: string) (relativePath: string) =
         Path.Combine(outputRoot, "documents", relativePath.Replace('/', Path.DirectorySeparatorChar))
@@ -332,10 +397,15 @@ Index-folder options:
             elif String.IsNullOrWhiteSpace bundleId then
                 return Error "Missing --bundle-id."
             else
-                match loadLayoutProvider parsed, keywordOptionsForIndexFolder parsed with
-                | Error err, _ -> return Error err
-                | _, Error err -> return Error err
-                | Ok layoutProvider, Ok keywordOptions ->
+                match
+                    loadLayoutProvider parsed,
+                    keywordOptionsForIndexFolder parsed,
+                    visualDescriptionOptionsForIndexFolder parsed
+                with
+                | Error err, _, _ -> return Error err
+                | _, Error err, _ -> return Error err
+                | _, _, Error err -> return Error err
+                | Ok layoutProvider, Ok keywordOptions, Ok visualOptions ->
                     let outputFull = Path.GetFullPath output
                     let outputIsZip = outputFull.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
 
@@ -367,14 +437,18 @@ Index-folder options:
                                     layoutModelProvider = Some layoutProvider }
 
                             report
-                                $"Indexing {sources.Length} document(s) with layout model {layoutProvider.DisplayName}; indexKeywords={keywordOptions.enabled}."
+                                $"Indexing {sources.Length} document(s) with layout model {layoutProvider.DisplayName}; indexKeywords={keywordOptions.enabled}; describeVisuals={visualOptions.enabled}."
+
+                            let pdfOptions =
+                                { KnowledgeSources.PdfIngestionOptions.create KnowledgeSources.PdfParsingMode.Hybrid with
+                                    visualDescriptions = visualOptions }
 
                             let! retrieval, errors =
-                                KnowledgeSources.loadIndex
+                                KnowledgeSources.loadIndexWithOptions
                                     (storageRoot parsed)
                                     report
                                     keywordOptions
-                                    KnowledgeSources.PdfParsingMode.Hybrid
+                                    pdfOptions
                                     true
                                     sources
 
@@ -425,7 +499,13 @@ Index-folder options:
                                        documentCount = sources.Length
                                        output = outputFull
                                        layoutModel = layoutProvider.Id
-                                       indexKeywords = keywordOptions.enabled |}
+                                       indexKeywords = keywordOptions.enabled
+                                       describeVisuals = visualOptions.enabled
+                                       visualModel =
+                                        if visualOptions.enabled then
+                                            Some visualOptions.modelId
+                                        else
+                                            None |}
 
                                 return Ok()
                         with ex ->
@@ -741,16 +821,32 @@ Index-folder options:
                     return None
         }
 
+    let private fsColbertModelFolder parsed =
+        Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private fsColbertLegacyModelFolder parsed =
+        Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models")
+
+    let private fsColbertPackagedModelFolder () =
+        Path.Combine(AppContext.BaseDirectory, "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private fsColbertModelCandidateFolders parsed =
+        [ fsColbertModelFolder parsed
+          fsColbertLegacyModelFolder parsed
+          fsColbertPackagedModelFolder () ]
+        |> List.distinctBy (fun path -> Path.GetFullPath(path).ToLowerInvariant())
+
     let loadFsColbertEncoder parsed =
         async {
             use client = new HttpClient()
 
-            let modelFolder = Path.Combine(storageRoot parsed, "FsVoice", "FsColbert", "Models")
+            let modelFolder = fsColbertModelFolder parsed
 
             let! files =
-                FsColbert.ModelCatalog.ensureDownloadedAsync
+                FsColbert.ModelCatalog.ensureAvailableAsync
                     client
                     modelFolder
+                    (fsColbertModelCandidateFolders parsed)
                     FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
             return FsColbert.OnnxColbertEncoder.Load files
@@ -766,6 +862,11 @@ Index-folder options:
                 |> List.map (fun passage ->
                     { source = source
                       index = passage.reference.index
+                      sectionPath = passage.reference.sectionPath
+                      contentRole = sourceContentRole passage.reference.contentRole
+                      pageNumbers = passage.reference.pageNumbers
+                      layoutLabels = passage.reference.layoutLabels
+                      captions = passage.reference.captions
                       text = passage.reference.text
                       score = 0.0f })
 
@@ -803,7 +904,7 @@ Index-folder options:
                         { KnowledgeSources.KeywordGenerationOptions.defaults with
                             enabled = not (hasFlag "no-index-elaboration" parsed)
                             client = clients.queryExpansion
-                            modelId = optionValue "small-model" QaDefaults.nanoModel parsed
+                            modelId = optionValue "small-model" QaDefaults.keywordModel parsed
                             plugInProfile = profile }
 
                     return!
@@ -1194,7 +1295,7 @@ Answers:
     let runInsuranceQaElaborateIndex parsed =
         task {
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
-            let model = optionValue "small-model" "gpt-5-nano" parsed
+            let model = optionValue "small-model" QaDefaults.keywordModel parsed
             let profile = plugInProfile parsed
             let batchSize = optionValue "batch-size" "8" parsed |> Int32.Parse
             let parallelism = optionValue "parallelism" "2" parsed |> Int32.Parse
@@ -1363,6 +1464,11 @@ Answers:
                                 |> List.map (fun hit ->
                                     { source = source
                                       index = hit.reference.index
+                                      sectionPath = hit.reference.sectionPath
+                                      contentRole = sourceContentRole hit.reference.contentRole
+                                      pageNumbers = hit.reference.pageNumbers
+                                      layoutLabels = hit.reference.layoutLabels
+                                      captions = hit.reference.captions
                                       text = hit.reference.text
                                       score = hit.score })
                         })

@@ -5,9 +5,8 @@ open System.Diagnostics
 open System.Threading
 open System.Threading.Tasks
 open FsVoice.Core
-open FsVoice.Retrieval
 
-type QaSession private (options: QaSessionOptions, transportOverride: QaResponsesTransportOverride option) =
+type QaSession private (options: QaSessionOptions, injectedTransport: FsResponses.IResponsesTransport option) =
     let mutable contextProviders = options.contextProviders
 
     let memoryPath =
@@ -18,7 +17,11 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
         contextProviders
         |> List.tryPick (fun provider ->
             match provider with
-            | :? FsColbertContextProvider as fsColbert -> fsColbert.Retrieval.encoder
+            | :? ISemanticIndexResourceProvider as semanticProvider ->
+                semanticProvider.SemanticIndexResource
+                |> Option.bind (function
+                    | :? FsColbert.OnnxColbertEncoder as encoder -> Some encoder
+                    | _ -> None)
             | _ -> None)
 
     let memoryService =
@@ -33,7 +36,14 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
     let clamp (maxValue: int) (value: int) = Math.Max(1, Math.Min(maxValue, value))
 
     let transport =
-        QaResponsesTransport(options, sessionCancellation, report, transportOverride)
+        injectedTransport
+        |> Option.defaultWith (fun () ->
+            let transportOptions =
+                { FsResponses.ResponsesTransportOptions.create options.answerResponseWebSocketConfig with
+                    mode = options.answerTransportMode
+                    report = report }
+
+            options.answerTransportFactory.Create transportOptions)
 
     let retrieveContext question maxResults cancellationToken =
         async {
@@ -99,7 +109,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                 task {
                     let! chunks = retrieveContext question maxResults cancellationToken |> Async.StartAsTask
 
-                    return KnowledgeSources.renderContext chunks
+                    return SourceRendering.renderContextWithLimit options.maxContextChunks chunks
                 }
 
             member _.SourceInventoryAsync cancellationToken = contextInventory cancellationToken
@@ -112,7 +122,11 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
     let loadToolCatalog () =
         let loaded =
-            QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
+            QaToolLoader.loadWithProvidersAndLimit
+                host
+                options.maxContextChunks
+                options.toolProviderDirectory
+                options.toolProviders
 
         if options.enableDurableMemory then
             loaded
@@ -177,8 +191,8 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
     new(options: QaSessionOptions) = QaSession(options, None)
 
-    internal new(options: QaSessionOptions, transportOverride: QaResponsesTransportOverride) =
-        QaSession(options, Some transportOverride)
+    internal new(options: QaSessionOptions, transport: FsResponses.IResponsesTransport) =
+        QaSession(options, Some transport)
 
     member _.ToolCatalog = catalog
 
@@ -214,47 +228,29 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
     member this.LoadSourcesAsync(mode, sources, cancellationToken) =
         task {
-            let providerOptions =
-                { FsColbertContextProviderOptions.create options.storageRoot mode sources with
-                    queryExpansionClient =
-                        if options.enableQueryExpansion then
-                            options.clients.queryExpansion
-                        else
-                            None
-                    keywordGenerationClient = options.clients.queryExpansion
-                    plugInProfile = options.plugInProfile
-                    plugInFingerprint =
-                        { PlugInDefinition.generic with
-                            id = options.plugInProfile.id
-                            displayName = options.plugInProfile.displayName
-                            description = options.plugInProfile.description
-                            profile = options.plugInProfile
-                            prompts = options.prompts
-                            models = options.modelRoles
-                            runtime =
-                                { PlugInRuntimeOptions.defaults with
-                                    retrievalMode = mode
-                                    enableQueryExpansion = options.enableQueryExpansion
-                                    elaborateIndexKeywords = options.elaborateIndexKeywords
-                                    useLexicalFilter = options.useLexicalFilter
-                                    autoWriteback = options.autoWriteback } }
-                        |> PlugInDefinition.fingerprint
-                    keywordModelId = options.keywordModelId
-                    elaborateIndexKeywords = options.elaborateIndexKeywords
-                    pdfParsingMode = options.pdfParsingMode
-                    logExpansions = options.logExpansions
-                    logChunks = options.logChunks
-                    useLexicalFilter = options.useLexicalFilter
-                    report = report }
+            match options.sourceIndexService with
+            | None ->
+                return
+                    [ "No source index service is configured for LoadSourcesAsync. Create an IQaContextProvider through the host source-index service and call ConfigureAsync instead." ]
+            | Some service ->
+                let provider =
+                    service.CreateContextProvider(options.sourceIngestionProfile, mode, sources)
 
-            let provider = FsColbertContextProvider providerOptions :> IQaContextProvider
-            return! this.ConfigureAsync([ provider ], cancellationToken)
+                return! this.ConfigureAsync([ provider ], cancellationToken)
         }
 
     member _.AnswerAsync(request: QaTurnRequest, cancellationToken) =
         task {
             let totalSw = Stopwatch.StartNew()
             let snapshot = QaAnswerModel.createSnapshot request
+            let transportMode = QaAnswerTransportMode.storageName options.answerTransportMode
+
+            let reportTiming message =
+                if options.logTimings then
+                    report message
+
+            reportTiming
+                $"QA request started: turn={snapshot.turnId}; question_chars={snapshot.text.Length}; answerModel={options.answerModelId}; transportMode={transportMode}."
 
             let decision =
                 memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
@@ -270,8 +266,13 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
             let memoryTask =
                 task {
                     let sw = Stopwatch.StartNew()
+                    reportTiming $"QA memory started: turn={snapshot.turnId}."
                     let! hits = memoryService.RecallAsync(decision, cancellationToken)
                     sw.Stop()
+
+                    reportTiming
+                        $"QA memory completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; hits={hits.Length}."
+
                     return hits, sw.Elapsed.TotalMilliseconds
                 }
 
@@ -279,11 +280,18 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
                 task {
                     let sw = Stopwatch.StartNew()
 
+                    reportTiming
+                        $"QA retrieval started: turn={snapshot.turnId}; candidateChunks={options.memoryCandidateChunks}; providers={contextProviders.Length}."
+
                     let! chunks =
                         retrieveContext snapshot.text options.memoryCandidateChunks cancellationToken
                         |> Async.StartAsTask
 
                     sw.Stop()
+
+                    reportTiming
+                        $"QA retrieval completed: turn={snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; chunks={chunks.Length}."
+
                     return chunks, sw.Elapsed.TotalMilliseconds
                 }
 
@@ -293,18 +301,45 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
             let answerSw = Stopwatch.StartNew()
 
+            reportTiming
+                $"QA answer started: turn={snapshot.turnId}; model={options.answerModelId}; contextChunks={chunks.Length}; memoryHits={memoryHits.Length}; transportMode={transportMode}."
+
             let! answerResult =
-                responsesAnswerer.AnswerAsync(
-                    snapshot,
-                    decision,
-                    memoryHits,
-                    chunks,
-                    toolObservations,
-                    cancellationToken
-                )
-                |> Async.StartAsTask
+                task {
+                    try
+                        let! result =
+                            responsesAnswerer.AnswerAsync(
+                                snapshot,
+                                decision,
+                                memoryHits,
+                                chunks,
+                                toolObservations,
+                                cancellationToken
+                            )
+                            |> Async.StartAsTask
+
+                        return result
+                    with
+                    | :? OperationCanceledException as ex ->
+                        answerSw.Stop()
+
+                        reportTiming
+                            $"QA answer canceled: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; error={ex.Message}."
+
+                        return raise ex
+                    | ex ->
+                        answerSw.Stop()
+
+                        reportTiming
+                            $"QA answer failed: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; error={ex.GetType().Name}: {ex.Message}."
+
+                        return raise ex
+                }
 
             answerSw.Stop()
+
+            reportTiming
+                $"QA answer completed: turn={snapshot.turnId}; elapsed={answerSw.Elapsed.TotalMilliseconds:F0}ms; answer_chars={answerResult.answer.Length}; observations={answerResult.observations.Length}; transportMode={transportMode}."
 
             let answer = answerResult.answer
             let allObservations = toolObservations @ answerResult.observations
@@ -319,7 +354,7 @@ type QaSession private (options: QaSessionOptions, transportOverride: QaResponse
 
             if options.logTimings then
                 report
-                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}."
+                    $"QA timing: turn={snapshot.turnId}; total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={allObservations.Length}; transportMode={transportMode}."
 
             let qaAnswer =
                 { turnId = request.turnId

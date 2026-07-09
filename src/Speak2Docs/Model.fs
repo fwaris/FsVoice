@@ -11,6 +11,7 @@ open RTOpenAI.Api
 type AppPage =
     | Terms
     | Main
+    | Library
     | Settings
     | Info
     | IndexPreview of documentId: string
@@ -18,6 +19,13 @@ type AppPage =
 type OpenAiDisclosureMode =
     | ConnectAfterAcknowledgement
     | ReviewOnly
+
+type DocumentFilter =
+    | AllDocuments
+    | SelectedDocuments
+    | ReadyDocuments
+    | ProcessingDocuments
+    | FailedDocuments
 
 type ConnectionBundle =
     { id: string
@@ -44,7 +52,7 @@ type StartParams =
 
 and IndexPreviewState =
     | PreviewLoading of documentId: string
-    | PreviewReady of KnowledgeSources.IndexPreview
+    | PreviewReady of FsVoice.Ctx.SourcePreview
     | PreviewFailed of documentId: string * error: string
 
 and PickedSourceImportResult =
@@ -54,13 +62,16 @@ and PickedSourceImportResult =
 
 and TransientNotification = { id: int; message: string }
 
+and ViewportSize = { width: float; height: float }
+
 and Model =
     { currentPage: AppPage
+      mainPageSize: ViewportSize option
       mailbox: Channel<Msg>
       bundle: ConnectionBundle option
       pendingConnectionId: string option
       disconnectedConnectionIds: Set<string>
-      sessionState: RTOpenAI.WebRTC.State
+      sessionState: RealtimeConnectionState
       openAiKey: string
       activePlugIn: FsVoice.Ctx.PlugInDefinition
       qaPlugIn: FsVoice.Ctx.IQaPlugIn
@@ -68,6 +79,8 @@ and Model =
       plugInSettings: Map<string, string>
       modelRoleOverrides: Map<FsVoice.Ctx.ModelRole, string>
       retrievalMode: RetrievalMode
+      documentFilter: DocumentFilter
+      documentSearch: string
       pdfDocuments: PdfDocumentSource list
       log: string list
       logFontSize: float
@@ -80,19 +93,26 @@ and Model =
       documentProcessingCancellation: CancellationTokenSource option
       logExpansions: bool
       logChunks: bool
+      audioDefaultToSpeaker: bool
       answerMaxOutputTokens: string
       answerReasoningEffort: string
       answerToolCallLoopLimit: string
+      maxContextChunks: string
       useLexicalFilter: bool
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      useOpticalParsing: bool
+      autoOcrFallback: bool
+      describePdfVisuals: bool
       notification: TransientNotification option
       nextNotificationId: int
       appTheme: AppTheme
+      indexPreviewReturnsToLibrary: bool
       indexPreview: IndexPreviewState option }
 
 and Msg =
+    | MainPageSizeAllocated of float * float
     | TermsAccepted
     | TermsDeclined
     | OpenAiDisclosure_Show of OpenAiDisclosureMode
@@ -103,6 +123,8 @@ and Msg =
     | ModelRoleModelChanged of FsVoice.Ctx.ModelRole * string
     | PlugInSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode
+    | Library_Show
+    | Library_Close
     | Settings_Show
     | Settings_Close
     | Info_Show
@@ -114,6 +136,11 @@ and Msg =
     | PickSourcesCompleted of Result<PickedSourceImportResult, exn>
     | PdfProcessingCompleted of PdfDocumentSource list * Result<PdfProcessingOutcome, exn>
     | CancelPdfProcessing
+    | DocumentFilterChanged of DocumentFilter
+    | DocumentSearchChanged of string
+    | SelectReadyDocuments
+    | ClearDocumentSelection
+    | RetryFailedPdfProcessing
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
     | DeletePdf of string
@@ -123,28 +150,33 @@ and Msg =
     | PreviewIndex of string
     | RefreshIndexPreview
     | IndexPreviewBack
-    | IndexPreviewLoaded of string * Result<KnowledgeSources.IndexPreview, exn>
+    | IndexPreviewLoaded of string * Result<FsVoice.Ctx.SourcePreview, exn>
     | ApplySources
     | StartStop
     | StartCompleted of string * Result<ConnectionBundle, exn>
     | StopCompleted of string * Result<unit, exn>
-    | WebRTC_StateChanged of string * RTOpenAI.WebRTC.State
+    | WebRTC_StateChanged of string * RealtimeConnectionState
     | RealtimeConnectFailed of string * string
     | Log_Append of string
     | Log_Clear
     | LogFont_Increase
     | LogFont_Decrease
     | ActivityLogVerbosityChanged of ActivityLogVerbosity
+    | AudioDefaultToSpeakerToggled of bool
     | NotificationExpired of int
     | ThemeChanged of AppTheme
+    | AppResumed
     | EventError of exn
     | AnswerMaxOutputTokensChanged of string
     | AnswerReasoningEffortChanged of string
     | AnswerToolCallLoopLimitChanged of string
+    | MaxContextChunksChanged of string
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool
     | ElaborateIndexKeywordsToggled of bool
-    | UseHybridPdfParsingToggled of bool
     | UseLayoutAnalysisToggled of bool
+    | UseOpticalParsingToggled of bool
+    | AutoOcrFallbackToggled of bool
+    | DescribePdfVisualsToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

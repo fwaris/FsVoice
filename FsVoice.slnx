@@ -4,6 +4,7 @@
     <Project Path="src/FsVoice.Platform/FsVoice.Platform.fsproj" />
     <Project Path="src/FsVoice.Ctx.Contracts/FsVoice.Ctx.Contracts.fsproj" />
     <Project Path="src/FsVoice.Retrieval/FsVoice.Retrieval.fsproj" />
+    <Project Path="src/FsVoice.Retrieval.RapidOcrModels/FsVoice.Retrieval.RapidOcrModels.fsproj" />
     <Project Path="src/FsVoice.Ctx.Runtime/FsVoice.Ctx.Runtime.fsproj" />
     <Project Path="src/FsVoice.Ctx.Tools/FsVoice.Ctx.Tools.fsproj" />
     <Project Path="src/FsVoice.Retrieval.PdfRasterization/FsVoice.Retrieval.PdfRasterization.fsproj" />

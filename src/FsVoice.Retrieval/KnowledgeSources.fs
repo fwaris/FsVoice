@@ -21,6 +21,10 @@ module KnowledgeSources =
     [<Literal>]
     let private DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS = 90000
 
+    [<Literal>]
+    let private CONTEXTUAL_RETRIEVAL_VERSION =
+        "contextual-retrieval-v2-layout-overlay-v1"
+
     type RetrievalIndex =
         { sources: KnowledgeSource list
           chunks: SourceChunk list
@@ -34,6 +38,11 @@ module KnowledgeSources =
 
     type IndexPreviewRecord =
         { index: int
+          sectionPath: string list
+          contentRole: SourceContentRole
+          pageNumbers: int list
+          layoutLabels: string list
+          captions: string list
           text: string
           keywords: string list
           terms: string list
@@ -79,7 +88,7 @@ module KnowledgeSources =
         let defaults =
             { enabled = true
               client = None
-              modelId = "gpt-5-nano"
+              modelId = FsVoice.Ctx.QaDefaults.keywordModel
               schemaVersion = "passage-keywords-v1"
               batchSize = 4
               parallelism = DEFAULT_KEYWORD_METADATA_PARALLELISM
@@ -110,12 +119,53 @@ module KnowledgeSources =
             | PdfParsingMode.HybridWithoutLayout -> "hybrid-no-layout"
 
         [<Literal>]
-        let parserQualityVersion = "layout-sparse-fallback-v1"
+        let parserQualityVersion = "contextual-retrieval-v2-layout-overlay-v1"
 
         let indexFingerprint mode =
             [ $"pdfParsingMode={fingerprint mode}"
               $"pdfParserQuality={parserQualityVersion}" ]
             |> String.concat "\n"
+
+    type PdfIngestionOptions =
+        { parsingMode: PdfParsingMode
+          enableOpticalParsing: bool
+          enableAutoOpticalParsing: bool
+          visualDescriptions: PdfVisualDescriptionOptions }
+
+    module PdfIngestionOptions =
+        let create parsingMode =
+            { parsingMode = parsingMode
+              enableOpticalParsing = false
+              enableAutoOpticalParsing = true
+              visualDescriptions = PdfVisualDescriptionOptions.disabled }
+
+        let defaults = create PdfParsingMode.Hybrid
+
+        let fromProfile visualDescriptions (profile: PdfIngestionProfile) =
+            let parsingMode, enableLayoutVisuals =
+                match profile.textExtraction with
+                | LegacyText -> PdfParsingMode.Legacy, false
+                | StructuredText true -> PdfParsingMode.Hybrid, true
+                | StructuredText false -> PdfParsingMode.HybridWithoutLayout, false
+
+            { parsingMode = parsingMode
+              enableOpticalParsing = profile.ocr.parseSparsePages
+              enableAutoOpticalParsing = profile.ocr.repairCorruptText
+              visualDescriptions =
+                if profile.describeVisuals && enableLayoutVisuals then
+                    visualDescriptions
+                else
+                    PdfVisualDescriptionOptions.disabled }
+
+        let fromSourceProfile visualDescriptions (profile: SourceIngestionProfile) =
+            fromProfile visualDescriptions profile.pdf
+
+        let sanitize (options: PdfIngestionOptions) =
+            { options with
+                visualDescriptions = PdfVisualDescriptionOptions.sanitize options.visualDescriptions }
+
+        let visualFingerprint options =
+            options.visualDescriptions |> PdfVisualDescriptionOptions.fingerprint
 
     [<CLIMutable>]
     type InstalledPrebuiltIndex =
@@ -152,7 +202,13 @@ module KnowledgeSources =
 
     type private PassageLoadMode =
         | LegacyPdf
-        | HybridPdf of storageRoot: string * report: (string -> unit) * enableLayoutAnalysis: bool
+        | HybridPdf of
+            storageRoot: string *
+            report: (string -> unit) *
+            enableLayoutAnalysis: bool *
+            enableOpticalParsing: bool *
+            enableAutoOpticalParsing: bool *
+            visualDescriptions: PdfVisualDescriptionOptions
 
     [<AllowNullLiteral>]
     type JsonKnowledgeDocumentDto() =
@@ -278,6 +334,11 @@ module KnowledgeSources =
                                    sourceDisplayName = passageSource.displayName
                                    sourceLocation = passageSource.location
                                    index = index
+                                   sectionPath = []
+                                   contentRole = FsColbert.PassageContentRole.Unknown
+                                   pageNumbers = []
+                                   layoutLabels = []
+                                   captions = []
                                    text = Text.normalizeWhitespace text
                                    keywords = item.keywords }
                                 : FsColbert.PassageRef))
@@ -306,10 +367,18 @@ module KnowledgeSources =
             match mode with
             | LegacyPdf ->
                 checkedRead (FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location)
-            | HybridPdf(storageRoot, report, enableLayoutAnalysis) ->
+            | HybridPdf(storageRoot,
+                        report,
+                        enableLayoutAnalysis,
+                        enableOpticalParsing,
+                        enableAutoOpticalParsing,
+                        visualDescriptions) ->
                 let options =
                     { DoclingHybrid.currentDefaultOptions () with
-                        enableLayoutAnalysis = enableLayoutAnalysis }
+                        enableLayoutAnalysis = enableLayoutAnalysis
+                        enableOcr = enableOpticalParsing
+                        enableAutoOpticalParsing = enableAutoOpticalParsing
+                        visualDescriptions = PdfVisualDescriptionOptions.sanitize visualDescriptions }
 
                 DoclingHybrid.readPdfPassagesWithOptionsWithFallbackAndCancellation
                     options
@@ -329,16 +398,65 @@ module KnowledgeSources =
 
     let loadPassages source = sourcePassages LegacyPdf source
 
-    let loadPassagesForIndexingWithCancellation storageRoot report pdfParsingMode source cancellationToken =
-        match pdfParsingMode with
+    let loadPassagesForIndexingWithOptionsWithCancellation
+        storageRoot
+        report
+        (pdfOptions: PdfIngestionOptions)
+        source
+        cancellationToken
+        =
+        let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
+        match pdfOptions.parsingMode with
         | PdfParsingMode.Legacy -> sourcePassagesWithCancellation LegacyPdf source cancellationToken
         | PdfParsingMode.Hybrid ->
-            sourcePassagesWithCancellation (HybridPdf(storageRoot, report, true)) source cancellationToken
+            sourcePassagesWithCancellation
+                (HybridPdf(
+                    storageRoot,
+                    report,
+                    true,
+                    pdfOptions.enableOpticalParsing,
+                    pdfOptions.enableAutoOpticalParsing,
+                    pdfOptions.visualDescriptions
+                ))
+                source
+                cancellationToken
         | PdfParsingMode.HybridWithoutLayout ->
-            sourcePassagesWithCancellation (HybridPdf(storageRoot, report, false)) source cancellationToken
+            sourcePassagesWithCancellation
+                (HybridPdf(
+                    storageRoot,
+                    report,
+                    false,
+                    pdfOptions.enableOpticalParsing,
+                    pdfOptions.enableAutoOpticalParsing,
+                    PdfVisualDescriptionOptions.disabled
+                ))
+                source
+                cancellationToken
+
+    let loadPassagesForIndexingWithCancellation storageRoot report pdfParsingMode source cancellationToken =
+        loadPassagesForIndexingWithOptionsWithCancellation
+            storageRoot
+            report
+            (PdfIngestionOptions.create pdfParsingMode)
+            source
+            cancellationToken
 
     let loadPassagesForIndexing storageRoot report pdfParsingMode source =
         loadPassagesForIndexingWithCancellation storageRoot report pdfParsingMode source CancellationToken.None
+
+    let loadPassagesForIndexingWithOptions storageRoot report pdfOptions source =
+        loadPassagesForIndexingWithOptionsWithCancellation storageRoot report pdfOptions source CancellationToken.None
+
+    let private sourceContentRole (role: FsColbert.PassageContentRole) =
+        match role with
+        | FsColbert.PassageContentRole.FrontMatter -> SourceContentRole.FrontMatter
+        | FsColbert.PassageContentRole.Abstract -> SourceContentRole.Abstract
+        | FsColbert.PassageContentRole.MainBody -> SourceContentRole.MainBody
+        | FsColbert.PassageContentRole.References -> SourceContentRole.References
+        | FsColbert.PassageContentRole.Appendix -> SourceContentRole.Appendix
+        | FsColbert.PassageContentRole.SubmissionChecklist -> SourceContentRole.SubmissionChecklist
+        | _ -> SourceContentRole.Unknown
 
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
@@ -362,6 +480,11 @@ module KnowledgeSources =
                         chunks.Add(
                             { source = source
                               index = passage.index
+                              sectionPath = passage.sectionPath
+                              contentRole = sourceContentRole passage.contentRole
+                              pageNumbers = passage.pageNumbers
+                              layoutLabels = passage.layoutLabels
+                              captions = passage.captions
                               text = passage.text
                               score = 0.0f }
                         )
@@ -387,6 +510,11 @@ module KnowledgeSources =
     let private hitToChunk sources (hit: FsColbert.SearchHit) =
         { source = sourceFromLocation sources hit.reference.sourceLocation
           index = hit.reference.index
+          sectionPath = hit.reference.sectionPath
+          contentRole = sourceContentRole hit.reference.contentRole
+          pageNumbers = hit.reference.pageNumbers
+          layoutLabels = hit.reference.layoutLabels
+          captions = hit.reference.captions
           text = hit.reference.text
           score = hit.score }
 
@@ -395,6 +523,11 @@ module KnowledgeSources =
         |> List.map (fun passage ->
             { source = sourceFromLocation sources passage.reference.sourceLocation
               index = passage.reference.index
+              sectionPath = passage.reference.sectionPath
+              contentRole = sourceContentRole passage.reference.contentRole
+              pageNumbers = passage.reference.pageNumbers
+              layoutLabels = passage.reference.layoutLabels
+              captions = passage.reference.captions
               text = passage.reference.text
               score = 0.0f })
 
@@ -406,7 +539,15 @@ module KnowledgeSources =
         else
             chunks
             |> List.choose (fun (chunk: SourceChunk) ->
-                let haystack = chunk.text.ToLowerInvariant()
+                let haystack =
+                    (chunk.sectionPath
+                     @ [ SourceContentRole.displayName chunk.contentRole
+                         String.concat " " (chunk.pageNumbers |> List.map string)
+                         String.concat " " chunk.layoutLabels
+                         String.concat " " chunk.captions
+                         chunk.text ])
+                    |> String.concat "\n"
+                    |> fun text -> text.ToLowerInvariant()
 
                 let score =
                     queryTerms |> Seq.sumBy (fun term -> if haystack.Contains term then 1 else 0)
@@ -478,6 +619,21 @@ module KnowledgeSources =
           "what does this"
           "what do these" ]
 
+    let private checklistTerms =
+        [ "checklist"
+          "disclosure"
+          "guideline"
+          "guidelines"
+          "compliance"
+          "neurips"
+          "question"
+          "answer" ]
+
+    let private authorTitleTerms =
+        [ "author"; "authors"; "wrote"; "written"; "title"; "called" ]
+
+    let private abstractTerms = [ "abstract" ]
+
     let private queryHasAnyTerm (terms: string list) (query: string) =
         let queryTerms = Text.terms query |> Set.ofList
 
@@ -487,6 +643,83 @@ module KnowledgeSources =
         let lower = query.ToLowerInvariant()
 
         phrases |> List.exists (fun phrase -> lower.Contains(phrase))
+
+    let private wantsChecklistQuery query =
+        queryHasAnyTerm checklistTerms query
+        || queryHasAnyPhrase [ "paper checklist" ] query
+
+    let private wantsAuthorsQuery query =
+        queryHasAnyTerm authorTitleTerms query
+        || queryHasAnyPhrase [ "who wrote"; "paper title" ] query
+
+    let private wantsAbstractQuery query = queryHasAnyTerm abstractTerms query
+
+    let private looksLikeChecklistText (text: string) =
+        let lower = Text.normalizeWhitespace text |> fun value -> value.ToLowerInvariant()
+
+        [ "neurips paper checklist"
+          "paper checklist"
+          "question: do the main claims"
+          "answer: [na]"
+          "answer: [yes]"
+          "answer: [no]"
+          "the answer na means"
+          "the answer yes means"
+          "the answer no means"
+          "guidelines:"
+          "justification:"
+          "authors should"
+          "authors are encouraged"
+          "the authors are encouraged"
+          "do not remove the checklist"
+          "desk rejected"
+          "at submission time"
+          "genai usage disclosure" ]
+        |> List.exists (fun marker -> lower.Contains(marker))
+
+    let private looksLikeChecklistChunk (chunk: SourceChunk) =
+        chunk.contentRole = SourceContentRole.SubmissionChecklist
+        || looksLikeChecklistText chunk.text
+        || (chunk.sectionPath
+            |> List.exists (fun section ->
+                let normalized =
+                    Text.normalizeWhitespace section |> fun value -> value.ToLowerInvariant()
+
+                normalized = "neurips paper checklist" || normalized = "genai usage disclosure"))
+
+    let private roleAwareRawMaxResults query maxResults =
+        if wantsAuthorsQuery query || wantsAbstractQuery query || wantsChecklistQuery query then
+            max maxResults 64
+        else
+            maxResults
+
+    let private applyRoleBoost query (chunks: SourceChunk list) =
+        let wantsChecklist = wantsChecklistQuery query
+        let wantsAuthors = wantsAuthorsQuery query
+        let wantsAbstract = wantsAbstractQuery query
+
+        chunks
+        |> List.map (fun chunk ->
+            let boost =
+                if looksLikeChecklistChunk chunk then
+                    if wantsChecklist then 1.25f else -2.0f
+                else
+                    match chunk.contentRole with
+                    | SourceContentRole.FrontMatter when wantsAuthors -> 1.5f
+                    | SourceContentRole.Abstract when wantsAbstract -> 1.5f
+                    | SourceContentRole.References when
+                        queryHasAnyTerm [ "references"; "bibliography"; "citations" ] query
+                        ->
+                        0.8f
+                    | SourceContentRole.Appendix when queryHasAnyTerm [ "appendix"; "supplementary" ] query -> 0.8f
+                    | _ -> 0.0f
+
+            if boost = 0.0f then
+                chunk
+            else
+                { chunk with
+                    score = chunk.score + boost })
+        |> List.sortByDescending (fun chunk -> chunk.score)
 
     let private needsSourceCoverage (query: string) (queryType: QueryType) (sourceCount: int) =
         sourceCount > 1
@@ -567,21 +800,52 @@ module KnowledgeSources =
     let private leadingTerms (text: string) =
         text |> Text.normalizeWhitespace |> Text.terms |> List.truncate 8
 
-    let private sectionAnchorBoost requested text =
-        match FsColbert.DocumentSections.tryGetHeading text with
-        | Some heading when FsColbert.DocumentSections.matches requested heading -> 1.0f
-        | _ ->
-            let requestedTerms = Text.terms requested
+    let private sectionPathHeadings sectionPath =
+        let path =
+            sectionPath
+            |> List.map Text.normalizeWhitespace
+            |> List.filter (String.IsNullOrWhiteSpace >> not)
 
-            let candidateTerms =
-                match leadingTerms text with
-                | "section" :: rest -> rest
-                | terms -> terms
+        [ yield! path
 
-            if startsWithTerms requestedTerms candidateTerms then
-                0.85f
+          if path.Length > 1 then
+              yield String.concat " > " path ]
+
+    let private sectionPathBoost requested sectionPath =
+        sectionPathHeadings sectionPath
+        |> List.tryPick (fun heading ->
+            if FsColbert.DocumentSections.matches requested heading then
+                Some 1.0f
             else
-                0.0f
+                let requestedTerms = Text.terms requested
+                let candidateTerms = Text.terms heading
+
+                if startsWithTerms requestedTerms candidateTerms then
+                    Some 0.85f
+                else
+                    None)
+        |> Option.defaultValue 0.0f
+
+    let private sectionAnchorBoost requested sectionPath text =
+        let pathBoost = sectionPathBoost requested sectionPath
+
+        if pathBoost > 0.0f then
+            pathBoost
+        else
+            match FsColbert.DocumentSections.tryGetHeading text with
+            | Some heading when FsColbert.DocumentSections.matches requested heading -> 1.0f
+            | _ ->
+                let requestedTerms = Text.terms requested
+
+                let candidateTerms =
+                    match leadingTerms text with
+                    | "section" :: rest -> rest
+                    | terms -> terms
+
+                if startsWithTerms requestedTerms candidateTerms then
+                    0.85f
+                else
+                    0.0f
 
     let private applySectionBoost sectionName (chunks: SourceChunk list) =
         match sectionName with
@@ -589,7 +853,7 @@ module KnowledgeSources =
         | Some requested ->
             chunks
             |> List.map (fun chunk ->
-                let boost = sectionAnchorBoost requested chunk.text
+                let boost = sectionAnchorBoost requested chunk.sectionPath chunk.text
 
                 if boost > 0.0f then
                     { chunk with
@@ -601,12 +865,16 @@ module KnowledgeSources =
     let private sectionHeadings (retrieval: RetrievalIndex) =
         seq {
             for chunk in retrieval.chunks do
+                yield! sectionPathHeadings chunk.sectionPath
+
                 match FsColbert.DocumentSections.tryGetHeading chunk.text with
                 | Some heading -> heading
                 | None -> ()
 
             for _, index in retrieval.colbertIndices do
                 for passage in index.passages do
+                    yield! sectionPathHeadings passage.reference.sectionPath
+
                     match FsColbert.DocumentSections.tryGetHeading passage.reference.text with
                     | Some heading -> heading
                     | None -> ()
@@ -900,11 +1168,12 @@ Query: {query}
                 let lexicalMaxResults =
                     match queryType with
                     | QueryType.SectionRetrieval -> max maxResults 20
-                    | _ -> maxResults
+                    | _ -> roleAwareRawMaxResults query maxResults
 
                 retrieval.chunks
                 |> rankLexically lexicalQuery lexicalMaxResults
                 |> applySectionBoost sectionName
+                |> applyRoleBoost query
                 |> balanceBySource query queryType maxResults retrieval
 
             match retrieval.encoder, retrieval.colbertIndices with
@@ -915,7 +1184,7 @@ Query: {query}
                     let rawMaxResults =
                         match queryType with
                         | QueryType.SectionRetrieval -> max maxResults 20
-                        | _ -> maxResults
+                        | _ -> roleAwareRawMaxResults query maxResults
 
                     let options =
                         let tunedCandidateLimit = max FsColbert.SearchOptions.defaults.candidateLimit 256
@@ -940,6 +1209,7 @@ Query: {query}
                         |> Array.sortByDescending (fun c -> c.score)
                         |> Array.toList
                         |> applySectionBoost sectionName
+                        |> applyRoleBoost query
                         |> balanceBySource query queryType maxResults retrieval
 
                     if logChunks then
@@ -997,6 +1267,13 @@ Query: {query}
     let private modelFolder storageRoot =
         Path.Combine(fsColbertRoot storageRoot, "Models", "mxbai-edge-colbert")
 
+    let private packagedModelFolder () =
+        Path.Combine(AppContext.BaseDirectory, "FsColbert", "Models", "mxbai-edge-colbert")
+
+    let private modelCandidateFolders storageRoot =
+        [ modelFolder storageRoot; packagedModelFolder () ]
+        |> List.distinctBy (fun path -> Path.GetFullPath(path).ToLowerInvariant())
+
     let private indexFolder storageRoot =
         let path = Path.Combine(fsColbertRoot storageRoot, "Indexes")
         Directory.CreateDirectory path |> ignore
@@ -1021,7 +1298,11 @@ Query: {query}
     let clearPersistedIndexes storageRoot =
         async {
             let files =
-                Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci") |> Seq.toList
+                seq {
+                    yield! Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci")
+                    yield! Directory.EnumerateFiles(indexFolder storageRoot, "*.metadata.json")
+                }
+                |> Seq.toList
 
             let errors = ResizeArray<string>()
 
@@ -1503,6 +1784,7 @@ Passages:
             |> fun items -> JsonSerializer.Serialize items
 
         [ yield "keywords=enabled"
+          yield $"contextualRetrieval={CONTEXTUAL_RETRIEVAL_VERSION}"
           yield $"keywordModel={options.modelId}"
           yield $"keywordSchema={options.schemaVersion}"
           yield $"plugInProfile={options.plugInProfile.id}"
@@ -1516,6 +1798,7 @@ Passages:
 
     let private disabledKeywordFingerprint =
         [ "keywords=disabled"
+          $"contextualRetrieval={CONTEXTUAL_RETRIEVAL_VERSION}"
           $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
           $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
         |> String.concat "\n"
@@ -1707,25 +1990,50 @@ Passages:
                 return enriched, keywordMetadataFingerprint options enriched
         }
 
-    let private sourceParsingFingerprint pdfParsingMode (source: KnowledgeSource) =
+    let sourceParsingFingerprint (pdfOptions: PdfIngestionOptions) (source: KnowledgeSource) =
         match source.kind with
-        | Pdf -> PdfParsingModes.indexFingerprint pdfParsingMode
+        | Pdf ->
+            let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
+            let doclingOptions =
+                { DoclingHybrid.currentDefaultOptions () with
+                    enableLayoutAnalysis =
+                        match pdfOptions.parsingMode with
+                        | PdfParsingMode.Hybrid -> true
+                        | PdfParsingMode.HybridWithoutLayout
+                        | PdfParsingMode.Legacy -> false
+                    enableOcr = pdfOptions.enableOpticalParsing
+                    enableAutoOpticalParsing = pdfOptions.enableAutoOpticalParsing
+                    visualDescriptions = pdfOptions.visualDescriptions }
+
+            [ yield PdfParsingModes.indexFingerprint pdfOptions.parsingMode
+              yield PdfIngestionOptions.visualFingerprint pdfOptions
+
+              match pdfOptions.parsingMode with
+              | PdfParsingMode.Legacy -> ()
+              | PdfParsingMode.Hybrid
+              | PdfParsingMode.HybridWithoutLayout -> yield DoclingHybrid.parserRuntimeFingerprint doclingOptions ]
+            |> String.concat "\n"
         | Markdown -> "parser=markdown"
         | Json -> "parser=json"
 
-    let private sourceIndexPath storageRoot pdfParsingMode (source: KnowledgeSource) keywordFingerprint =
+    let private sourceIndexPathWithOptions storageRoot pdfOptions (source: KnowledgeSource) keywordFingerprint =
         let options = FsColbert.ChunkOptions.fsKameDefaults
+        let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
 
         let fingerprint =
             [ yield $"model={FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id}"
               yield $"pdfIndexVersion={pdfIndexVersion}"
-              yield sourceParsingFingerprint pdfParsingMode source
+              yield sourceParsingFingerprint pdfOptions source
               yield $"chunk={options.maxChars}:{options.overlapChars}:{options.minChars}"
               yield keywordFingerprint
               yield sourceFingerprint source ]
             |> String.concat "\n"
 
         Path.Combine(indexFolder storageRoot, $"{hashText fingerprint}.fsci")
+
+    let private sourceIndexPath storageRoot pdfParsingMode source keywordFingerprint =
+        sourceIndexPathWithOptions storageRoot (PdfIngestionOptions.create pdfParsingMode) source keywordFingerprint
 
     let private indexPath storageRoot sources =
         let options = FsColbert.ChunkOptions.fsKameDefaults
@@ -1749,17 +2057,19 @@ Passages:
         | Markdown -> "markdown"
         | Json -> "json"
 
-    let private writeIndexMetadata indexPath pdfParsingMode source keywordFingerprint =
+    let private writeIndexMetadataWithOptions indexPath (pdfOptions: PdfIngestionOptions) source keywordFingerprint =
         try
+            let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
             let metadata =
                 { sourceFingerprint = sourceFingerprint source
                   sourceLocation = source.location
                   sourceDisplayName = source.DisplayName
                   sourceKind = sourceKindFingerprint source
-                  parserFingerprint = Some(sourceParsingFingerprint pdfParsingMode source)
+                  parserFingerprint = Some(sourceParsingFingerprint pdfOptions source)
                   pdfParsingMode =
                     match source.kind with
-                    | Pdf -> Some(PdfParsingModes.fingerprint pdfParsingMode)
+                    | Pdf -> Some(PdfParsingModes.fingerprint pdfOptions.parsingMode)
                     | Markdown
                     | Json -> None
                   keywordFingerprint = keywordFingerprint
@@ -1769,6 +2079,9 @@ Passages:
             File.WriteAllText(indexMetadataPath indexPath, json)
         with _ ->
             ()
+
+    let private writeIndexMetadata indexPath pdfParsingMode source keywordFingerprint =
+        writeIndexMetadataWithOptions indexPath (PdfIngestionOptions.create pdfParsingMode) source keywordFingerprint
 
     let private tryReadIndexMetadata indexPath =
         try
@@ -1820,6 +2133,7 @@ Passages:
           isExactFingerprint: bool
           hasMetadata: bool
           parserMatches: bool
+          parserTextMatches: bool
           modifiedTicks: int64 }
 
     let private indexKeywordCount (index: FsColbert.ColbertIndex) =
@@ -1836,17 +2150,84 @@ Passages:
             String.Equals(passage.reference.sourceLocation, source.location, StringComparison.OrdinalIgnoreCase)
             || String.Equals(passage.reference.sourceId, source.location, StringComparison.OrdinalIgnoreCase))
 
-    let private persistedIndexCandidate pdfParsingMode source exactPath path =
+    let private deletePersistedIndexWithMetadata (errors: ResizeArray<string>) path =
+        seq {
+            yield path
+            yield indexMetadataPath path
+        }
+        |> Seq.distinctBy (fun candidate -> candidate.ToLowerInvariant())
+        |> Seq.sumBy (fun candidate ->
+            if String.IsNullOrWhiteSpace candidate || not (File.Exists candidate) then
+                0
+            else
+                try
+                    File.Delete candidate
+                    1
+                with ex ->
+                    errors.Add $"Unable to delete FsColbert index artifact '{candidate}': {ex.Message}"
+                    0)
+
+    let private persistedIndexBelongsToSource source path =
+        match tryReadIndexMetadata path with
+        | Some metadata ->
+            String.Equals(metadata.sourceLocation, source.location, StringComparison.OrdinalIgnoreCase)
+            || String.Equals(metadata.sourceFingerprint, sourceFingerprint source, StringComparison.Ordinal)
+        | None ->
+            match tryLoadPersistedIndex path with
+            | Ok(Some index) -> indexMatchesSource source index
+            | Ok None
+            | Error _ -> false
+
+    let clearPersistedIndexesForSource storageRoot source =
+        async {
+            let files =
+                Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci") |> Seq.toList
+
+            let errors = ResizeArray<string>()
+
+            let deleted =
+                files
+                |> List.filter (persistedIndexBelongsToSource source)
+                |> List.sumBy (deletePersistedIndexWithMetadata errors)
+
+            return deleted, List.ofSeq errors
+        }
+
+    let private persistedIndexCandidate pdfOptions source exactPath path =
+        let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
         match tryLoadPersistedIndex path with
         | Ok(Some index) when indexMatchesSource source index ->
             let metadata = tryReadIndexMetadata path
+            let currentParserFingerprint = sourceParsingFingerprint pdfOptions source
+
+            let withoutVisualFingerprint (value: string) =
+                (defaultArg (Option.ofObj value) "")
+                    .Replace("\r\n", "\n")
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                |> Array.filter (fun line -> not (line.StartsWith("pdfVisualDescription", StringComparison.Ordinal)))
+                |> String.concat "\n"
 
             let parserMatches =
                 match source.kind, metadata with
                 | Pdf, Some metadata ->
                     metadata.parserFingerprint
                     |> Option.exists (fun value ->
-                        String.Equals(value, sourceParsingFingerprint pdfParsingMode source, StringComparison.Ordinal))
+                        String.Equals(value, currentParserFingerprint, StringComparison.Ordinal))
+                | Pdf, None -> false
+                | Markdown, _
+                | Json, _ -> true
+
+            let parserTextMatches =
+                match source.kind, metadata with
+                | Pdf, Some metadata ->
+                    metadata.parserFingerprint
+                    |> Option.exists (fun value ->
+                        String.Equals(
+                            withoutVisualFingerprint value,
+                            withoutVisualFingerprint currentParserFingerprint,
+                            StringComparison.Ordinal
+                        ))
                 | Pdf, None -> false
                 | Markdown, _
                 | Json, _ -> true
@@ -1868,6 +2249,7 @@ Passages:
                       isExactFingerprint = String.Equals(path, exactPath, StringComparison.OrdinalIgnoreCase)
                       hasMetadata = metadata.IsSome
                       parserMatches = parserMatches
+                      parserTextMatches = parserTextMatches
                       modifiedTicks =
                         try
                             File.GetLastWriteTimeUtc(path).Ticks
@@ -1878,12 +2260,15 @@ Passages:
         | Ok _ -> None
         | Error _ -> None
 
-    let private tryLoadBestPersistedIndex storageRoot pdfParsingMode source exactPath =
+    let private tryLoadBestPersistedIndexWithOptions storageRoot pdfOptions source exactPath =
         try
+            let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
             Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci")
-            |> Seq.choose (persistedIndexCandidate pdfParsingMode source exactPath)
+            |> Seq.choose (persistedIndexCandidate pdfOptions source exactPath)
             |> Seq.sortByDescending (fun candidate ->
                 candidate.parserMatches,
+                candidate.parserTextMatches,
                 candidate.hasMetadata,
                 candidate.keywordCount,
                 candidate.isExactFingerprint,
@@ -1893,13 +2278,23 @@ Passages:
         with ex ->
             Error ex.Message
 
-    let private loadPersistedIndexWithoutParsing storageRoot report pdfParsingMode source =
-        match tryLoadBestPersistedIndex storageRoot pdfParsingMode source "" with
+    let private tryLoadBestPersistedIndex storageRoot pdfParsingMode source exactPath =
+        tryLoadBestPersistedIndexWithOptions storageRoot (PdfIngestionOptions.create pdfParsingMode) source exactPath
+
+    let private loadPersistedIndexWithoutParsingWithOptions
+        storageRoot
+        report
+        (pdfOptions: PdfIngestionOptions)
+        source
+        =
+        let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
+        match tryLoadBestPersistedIndexWithOptions storageRoot pdfOptions source "" with
         | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches ->
             report $"Loaded FsColbert index for {source.DisplayName}; indexKeywords={candidate.keywordCount}."
 
             Ok(Some candidate.index)
-        | Ok(Some candidate) ->
+        | Ok(Some candidate) when candidate.parserTextMatches ->
             let metadataDescription =
                 if candidate.hasMetadata then
                     "older or different parser metadata"
@@ -1907,11 +2302,29 @@ Passages:
                     "no parser metadata"
 
             report
-                $"Ignoring persisted FsColbert index for {source.DisplayName} because it has {metadataDescription}; reprocess this source to rebuild with the current {PdfParsingModes.displayName pdfParsingMode} PDF parser quality checks."
+                $"Loaded FsColbert index for {source.DisplayName} with {metadataDescription}; reprocess this source to refresh with the current {PdfParsingModes.displayName pdfOptions.parsingMode} PDF parser and visual-description settings."
+
+            Ok(Some candidate.index)
+        | Ok(Some candidate) ->
+            let metadataDescription =
+                if candidate.hasMetadata then
+                    "older or different PDF text-parser metadata"
+                else
+                    "no PDF parser metadata"
+
+            report
+                $"Ignored persisted FsColbert index for {source.DisplayName} with {metadataDescription}; reprocess this source to rebuild with the current OCR fallback parser."
 
             Ok None
         | Ok None -> Ok None
         | Error err -> Error err
+
+    let private loadPersistedIndexWithoutParsing storageRoot report pdfParsingMode source =
+        loadPersistedIndexWithoutParsingWithOptions
+            storageRoot
+            report
+            (PdfIngestionOptions.create pdfParsingMode)
+            source
 
     let private prebuiltBundleSourceMatches (source: KnowledgeSource) (entry: FsColbert.LoadedIndexBundleEntry) =
         let candidates =
@@ -1979,6 +2392,11 @@ Passages:
 
     let private toIndexPreviewRecord (passage: FsColbert.IndexedPassage) =
         { index = passage.reference.index
+          sectionPath = passage.reference.sectionPath
+          contentRole = sourceContentRole passage.reference.contentRole
+          pageNumbers = passage.reference.pageNumbers
+          layoutLabels = passage.reference.layoutLabels
+          captions = passage.reference.captions
           text = passage.reference.text
           keywords = passage.reference.keywords |> Option.ofObj |> Option.defaultValue []
           terms = passage.terms |> Set.toList |> List.sort
@@ -2006,28 +2424,57 @@ Passages:
           sampledCount = records.Length
           records = records }
 
-    let tryLoadIndexForPreview storageRoot report pdfParsingMode (source: KnowledgeSource) =
-        match tryLoadPrebuiltIndex storageRoot source with
+    let tryLoadIndexForPreviewWithOptions
+        storageRoot
+        report
+        (pdfOptions: PdfIngestionOptions)
+        (source: KnowledgeSource)
+        =
+        let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
+        let prebuilt = tryLoadPrebuiltIndex storageRoot source
+
+        match prebuilt with
         | Ok(Some index) ->
             report $"Loaded prebuilt FsColbert index preview for {source.DisplayName}."
             Ok index
         | Error err -> Error err
         | Ok None ->
-            match tryLoadBestPersistedIndex storageRoot pdfParsingMode source "" with
+            match tryLoadBestPersistedIndexWithOptions storageRoot pdfOptions source "" with
             | Ok(Some candidate) when source.kind <> Pdf || candidate.parserMatches ->
                 report $"Loaded persisted FsColbert index preview for {source.DisplayName}."
                 Ok candidate.index
-            | Ok(Some candidate) ->
+            | Ok(Some candidate) when candidate.parserTextMatches ->
                 let metadataDescription =
                     if candidate.hasMetadata then
                         "older or different parser metadata"
                     else
                         "no parser metadata"
 
-                Error
-                    $"Persisted FsColbert index for {source.DisplayName} has {metadataDescription}; reprocess this source to rebuild with the current {PdfParsingModes.displayName pdfParsingMode} PDF parser quality checks."
+                report
+                    $"Loaded persisted FsColbert index preview for {source.DisplayName} with {metadataDescription}; reprocess this source to refresh with the current {PdfParsingModes.displayName pdfOptions.parsingMode} PDF parser and visual-description settings."
+
+                Ok candidate.index
+            | Ok(Some candidate) ->
+                let metadataDescription =
+                    if candidate.hasMetadata then
+                        "older or different PDF text-parser metadata"
+                    else
+                        "no PDF parser metadata"
+
+                report
+                    $"Ignored persisted FsColbert index preview for {source.DisplayName} with {metadataDescription}; reprocess this source to rebuild with the current OCR fallback parser."
+
+                Error $"No current FsColbert index is available for {source.DisplayName}."
             | Ok None -> Error $"No FsColbert index is available for {source.DisplayName}."
             | Error err -> Error err
+
+    let tryLoadIndexForPreview storageRoot report pdfParsingMode source =
+        tryLoadIndexForPreviewWithOptions storageRoot report (PdfIngestionOptions.create pdfParsingMode) source
+
+    let loadIndexPreviewWithOptions storageRoot report pdfOptions maxRecords source =
+        tryLoadIndexForPreviewWithOptions storageRoot report pdfOptions source
+        |> Result.map (createIndexPreview maxRecords source)
 
     let loadIndexPreview storageRoot report pdfParsingMode maxRecords source =
         tryLoadIndexForPreview storageRoot report pdfParsingMode source
@@ -2040,10 +2487,13 @@ Passages:
             | None ->
                 use client = new HttpClient()
 
+                let folder = modelFolder storageRoot
+
                 let! files =
-                    FsColbert.ModelCatalog.ensureDownloadedAsync
+                    FsColbert.ModelCatalog.ensureAvailableAsync
                         client
-                        (modelFolder storageRoot)
+                        folder
+                        (modelCandidateFolders storageRoot)
                         FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
                 let encoder = FsColbert.OnnxColbertEncoder.Load files
@@ -2087,26 +2537,29 @@ Passages:
             return index
         }
 
-    let InindexPassagesWithCancellation
+    let InindexPassagesWithOptionsWithCancellation
         storageRoot
         report
         keywordOptions
-        pdfParsingMode
+        (pdfOptions: PdfIngestionOptions)
         source
         passages
         cancellationToken
         =
         async {
             try
+                let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
                 throwIfCancellationRequested cancellationToken
                 let! passages, keywordFingerprint = attachKeywords storageRoot report keywordOptions source passages
                 throwIfCancellationRequested cancellationToken
-                let path = sourceIndexPath storageRoot pdfParsingMode source keywordFingerprint
+
+                let path =
+                    sourceIndexPathWithOptions storageRoot pdfOptions source keywordFingerprint
 
                 match tryLoadPersistedIndex path with
                 | Ok(Some _) ->
                     throwIfCancellationRequested cancellationToken
-                    writeIndexMetadata path pdfParsingMode source keywordFingerprint
+                    writeIndexMetadataWithOptions path pdfOptions source keywordFingerprint
                     return Ok()
                 | Ok None
                 | Error _ ->
@@ -2117,12 +2570,40 @@ Passages:
                     report $"Building FsColbert index for {source.DisplayName}."
                     let! _ = buildIndexFromChunks report encoder passages path cancellationToken
                     throwIfCancellationRequested cancellationToken
-                    writeIndexMetadata path pdfParsingMode source keywordFingerprint
+                    writeIndexMetadataWithOptions path pdfOptions source keywordFingerprint
                     return Ok()
             with
             | :? OperationCanceledException -> return raise (OperationCanceledException cancellationToken)
             | ex -> return Error $"Unable to build FsColbert index for {source.DisplayName}: {ex.Message}"
         }
+
+    let InindexPassagesWithCancellation
+        storageRoot
+        report
+        keywordOptions
+        pdfParsingMode
+        source
+        passages
+        cancellationToken
+        =
+        InindexPassagesWithOptionsWithCancellation
+            storageRoot
+            report
+            keywordOptions
+            (PdfIngestionOptions.create pdfParsingMode)
+            source
+            passages
+            cancellationToken
+
+    let InindexPassagesWithOptions storageRoot report keywordOptions pdfOptions source passages =
+        InindexPassagesWithOptionsWithCancellation
+            storageRoot
+            report
+            keywordOptions
+            pdfOptions
+            source
+            passages
+            CancellationToken.None
 
     let InindexPassages storageRoot report keywordOptions pdfParsingMode source passages =
         InindexPassagesWithCancellation
@@ -2134,31 +2615,45 @@ Passages:
             passages
             CancellationToken.None
 
-    let InindexSource storageRoot report keywordOptions pdfParsingMode (source: KnowledgeSource) =
+    let InindexSourceWithOptions
+        storageRoot
+        report
+        keywordOptions
+        (pdfOptions: PdfIngestionOptions)
+        (source: KnowledgeSource)
+        =
         async {
-            match tryLoadPrebuiltIndex storageRoot source with
+            let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
+
+            let prebuilt = tryLoadPrebuiltIndex storageRoot source
+
+            match prebuilt with
             | Ok(Some _) ->
                 report $"Prebuilt FsColbert index is available for {source.DisplayName}."
                 return Ok()
             | Error err -> return Error err
             | Ok None ->
-                let! result = loadPassagesForIndexing storageRoot report pdfParsingMode source
+                let! result = loadPassagesForIndexingWithOptions storageRoot report pdfOptions source
 
                 match result with
                 | Error err -> return Error err
                 | Ok passages ->
-                    return! InindexPassages storageRoot report keywordOptions pdfParsingMode source passages
+                    return! InindexPassagesWithOptions storageRoot report keywordOptions pdfOptions source passages
         }
 
-    let loadIndex
+    let InindexSource storageRoot report keywordOptions pdfParsingMode source =
+        InindexSourceWithOptions storageRoot report keywordOptions (PdfIngestionOptions.create pdfParsingMode) source
+
+    let loadIndexWithOptions
         storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
-        pdfParsingMode
+        (pdfOptions: PdfIngestionOptions)
         buildMissingIndexes
         (sources: KnowledgeSource list)
         : Async<RetrievalIndex * string list> =
         async {
+            let pdfOptions = PdfIngestionOptions.sanitize pdfOptions
             let sources = enabledSources sources
 
             if List.isEmpty sources then
@@ -2175,14 +2670,16 @@ Passages:
                         { keywordOptions with client = None }
 
                 for source in sources do
-                    match tryLoadPrebuiltIndex storageRoot source with
+                    let prebuilt = tryLoadPrebuiltIndex storageRoot source
+
+                    match prebuilt with
                     | Ok(Some index) ->
                         report $"Loaded prebuilt FsColbert index for {source.DisplayName}."
                         indices.Add(source, index)
                     | Error err -> errors.Add err
                     | Ok None ->
                         if buildMissingIndexes then
-                            let! result = loadPassagesForIndexing storageRoot report pdfParsingMode source
+                            let! result = loadPassagesForIndexingWithOptions storageRoot report pdfOptions source
 
                             match result with
                             | Error err -> errors.Add err
@@ -2190,11 +2687,12 @@ Passages:
                                 let! passages, keywordFingerprint =
                                     attachKeywords storageRoot report keywordOptions source passages
 
-                                let path = sourceIndexPath storageRoot pdfParsingMode source keywordFingerprint
+                                let path =
+                                    sourceIndexPathWithOptions storageRoot pdfOptions source keywordFingerprint
 
                                 match tryLoadPersistedIndex path with
                                 | Ok(Some index) ->
-                                    writeIndexMetadata path pdfParsingMode source keywordFingerprint
+                                    writeIndexMetadataWithOptions path pdfOptions source keywordFingerprint
                                     indices.Add(source, index)
                                 | Ok None ->
                                     report $"Building missing FsColbert index for {source.DisplayName}."
@@ -2202,17 +2700,17 @@ Passages:
                                     let! index =
                                         buildIndexFromChunks report encoder passages path CancellationToken.None
 
-                                    writeIndexMetadata path pdfParsingMode source keywordFingerprint
+                                    writeIndexMetadataWithOptions path pdfOptions source keywordFingerprint
                                     indices.Add(source, index)
                                 | Error err -> errors.Add err
                         else
-                            match loadPersistedIndexWithoutParsing storageRoot report pdfParsingMode source with
+                            match loadPersistedIndexWithoutParsingWithOptions storageRoot report pdfOptions source with
                             | Ok(Some index) -> indices.Add(source, index)
                             | Ok None ->
                                 match source.kind with
                                 | Pdf ->
                                     errors.Add
-                                        $"FsColbert index for {source.DisplayName} is missing for the selected {PdfParsingModes.displayName pdfParsingMode} PDF parser. Reprocess the source before connecting."
+                                        $"FsColbert index for {source.DisplayName} is missing for the selected {PdfParsingModes.displayName pdfOptions.parsingMode} PDF parser. Reprocess the source before connecting."
                                 | Markdown
                                 | Json ->
                                     errors.Add
@@ -2232,7 +2730,47 @@ Passages:
                     List.ofSeq errors
         }
 
-    let private renderedChunkMaxChars = 650
+    let loadIndex storageRoot report keywordOptions pdfParsingMode buildMissingIndexes sources =
+        loadIndexWithOptions
+            storageRoot
+            report
+            keywordOptions
+            (PdfIngestionOptions.create pdfParsingMode)
+            buildMissingIndexes
+            sources
+
+    let private renderPageNumbers pages =
+        pages |> List.map string |> String.concat ", "
+
+    let private renderCaptions captions =
+        captions
+        |> List.choose Text.notEmpty
+        |> List.distinctBy _.ToLowerInvariant()
+        |> List.truncate 3
+        |> String.concat " | "
+
+    let private renderChunkMetadata (chunk: SourceChunk) =
+        [ match chunk.contentRole with
+          | SourceContentRole.Unknown -> ()
+          | role -> yield $"Role: {SourceContentRole.displayName role}"
+
+          match chunk.sectionPath with
+          | [] -> ()
+          | path ->
+              let sectionPath = String.concat " > " path
+              yield $"Section: {sectionPath}"
+
+          match chunk.pageNumbers with
+          | [] -> ()
+          | pages -> yield $"Pages: {renderPageNumbers pages}"
+
+          let captions = renderCaptions chunk.captions
+
+          if not (String.IsNullOrWhiteSpace captions) then
+              yield $"Captions: {captions}" ]
+        |> function
+            | [] -> ""
+            | lines -> String.concat "\n" lines + "\n"
 
     let renderContextWithLimit maxContextChunks (chunks: SourceChunk list) =
         if List.isEmpty chunks then
@@ -2241,8 +2779,9 @@ Passages:
             chunks
             |> List.truncate (max 1 maxContextChunks)
             |> List.mapi (fun index (chunk: SourceChunk) ->
-                let body = Text.truncate renderedChunkMaxChars chunk.text
-                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{body}")
+                let metadata = renderChunkMetadata chunk
+
+                $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{metadata}{chunk.text}")
             |> String.concat "\n\n"
 
     let renderContext chunks =

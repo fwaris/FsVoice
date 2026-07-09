@@ -2,7 +2,7 @@
 
 FsVoice is an F#/.NET 10 workspace for building voice-first question answering systems. The repo currently centers on Speak2Docs, a .NET MAUI app that lets a user select document sources, build or import local retrieval indexes, connect to OpenAI realtime voice, and ask questions about the selected material.
 
-The reusable pieces are split into small packages: typed voice orchestration contracts, RTFlow and ASP.NET hosting adapters, QA/plugin contracts, retrieval and PDF processing, OpenAI Responses helpers, CLI utilities, and tests.
+The reusable pieces are split into small packages: typed voice orchestration contracts, RTFlow and ASP.NET hosting adapters, provider-neutral QA/plugin contracts, QA runtime orchestration, retrieval and PDF processing adapters, OpenAI Responses helpers, CLI utilities, and tests.
 
 ## Current App: Speak2Docs
 
@@ -31,25 +31,35 @@ All model role ids can be overridden by plugins and by app settings.
 
 ## Repository Layout
 
-- `src/FsVoice.Platform`: public typed voice contracts: `VoiceConnection`, `IVoiceSession`, `IVoiceOrchestration`, host context, and host message codecs.
+- `src/FsVoice.Core`: shared text helpers and generic async queue utilities.
+- `src/FsVoice.Platform`: public typed voice contracts: `VoiceConnection`, `IVoiceSession`, `IVoiceOrchestration`, host context, and host message codecs. This package stays dependency-light and should not know about retrieval, MAUI, OpenAI, or RTFlow implementation types.
 - `src/FsVoice.RTFlow`: adapter from an RTFlow workflow to the `IVoiceSession<'ToHost, 'FromHost>` contract.
 - `src/FsVoice.Hosting.AspNetCore`: ASP.NET Core bridge session store and endpoints for browser/WebRTC-style hosts.
-- `src/FsVoice.Core`: shared text helpers and generic async queue utilities.
 - `src/FsResponses`: typed OpenAI Responses API and Responses WebSocket request/event models used by the Ctx runtime.
-- `src/FsVoice.Ctx.Contracts`: context-backed answer contracts for sources, chunks, retrieval modes, sessions, plugins, tools, context providers, memory, and model roles.
-- `src/FsVoice.Retrieval`: FsColbert retrieval, keyword enrichment, source loading, index preview, and hybrid PDF processing.
-- `src/FsVoice.Ctx.Runtime`: oracle/context answer runtime, tool loading, blackboard, durable memory, plugin profiles, and answer transport.
-- `src/FsVoice.Retrieval.PdfRasterization`: desktop, Android, iOS, and Mac Catalyst PDF rasterizers for hybrid PDF parsing.
+- `src/FsVoice.Ctx.Contracts`: provider-neutral QA contracts for knowledge sources, source chunks, ingestion profiles, previews, retrieval modes, QA sessions, plugins, tools, context providers, source-index services, durable memory, and model roles.
+- `src/FsVoice.Ctx.Runtime`: QA orchestration runtime: answer prompts, built-in tools, plugin loading, blackboard helpers, durable memory, `QaSession`, and Responses answer transport. It consumes `IQaContextProvider`, `ISourceIndexService`, `IMemoryService`, and transport factories from contracts/options rather than constructing retrieval engines directly.
 - `src/FsVoice.Ctx.Tools`: reusable context tool providers. It currently includes a current-time provider.
+- `src/FsVoice.Retrieval`: concrete source-index implementation for FsColbert, Docling/hybrid PDF parsing, OCR repair, keyword enrichment, ranking, persisted-index management, index preview, and adapters such as `FsColbertSourceIndexService`.
+- `src/FsVoice.Retrieval.PdfRasterization`: desktop, Android, iOS, and Mac Catalyst PDF rasterizers used by hybrid PDF parsing.
+- `src/FsVoice.Retrieval.RapidOcrModels`: RapidOCR model assets packaged separately from the core retrieval library.
+- `src/FsVoice.Cli`: command-line asking, index-bundle creation, and InsuranceQA evaluation utilities. The CLI is a composition root for command-line use and wires `QaSession` to the FsColbert source-index service.
+- `src/Speak2Docs.Orchestration`: platform-neutral Speak2Docs workflow, agents, runtime settings, plugin loading, source model, and connection-state/domain messages. It depends on QA contracts/runtime and receives source-index services from the host instead of letting the oracle construct concrete retrieval providers.
+- `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst. This is the mobile/desktop composition root: UI, settings, file picking, permissions, app storage, source library processing/deletion/preview, realtime connection setup, and concrete retrieval/rasterizer wiring.
 - `src/FsVoice.Tools` and `src/FsVoice.PdfRasterization`: deprecated compatibility facades for older source names.
-- `src/FsVoice.Cli`: command-line asking, index-bundle creation, and InsuranceQA evaluation utilities.
-- `src/Speak2Docs.Orchestration`: platform-neutral Speak2Docs workflow, agents, runtime settings, plugin loading, and source model.
-- `src/Speak2Docs`: .NET MAUI app for Android, iOS, and Mac Catalyst.
-- `src/FsVoice.Tests`: tests for QA, retrieval, tools, hosting, orchestration, and app-adjacent behavior.
+- `src/FsVoice.Tests`: tests for QA, retrieval, tools, hosting, orchestration, architecture guards, source-index service behavior, OCR/index regressions, and app-adjacent behavior.
 - `src/FsResponsesTest`: tests for the OpenAI Responses request and stream-event helpers.
 - `data/qa-plug-ins`: sample QA plugin profiles, currently including `insuranceqa.json`.
 - `docs`: public support, settings, privacy, terms, third-party notices, release notes, and store metadata.
 - `build/release`: local release scripts and signing environment templates for Android, iOS, and Mac Catalyst.
+
+## Source Boundary Map
+
+- Contracts live in `FsVoice.Ctx.Contracts`. Shared source concepts such as `KnowledgeSource`, `SourceChunk`, `SourceIngestionProfile`, `SourcePreview`, `IQaContextProvider`, and `ISourceIndexService` belong here.
+- QA behavior lives in `FsVoice.Ctx.Runtime`. Runtime code can ask context providers for source chunks, ask memory services for semantic memory, and use answer transports, but should not depend on `FsVoice.Retrieval` or app storage details.
+- Retrieval implementation lives in `FsVoice.Retrieval` and related rasterizer/model packages. FsColbert, Docling, OCR, PDF parsing modes, ranking, persisted `.fsci` artifacts, preview loading, and source-artifact deletion are concrete implementation details behind source-index services.
+- Speak2Docs workflow intent lives in `Speak2Docs.Orchestration`. Agents translate app/realtime events into domain work and QA calls. The oracle uses injected QA/runtime/source-index abstractions.
+- Speak2Docs app code lives in `Speak2Docs`. It owns MAUI UI, library views, source selection, file import, settings persistence, app storage roots, platform permissions, realtime connection setup, and service composition.
+- CLI code lives in `FsVoice.Cli`. It is a separate composition root for shell workflows and should wire concrete retrieval services explicitly.
 
 ## QA Plugins And Tools
 

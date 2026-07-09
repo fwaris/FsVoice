@@ -16,7 +16,9 @@ module ModelCapabilities =
 
 module QaDefaults =
     let nanoModel = "gpt-5-nano"
+    let keywordModel = "gpt-5-mini"
     let answerModel = "gpt-5.5"
+    let answerMaxOutputTokens = 5000
     let memoryCandidateChunks = 14
     let maxContextChunks = 12
     let neighborSeeds = 4

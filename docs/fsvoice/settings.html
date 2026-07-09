@@ -6,115 +6,352 @@
   <title>Speak2Docs Settings Help</title>
   <style>
     :root {
+      --accent-magenta: #ff00ff;
+      --page-bg: #ffffff;
+      --text: #000000;
+      --secondary-text: #4b5563;
+      --field-bg: #ffffff;
+      --field-border: #d1d5db;
       color-scheme: light dark;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.55;
+      line-height: 1.5;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #111111;
+        --text: #ffffff;
+        --secondary-text: #d6d6d6;
+        --field-bg: #171717;
+        --field-border: #5a5a5a;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
     }
 
     body {
       margin: 0;
-      padding: 32px;
-      max-width: 840px;
+      background: var(--page-bg);
+      color: var(--text);
+      font-family: inherit;
     }
 
-    h1,
-    h2 {
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    .top-bar {
+      min-height: 50px;
+      display: grid;
+      grid-template-columns: 52px 1fr 52px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      grid-column: 2;
+      margin: 0;
+      font-size: 24px;
       line-height: 1.2;
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .intro {
+      margin: 0 0 12px;
+      color: var(--secondary-text);
+      font-size: 16px;
+      text-align: center;
+    }
+
+    .settings-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .help-section {
+      border: 1.5px solid var(--accent-magenta);
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    h2 {
+      margin: 0 2px 10px;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+
+    .section-note {
+      margin: 0 2px 10px;
+      color: var(--secondary-text);
+      font-size: 16px;
+    }
+
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      row-gap: 8px;
+      column-gap: 8px;
+    }
+
+    dt {
+      margin: 0;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      font-size: 16px;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    dd {
+      margin: 0;
+      min-height: 40px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 8px;
+      border: 1px solid var(--field-border);
+      border-radius: 6px;
+      background: var(--field-bg);
+      padding: 8px 10px;
+      font-size: 16px;
+    }
+
+    p,
+    ol,
+    ul {
+      margin: 0;
+    }
+
+    ol,
+    ul {
+      padding-left: 20px;
     }
 
     li {
-      margin: 6px 0;
+      margin: 4px 0;
+    }
+
+    a {
+      color: var(--accent-magenta);
+      font-weight: 700;
+    }
+
+    code {
+      font-size: 0.95em;
+    }
+
+    @media (max-width: 640px) {
+      main {
+        padding: 18px;
+      }
+
+      dl {
+        grid-template-columns: 1fr;
+        row-gap: 4px;
+      }
+
+      dt {
+        min-height: 0;
+        justify-content: flex-start;
+        text-align: left;
+        padding: 4px 2px 0;
+      }
     }
   </style>
 </head>
 <body>
-  <h1>Speak2Docs Settings Help</h1>
+  <main>
+    <div class="top-bar">
+      <h1>Settings Help</h1>
+    </div>
 
-  <h2>OpenAI API Key</h2>
-  <p>
-    Speak2Docs uses your OpenAI API key to connect to OpenAI services for realtime voice interaction,
-    answers, and optional keyword enrichment.
-  </p>
-  <p>
-    Before sending microphone audio, transcripts, prompts, selected document passages, or optional
-    keyword-generation text to OpenAI, Speak2Docs asks you to allow OpenAI processing inside the app.
-    You can review or revoke this permission from Settings.
-  </p>
+    <p class="intro">
+      Settings are locked when Speak2Docs is busy, a realtime connection is starting or active, or a
+      source operation is running. Disconnect or wait for processing to finish before changing them.
+    </p>
 
-  <p>To create a key:</p>
-  <ol>
-    <li>Sign in to the OpenAI platform.</li>
-    <li>Open the API keys page.</li>
-    <li>Create a new secret key.</li>
-    <li>Copy the key and paste it into the OpenAI API key field in Speak2Docs Settings.</li>
-  </ol>
+    <p class="intro">The Settings top-bar Help icon opens this page.</p>
 
-  <p>
-    Use a separate API key for each app, device, automation, or experiment when practical. This
-    makes it easier to monitor usage, rotate one key without interrupting other workflows, and
-    revoke only the key that is no longer needed.
-  </p>
+    <div class="settings-form">
+      <section class="help-section" id="account">
+        <h2>Account</h2>
+        <p class="section-note">Account settings identify the OpenAI account Speak2Docs should use.</p>
+        <dl>
+          <dt>OpenAI key</dt>
+          <dd>
+            <p>
+              Stores your OpenAI API key locally so Speak2Docs can connect to OpenAI services for
+              realtime voice interaction, transcription, answers, query expansion, optional keyword
+              enrichment, and optional PDF visual descriptions.
+            </p>
+            <p>To use Speak2Docs with OpenAI:</p>
+            <ol>
+              <li>Go to <a href="https://platform.openai.com">platform.openai.com</a>.</li>
+              <li>Create an OpenAI account or sign in to an existing account.</li>
+              <li>
+                Open the OpenAI platform billing area and add a payment method, credits, or other
+                required funding for API usage.
+              </li>
+              <li>
+                After the account and billing setup are ready, open the
+                <a href="https://platform.openai.com/api-keys">API keys page</a>.
+              </li>
+              <li>Create a new secret key.</li>
+              <li>Copy the key and paste it into the OpenAI key field in Speak2Docs Settings.</li>
+            </ol>
+          </dd>
 
-  <p>Good API key practices:</p>
-  <ul>
-    <li>Keep the key private and do not share it in screenshots, logs, commits, support messages, or public documents.</li>
-    <li>Monitor API usage and billing in the OpenAI platform dashboard.</li>
-    <li>Revoke keys that are no longer needed, exposed, or used on a device you no longer control.</li>
-    <li>Create a fresh key if you are testing a new workflow or giving temporary access for review.</li>
-    <li>Avoid reusing a long-lived personal key for unrelated projects.</li>
-  </ul>
+          <dt>Show or hide key</dt>
+          <dd>
+            Toggles whether the OpenAI key field is displayed as plain text while you edit it. This
+            only changes visibility in Settings; it does not change the saved key.
+          </dd>
+        </dl>
+      </section>
 
-  <h2>Models</h2>
-  <p>
-    Speak2Docs uses separate model roles for realtime voice, transcription, answers, planning, keyword
-    generation, and query expansion. The defaults are selected for the built-in Generic QA plugin,
-    and advanced users can override model ids in Settings.
-  </p>
-  <p>
-    Model settings are advanced controls. Change them only when you know which OpenAI model id you
-    want each role to use.
-  </p>
-  <ul>
-    <li>Reasoning Level controls the answer model's reasoning effort. The default is Low.</li>
-    <li>Max Answer Tokens limits the answer response length. The default is 2500, and values are kept between 128 and 32000.</li>
-    <li>Tool Rounds limits how many function-call rounds the answer model can run for one question. The default is 3, and values are kept between 1 and 8.</li>
-  </ul>
+      <section class="help-section" id="models">
+        <h2>Models</h2>
+        <p class="section-note">
+          Model settings are advanced controls. Change them only when you know which OpenAI model id
+          you want each role to use.
+        </p>
+        <dl>
+          <dt>Realtime model</dt>
+          <dd>Handles low-latency voice conversation. The built-in default is <code>gpt-realtime-2</code>.</dd>
 
-  <h2>Retrieval</h2>
-  <p>
-    Retrieval settings control how selected documents are searched before the answer model responds.
-    Indexed retrieval uses persisted local indexes when available, with fallback behavior for source
-    matching. Lexical filtering and keyword indexing can improve source targeting for document
-    questions.
-  </p>
-  <ul>
-    <li>Mode switches between FsColbert with fallback and the internal document index.</li>
-    <li>Lexical Filter is on by default and helps narrow retrieval to likely matching document text.</li>
-    <li>Log Expansions and Log Chunks add retrieval diagnostics to the activity log for troubleshooting.</li>
-  </ul>
+          <dt>Transcriber model</dt>
+          <dd>Converts speech to text when transcription is needed.</dd>
 
-  <h2>PDF Parsing</h2>
-  <p>
-    PDF parsing controls how Speak2Docs extracts text from PDF sources before indexing.
-  </p>
-  <ul>
-    <li>PDF Parser is Hybrid by default. Legacy parsing is available if a PDF behaves poorly with hybrid parsing.</li>
-    <li>Layout Analysis is on by default when Hybrid parsing is enabled. It can improve document structure handling, but it may make indexing slower.</li>
-    <li>Index Keywords is off by default. When enabled, Speak2Docs can generate extra keywords for indexed chunks to improve matching.</li>
-  </ul>
+          <dt>Answer model</dt>
+          <dd>Produces grounded answers from selected sources, tool observations, and the current question.</dd>
 
-  <h2>Activity</h2>
-  <p>
-    The Activity log records important setup, indexing, connection, retrieval, and answer events. The
-    default log level is Informational. Turn on the verbose log level when troubleshooting a
-    connection, retrieval, or answer-generation problem.
-  </p>
+          <dt>Keyword model</dt>
+          <dd>Generates optional enriched keywords when Enrich Keywords is enabled. The built-in default is <code>gpt-5-mini</code>.</dd>
 
-  <h2>When Settings Are Locked</h2>
-  <p>
-    Some settings are disabled while the app is busy, a realtime connection is active, or a source
-    operation is running. Disconnect or wait for processing to finish before changing model,
-    retrieval, or parsing settings.
-  </p>
+          <dt>QueryExpansion model</dt>
+          <dd>Rewrites or expands user questions to improve document retrieval.</dd>
+
+          <dt>Reasoning Level</dt>
+          <dd>Controls answer-model reasoning effort. Low is the default and is usually fastest.</dd>
+
+          <dt>Max Answer Tokens</dt>
+          <dd>Limits the answer model's output length. The default is 5000.</dd>
+
+          <dt>Max Tool Calls</dt>
+          <dd>Limits how many tool-call rounds the answer model can run for one question. The default is 8.</dd>
+
+          <dt>Context Chunks</dt>
+          <dd>
+            Controls how many ranked document chunks Speak2Docs retrieves for an answer and allows into the
+            model context. The default is 12.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="help-section" id="activity">
+        <h2>Activity</h2>
+        <p class="section-note">Activity settings control how much diagnostic information appears in the activity log.</p>
+        <dl>
+          <dt>Log Level</dt>
+          <dd>
+            Switches between Informational and Verbose activity logging. Verbose adds more detail for
+            troubleshooting connection, retrieval, indexing, and answer-generation behavior.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="help-section" id="audio">
+        <h2>Audio</h2>
+        <p class="section-note">Audio settings control the default route used during realtime voice sessions.</p>
+        <dl>
+          <dt>Default Speaker</dt>
+          <dd>
+            Toggles whether Speak2Docs defaults voice playback to the device speaker while still
+            preferring a connected headset or Bluetooth route when available.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="help-section" id="retrieval">
+        <h2>Retrieval</h2>
+        <p class="section-note">Retrieval settings control how selected documents are searched before answers.</p>
+        <dl>
+          <dt>Mode</dt>
+          <dd>Switches between FsColbert with fallback and the internal document index.</dd>
+
+          <dt>Lexical Filter</dt>
+          <dd>Helps narrow retrieval to source text that likely matches the question.</dd>
+
+          <dt>Log Expansions</dt>
+          <dd>Adds query-expansion diagnostics to the activity log.</dd>
+
+          <dt>Log Chunks</dt>
+          <dd>Adds retrieved chunk diagnostics to the activity log.</dd>
+        </dl>
+      </section>
+
+      <section class="help-section" id="pdf-parsing">
+        <h2>PDF Parsing</h2>
+        <p class="section-note">PDF parsing always uses the Hybrid parser. These settings control optional Hybrid indexing features.</p>
+        <dl>
+          <dt>Optical Parsing</dt>
+          <dd>
+            Uses local OCR for PDF pages whose native text is missing or too sparse. This can make
+            scanned or Adobe Distiller-produced documents readable but may take longer.
+          </dd>
+
+          <dt>Auto OCR Fallback</dt>
+          <dd>
+            Automatically OCRs individual PDF pages when native text extraction returns enough text
+            but the text looks garbled. This setting is active only when Optical Parsing is enabled.
+          </dd>
+
+          <dt>Layout Analysis</dt>
+          <dd>Uses layout analysis during PDF parsing. This can improve structure but may take longer.</dd>
+
+          <dt>Enrich Keywords</dt>
+          <dd>Allows Speak2Docs to enrich indexed chunks with extra keywords to improve matching.</dd>
+
+          <dt>Describe Visuals</dt>
+          <dd>
+            Allows Hybrid PDF parsing with Layout Analysis to describe detected diagrams, charts,
+            images, and sparse visual tables. This can add processing time, OpenAI API cost, and
+            additional document visual content sent to OpenAI.
+          </dd>
+        </dl>
+      </section>
+
+      <section class="help-section" id="links">
+        <h2>Links</h2>
+        <p class="section-note">Link settings open public documentation and review notices from inside the app.</p>
+        <dl>
+          <dt>Terms</dt>
+          <dd>Opens the Speak2Docs Terms of Use.</dd>
+
+          <dt>Privacy</dt>
+          <dd>Opens the Speak2Docs Privacy Policy.</dd>
+
+          <dt>Licenses</dt>
+          <dd>Opens third-party notices for libraries and assets included with Speak2Docs.</dd>
+
+          <dt>AI Data</dt>
+          <dd>
+            Opens the OpenAI data-processing notice. If the notice was hidden with "Do not show
+            again," this row shows that the notice is currently hidden before connecting.
+          </dd>
+        </dl>
+      </section>
+    </div>
+  </main>
 </body>
 </html>

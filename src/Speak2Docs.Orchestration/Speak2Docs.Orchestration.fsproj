@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <Compile Include="Utils.fs" />
+    <Compile Include="..\Speak2Docs\ActivityLog.fs" Link="ActivityLog.fs" />
     <Compile Include="PdfSourcesModel.fs" />
     <Compile Include="PlugIns.fs" />
     <Compile Include="WorkFlowTypes.fs" />

@@ -106,4 +106,7 @@ module PdfRasterizer =
             { DoclingHybrid.defaults with
                 enableLayoutAnalysis = true }
 
-        DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)
+        DoclingHybrid.setRasterizerFactoryWithInfo
+            "apple-coregraphics-cropbox-v1"
+            "Apple CoreGraphics CropBox"
+            (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)

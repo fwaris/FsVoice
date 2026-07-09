@@ -2,6 +2,8 @@ namespace Speak2Docs
 
 open System
 open System.Diagnostics
+open System.IO
+open System.Text
 open System.Threading
 open System.Threading.Channels
 open FSharp.Control
@@ -24,9 +26,45 @@ module Update =
     let private maxLogFontSize = 22.
     let private logFontStep = 1.
     let private notificationDurationMs = 3500
+    let private activityLogFileMaxBytes = 1024 * 1024
+    let private activityLogFileTrimBytes = 512 * 1024
 
     let private clampLogFontSize value =
         min maxLogFontSize (max minLogFontSize value)
+
+    let private mirrorActivityLogToDiagnostics text =
+        Debug.WriteLine text
+        Console.WriteLine text
+
+    let private appendActivityLogToFile text =
+        try
+            let folder = Path.Combine(FileSystem.AppDataDirectory, C.PRODUCT_NAME)
+            Directory.CreateDirectory(folder) |> ignore
+            let path = Path.Combine(folder, "activity-log.txt")
+            let line = $"{DateTimeOffset.Now:O} {text}{Environment.NewLine}"
+            let lineBytes = Encoding.UTF8.GetByteCount line
+
+            let withinLimit =
+                if File.Exists path then
+                    FileInfo(path).Length + int64 lineBytes <= int64 activityLogFileMaxBytes
+                else
+                    lineBytes <= activityLogFileMaxBytes
+
+            if withinLimit then
+                File.AppendAllText(path, line, Encoding.UTF8)
+            else
+                let existing =
+                    if File.Exists path then
+                        File.ReadAllText(path, Encoding.UTF8)
+                    else
+                        ""
+
+                let bounded =
+                    ActivityLog.boundedFileText activityLogFileMaxBytes activityLogFileTrimBytes existing line
+
+                File.WriteAllText(path, bounded, Encoding.UTF8)
+        with _ ->
+            ()
 
     let private expireNotification id =
         async {
@@ -87,7 +125,23 @@ module Update =
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
-        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        || model.sessionState <> RealtimeDisconnected
+
+    let private setKeepScreenOn enabled =
+        let apply () =
+            try
+                if DeviceDisplay.Current.KeepScreenOn <> enabled then
+                    DeviceDisplay.Current.KeepScreenOn <- enabled
+            with ex ->
+                Debug.WriteLine($"Unable to set screen-awake state: {ex.Message}")
+
+        if MainThread.IsMainThread then
+            apply ()
+        else
+            MainThread.BeginInvokeOnMainThread(Action(apply))
+
+    let private syncKeepScreenOn model =
+        setKeepScreenOn (model.isBusy || isRealtimeActive model)
 
     let private canMutateDocuments model =
         not model.isBusy && not (isRealtimeActive model)
@@ -116,13 +170,19 @@ module Update =
             yield RuntimeSettings.OpenAiKey, model.openAiKey
             yield RuntimeSettings.LogExpansions, string model.logExpansions
             yield RuntimeSettings.LogChunks, string model.logChunks
+            yield RuntimeSettings.AudioDefaultToSpeaker, string model.audioDefaultToSpeaker
+
             yield RuntimeSettings.AnswerMaxOutputTokens, model.answerMaxOutputTokens
             yield RuntimeSettings.AnswerReasoningEffort, model.answerReasoningEffort
             yield RuntimeSettings.AnswerToolCallLoopLimit, model.answerToolCallLoopLimit
+            yield RuntimeSettings.MaxContextChunks, model.maxContextChunks
             yield RuntimeSettings.UseLexicalFilter, string model.useLexicalFilter
             yield RuntimeSettings.ElaborateIndexKeywords, string model.elaborateIndexKeywords
-            yield RuntimeSettings.UseHybridPdfParsing, string model.useHybridPdfParsing
+            yield RuntimeSettings.UseHybridPdfParsing, string true
             yield RuntimeSettings.UseLayoutAnalysis, string model.useLayoutAnalysis
+            yield RuntimeSettings.UseOpticalParsing, string model.useOpticalParsing
+            yield RuntimeSettings.AutoOpticalParsing, string model.autoOcrFallback
+            yield RuntimeSettings.DescribePdfVisuals, string model.describePdfVisuals
 
             for KeyValue(role, modelId) in model.modelRoleOverrides do
                 yield RuntimeSettings.modelRoleKey role, modelId
@@ -173,13 +233,18 @@ module Update =
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
         Settings.setActivityLogVerbosity model.activityLogVerbosity
+        Settings.setAudioDefaultToSpeaker model.audioDefaultToSpeaker
         Settings.setAnswerMaxOutputTokens model.answerMaxOutputTokens
         Settings.setAnswerReasoningEffort model.answerReasoningEffort
         Settings.setAnswerToolCallLoopLimit model.answerToolCallLoopLimit
+        Settings.setMaxContextChunks model.maxContextChunks
         Settings.setPlugInUseLexicalFilter model.activePlugIn.id model.useLexicalFilter
         Settings.setPlugInElaborateIndexKeywords model.activePlugIn.id model.elaborateIndexKeywords
-        Settings.setUseHybridPdfParsing model.useHybridPdfParsing
+        Settings.setUseHybridPdfParsing true
         Settings.setUseLayoutAnalysis model.useLayoutAnalysis
+        Settings.setUseOpticalParsing model.useOpticalParsing
+        Settings.setAutoOpticalParsing model.autoOcrFallback
+        Settings.setDescribePdfVisuals model.describePdfVisuals
 
         model.plugInSettings
         |> Map.iter (fun key value -> Settings.setPlugInSetting model.activePlugIn.id key value)
@@ -191,6 +256,14 @@ module Update =
             | Error error -> $"Document library manifest was not saved: {error}"
 
         saveLog :: log |> List.truncate C.MAX_LOG
+
+    let private savePdfLibraryForWakeRecovery docs =
+        try
+            match Settings.setPdfLibrary docs with
+            | Ok _ -> ()
+            | Error error -> Debug.WriteLine($"Document library wake-recovery manifest was not saved: {error}")
+        with ex ->
+            Debug.WriteLine($"Document library wake-recovery manifest was not saved: {ex.Message}")
 
     let private mergePrebuiltInstallResult (current: PdfDocumentSource list) (installed: PdfDocumentSource list) =
         let currentById = current |> List.map (fun doc -> doc.id, doc) |> Map.ofList
@@ -257,6 +330,59 @@ module Update =
                     modelId = keywordModel.modelId
                     plugInProfile = plugIn.profile
                     plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn }
+
+    let private visualDescriptionOptions (model: Model) =
+        if not model.describePdfVisuals || not model.useLayoutAnalysis then
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+        else
+            let plugIn = composePlugIn model
+
+            let visualModel =
+                FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.VisualDescription plugIn
+
+            model.openAiKey
+            |> Text.notEmpty
+            |> Option.map (fun key ->
+                { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    client = Some(createChatClient key visualModel.modelId)
+                    modelId = visualModel.modelId })
+            |> Option.defaultValue
+                { FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults with
+                    enabled = true
+                    client = None
+                    modelId = visualModel.modelId }
+
+    let private sourceIngestionProfile (model: Model) =
+        FsVoice.Ctx.SourceIngestionProfile.fromLegacyFlags
+            true
+            model.useLayoutAnalysis
+            model.useOpticalParsing
+            model.autoOcrFallback
+            model.describePdfVisuals
+
+    let private sourceIndexService buildMissingIndexes report (model: Model) =
+        let plugIn = composePlugIn model
+        let keywordModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Keyword plugIn
+
+        let options =
+            { FsVoice.Retrieval.FsColbertSourceIndexServiceOptions.create FileSystem.AppDataDirectory with
+                queryExpansionClient = None
+                keywordGenerationClient = None
+                plugInProfile = plugIn.profile
+                plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint plugIn
+                keywordModelId = keywordModel.modelId
+                elaborateIndexKeywords = model.elaborateIndexKeywords
+                pdfVisualDescriptionOptions =
+                    { visualDescriptionOptions model with
+                        client = None }
+                buildMissingIndexes = buildMissingIndexes
+                logExpansions = model.logExpansions
+                logChunks = model.logChunks
+                useLexicalFilter = model.useLexicalFilter
+                report = report }
+
+        FsVoice.Retrieval.FsColbertSourceIndexService(options) :> FsVoice.Ctx.ISourceIndexService
 
     let private withKeywordCancellation token (options: FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions) =
         { options with
@@ -334,25 +460,28 @@ module Update =
         report
         (cancellationToken: CancellationToken)
         keywordOptions
-        useHybridPdfParsing
+        visualOptions
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (docs: PdfDocumentSource list)
         =
         async {
             try
-                let parserName = if useHybridPdfParsing then "Hybrid" else "Legacy"
-
-                report $"Starting document processing command for {docs.Length} document(s); parser={parserName}."
+                report $"Starting document processing command for {docs.Length} document(s); parser=Hybrid."
                 cancellationToken.ThrowIfCancellationRequested()
 
                 let! outcome =
-                    PdfLibrary.processDocuments
-                        report
-                        keywordOptions
-                        useHybridPdfParsing
-                        useLayoutAnalysis
-                        cancellationToken
-                        docs
+                    SourceLibraryService.processDocuments
+                        { report = report
+                          keywordOptions = keywordOptions
+                          visualOptions = visualOptions
+                          useHybridPdfParsing = true
+                          useLayoutAnalysis = useLayoutAnalysis
+                          useOpticalParsing = useOpticalParsing
+                          useAutoOcrFallback = useAutoOcrFallback
+                          cancellationToken = cancellationToken
+                          documents = docs }
 
                 report $"Document processing command completed for {docs.Length} document(s)."
                 return Ok outcome
@@ -366,8 +495,10 @@ module Update =
     let private installPrebuiltDocuments docs =
         async {
             try
+                let! modelLogs = PdfLibrary.installPackagedFsColbertModel ()
+                let! ocrModelLogs = PdfLibrary.installPackagedRapidOcrModel ()
                 let! installed, logs = PdfLibrary.installPrebuiltDocuments docs
-                return Ok(installed, logs)
+                return Ok(installed, modelLogs @ ocrModelLogs @ logs)
             with ex ->
                 return Error ex
         }
@@ -383,11 +514,20 @@ module Update =
                 return Error ex
         }
 
-    let private deleteDocumentAndIndexes (doc: PdfDocumentSource) =
+    let private deleteDocumentAndIndexes (model: Model) (doc: PdfDocumentSource) =
         async {
             try
-                let! removedFile = PdfLibrary.deleteStoredDocument doc
-                let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes FileSystem.AppDataDirectory
+                let source = sourceFromDocument doc
+
+                let sourceIndexService =
+                    let report msg =
+                        Debug.WriteLine msg
+                        Console.WriteLine msg
+
+                    sourceIndexService false report model
+
+                let! removedFile, removedIndexCount, indexErrors =
+                    SourceLibraryService.deleteDocumentAndArtifacts sourceIndexService doc source CancellationToken.None
 
                 return
                     Ok
@@ -423,14 +563,18 @@ module Update =
                         Debug.WriteLine msg
                         Console.WriteLine msg
 
-                    return
-                        KnowledgeSources.loadIndexPreview
-                            FileSystem.AppDataDirectory
-                            report
-                            model.useHybridPdfParsing
-                            model.useLayoutAnalysis
+                    let sourceIndexService = sourceIndexService false report model
+
+                    let! previewResult =
+                        SourceLibraryService.previewAsync
+                            sourceIndexService
+                            (sourceIngestionProfile model)
                             20
                             source
+                            CancellationToken.None
+
+                    return
+                        previewResult
                         |> Result.mapError (fun err -> InvalidOperationException(err) :> exn)
             with ex ->
                 return Error ex
@@ -535,6 +679,30 @@ module Update =
             | Ready
             | Failed -> doc)
 
+    let private documentsForProcessingOutcome processedDocs outcome docs =
+        match outcome with
+        | Completed results ->
+            docs
+            |> applyProcessingResults processedDocs results
+            |> failProcessingDocuments processedDocs "Document processing completed without a result. Tap retry."
+        | Canceled results ->
+            docs
+            |> applyProcessingResults processedDocs results
+            |> failProcessingDocuments processedDocs "Document processing canceled. Tap retry."
+
+    let private processingErrorMessage (ex: exn) =
+        match ex with
+        | :? OperationCanceledException -> "Document processing canceled."
+        | _ -> $"Document processing failed: {ex.Message}"
+
+    let private persistProcessingResultForWakeRecovery processedDocs result docs =
+        let docs =
+            match result with
+            | Ok outcome -> documentsForProcessingOutcome processedDocs outcome docs
+            | Error ex -> failProcessingDocuments processedDocs (processingErrorMessage ex) docs
+
+        savePdfLibraryForWakeRecovery docs
+
     let private retryDocs ids (docs: PdfDocumentSource list) : PdfDocumentSource list =
         docs
         |> List.map (fun doc ->
@@ -550,14 +718,72 @@ module Update =
     let private disposeDocumentProcessingCancellation (model: Model) =
         model.documentProcessingCancellation |> Option.iter _.Dispose()
 
+    let private hasInProgressDocuments docs =
+        docs
+        |> List.exists (fun doc ->
+            match doc.status with
+            | Queued
+            | Processing -> true
+            | Ready
+            | Failed -> false)
+
+    let private refreshPdfLibraryAfterAppResume model =
+        let preserveInProgress = model.documentProcessingCancellation.IsSome
+
+        let docs =
+            if preserveInProgress then
+                Settings.pdfLibraryForActiveSession ()
+            else
+                Settings.pdfLibrary ()
+
+        let processingSettled = preserveInProgress && not (hasInProgressDocuments docs)
+        let changed = docs <> model.pdfDocuments || processingSettled
+
+        if not changed then
+            model, false
+        else
+            if processingSettled then
+                disposeDocumentProcessingCancellation model
+
+            let logMessage =
+                if processingSettled then
+                    $"Recovered completed PDF processing after app resume: {docs.Length} document(s)."
+                else
+                    $"Refreshed document library after app resume: {docs.Length} document(s)."
+
+            { model with
+                pdfDocuments = docs
+                isBusy = if processingSettled then false else model.isBusy
+                documentProcessingCancellation =
+                    if processingSettled then
+                        None
+                    else
+                        model.documentProcessingCancellation
+                log = logMessage :: model.log |> List.truncate C.MAX_LOG },
+            true
+
     let private documentProcessingCommand report (cts: CancellationTokenSource) (model: Model) docs =
         let keywordOptions = keywordOptions model |> withKeywordCancellation cts.Token
+        let visualOptions = visualDescriptionOptions model
 
-        Cmd.OfAsync.either
-            (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing model.useLayoutAnalysis)
-            docs
-            (fun result -> PdfProcessingCompleted(docs, result))
-            EventError
+        let processAndPersist docs =
+            async {
+                let! result =
+                    processDocuments
+                        report
+                        cts.Token
+                        keywordOptions
+                        visualOptions
+                        model.useLayoutAnalysis
+                        model.useOpticalParsing
+                        model.autoOcrFallback
+                        docs
+
+                persistProcessingResultForWakeRecovery docs result model.pdfDocuments
+                return result
+            }
+
+        Cmd.OfAsync.either processAndPersist docs (fun result -> PdfProcessingCompleted(docs, result)) EventError
 
     let private stopBundleCommand (bundle: ConnectionBundle) =
         Cmd.OfAsync.either Connect.stop bundle (fun result -> StopCompleted(bundle.id, result)) EventError
@@ -591,7 +817,7 @@ module Update =
                 ->
                 { model with
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = true
                     log = log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -600,7 +826,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -609,7 +835,7 @@ module Update =
     let private handleRealtimeStateChanged connectionId state model =
         if not (isCurrentRealtimeConnection connectionId model) then
             model, Cmd.none
-        elif state = RTOpenAI.WebRTC.State.Disconnected then
+        elif state = RealtimeDisconnected then
             let model = markRealtimeDisconnected connectionId model
 
             match model.bundle with
@@ -632,9 +858,13 @@ module Update =
         refreshRuntimeSettings model |> ignore
 
         let orchestrationOptions =
+            let sourceIndexService =
+                sourceIndexService false (fun msg -> model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore) model
+
             { settings = model.runtimeSettings
               plugIn = model.activePlugIn
               qaPlugIn = model.qaPlugIn
+              sourceIndexService = sourceIndexService
               retrievalMode = model.retrievalMode
               sources = sources model }
 
@@ -660,7 +890,7 @@ module Update =
             isBusy = true
             pendingConnectionId = Some connectionId
             disconnectedConnectionIds = model.disconnectedConnectionIds |> Set.remove connectionId
-            sessionState = RTOpenAI.WebRTC.State.Connecting
+            sessionState = RealtimeConnecting
             openAiDisclosure = None
             log = "Starting realtime Speak2Docs flow..." :: model.log },
         Cmd.OfAsync.either
@@ -670,6 +900,8 @@ module Update =
             EventError
 
     let init () =
+        Settings.applyPlatformMigrations ()
+        setKeepScreenOn false
         let docs = Settings.pdfLibrary ()
 
         let loadedPlugIn, plugInLogs =
@@ -697,11 +929,12 @@ module Update =
 
         let model =
             { currentPage = if Settings.hasAcceptedCurrentTerms () then Main else Terms
+              mainPageSize = None
               mailbox = Channel.CreateBounded<Msg>(100)
               bundle = None
               pendingConnectionId = None
               disconnectedConnectionIds = Set.empty
-              sessionState = RTOpenAI.WebRTC.State.Disconnected
+              sessionState = RealtimeDisconnected
               openAiKey = Settings.openAiKey ()
               activePlugIn = loadedPlugIn.definition
               qaPlugIn = loadedPlugIn.plugIn
@@ -709,6 +942,8 @@ module Update =
               plugInSettings = Settings.plugInSettings loadedPlugIn.definition.id loadedPlugIn.definition.settingsFacets
               modelRoleOverrides = modelRoleOverrides
               retrievalMode = retrievalMode
+              documentFilter = AllDocuments
+              documentSearch = ""
               pdfDocuments = docs
               log = initialLog
               logFontSize = 12.
@@ -721,26 +956,43 @@ module Update =
               documentProcessingCancellation = None
               logExpansions = Settings.logExpansions ()
               logChunks = Settings.logChunks ()
+              audioDefaultToSpeaker = Settings.audioDefaultToSpeaker ()
               answerMaxOutputTokens = string (Settings.answerMaxOutputTokens ())
               answerReasoningEffort = Settings.answerReasoningEffort ()
               answerToolCallLoopLimit = string (Settings.answerToolCallLoopLimit ())
+              maxContextChunks = string (Settings.maxContextChunks ())
               useLexicalFilter =
                 Settings.plugInUseLexicalFilter
                     loadedPlugIn.definition.id
                     loadedPlugIn.definition.runtime.useLexicalFilter
               elaborateIndexKeywords = Settings.plugInElaborateIndexKeywords loadedPlugIn.definition.id false
-              useHybridPdfParsing = Settings.useHybridPdfParsing ()
+              useHybridPdfParsing = true
               useLayoutAnalysis = Settings.useLayoutAnalysis ()
+              useOpticalParsing = Settings.useOpticalParsing ()
+              autoOcrFallback = Settings.autoOpticalParsing ()
+              describePdfVisuals = Settings.describePdfVisuals ()
               notification = None
               nextNotificationId = 0
               appTheme = currentAppTheme ()
+              indexPreviewReturnsToLibrary = false
               indexPreview = None }
             |> refreshRuntimeSettings
 
         model, Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
-    let update msg model =
+    let private updateCore msg model =
         match msg with
+        | MainPageSizeAllocated(width, height) ->
+            let roundedSize =
+                { width = Math.Round(width)
+                  height = Math.Round(height) }
+
+            match model.mainPageSize with
+            | Some current when current = roundedSize -> model, Cmd.none
+            | _ ->
+                { model with
+                    mainPageSize = Some roundedSize },
+                Cmd.none
         | TermsAccepted ->
             Settings.setAcceptedTermsVersion C.TERMS_VERSION
 
@@ -849,6 +1101,13 @@ module Update =
                     answerToolCallLoopLimit = value }
                 |> refreshRuntimeSettings,
                 Cmd.none
+        | MaxContextChunksChanged value ->
+            match sourceConfigBlocked model "Changing context chunk count" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with maxContextChunks = value } |> refreshRuntimeSettings, Cmd.none
         | ModelRoleModelChanged(role, value) ->
             match sourceConfigBlocked model $"Changing {FsVoice.Ctx.ModelRole.storageName role} model" with
             | Some msg ->
@@ -912,6 +1171,22 @@ module Update =
 
             saveSettings model
             model, Cmd.none
+        | AudioDefaultToSpeakerToggled value ->
+            match sourceConfigBlocked model "Changing default speaker route" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "speaker/headset" else "receiver/headset"
+
+                let model =
+                    { model with
+                        audioDefaultToSpeaker = value
+                        log = $"Default audio route set to {state}." :: model.log |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                model, Cmd.none
         | UseLexicalFilterToggled value ->
             match sourceConfigBlocked model "Changing lexical filter" with
             | Some msg ->
@@ -937,26 +1212,6 @@ module Update =
                 saveSettings model
                 postSources model
                 model, Cmd.none
-        | UseHybridPdfParsingToggled value ->
-            match sourceConfigBlocked model "Changing PDF parser" with
-            | Some msg ->
-                { model with
-                    log = msg :: model.log |> List.truncate C.MAX_LOG },
-                Cmd.none
-            | None ->
-                let parserName = if value then "Hybrid" else "Legacy"
-
-                let model =
-                    { model with
-                        useHybridPdfParsing = value
-                        log =
-                            $"PDF parser set to {parserName}. Reprocess documents to rebuild indexes with this parser."
-                            :: model.log
-                            |> List.truncate C.MAX_LOG }
-
-                saveSettings model
-                postSources model
-                model, Cmd.none
         | UseLayoutAnalysisToggled value ->
             match sourceConfigBlocked model "Changing layout analysis" with
             | Some msg ->
@@ -971,6 +1226,66 @@ module Update =
                         useLayoutAnalysis = value
                         log =
                             $"Layout analysis {state}. Reprocess documents to rebuild Hybrid parser indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | UseOpticalParsingToggled value ->
+            match sourceConfigBlocked model "Changing optical parsing" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        useOpticalParsing = value
+                        log =
+                            $"Optical parsing {state}. Reprocess documents to rebuild indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | AutoOcrFallbackToggled value ->
+            match sourceConfigBlocked model "Changing automatic OCR fallback" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        autoOcrFallback = value
+                        log =
+                            $"Automatic OCR fallback {state}. Reprocess documents to rebuild indexes with this setting."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | DescribePdfVisualsToggled value ->
+            match sourceConfigBlocked model "Changing PDF visual descriptions" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let state = if value then "enabled" else "disabled"
+
+                let model =
+                    { model with
+                        describePdfVisuals = value
+                        log =
+                            $"PDF visual descriptions {state}. Reprocess documents to rebuild indexes with this setting."
                             :: model.log
                             |> List.truncate C.MAX_LOG }
 
@@ -996,6 +1311,12 @@ module Update =
                 log =
                     $"Prebuilt document installation failed: {ex.Message}" :: model.log
                     |> List.truncate C.MAX_LOG },
+            Cmd.none
+        | Library_Show -> { model with currentPage = Library }, Cmd.none
+        | Library_Close ->
+            { model with
+                currentPage = Main
+                documentSearch = "" },
             Cmd.none
         | Settings_Show ->
             if model.isBusy then
@@ -1076,11 +1397,6 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Ok(Completed results)) ->
             disposeDocumentProcessingCancellation model
 
-            let pdfDocuments =
-                model.pdfDocuments
-                |> applyProcessingResults processedDocs results
-                |> failProcessingDocuments processedDocs "Document processing completed without a result. Tap retry."
-
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
             let failedCount = results.Length - readyCount
 
@@ -1091,7 +1407,7 @@ module Update =
 
             let model =
                 { model with
-                    pdfDocuments = pdfDocuments
+                    pdfDocuments = documentsForProcessingOutcome processedDocs (Completed results) model.pdfDocuments
                     isBusy = false
                     documentProcessingCancellation = None
                     log = log }
@@ -1105,11 +1421,6 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Ok(Canceled results)) ->
             disposeDocumentProcessingCancellation model
 
-            let pdfDocuments =
-                model.pdfDocuments
-                |> applyProcessingResults processedDocs results
-                |> failProcessingDocuments processedDocs "Document processing canceled. Tap retry."
-
             let readyCount = results |> List.filter (fun r -> r.error.IsNone) |> List.length
 
             let log =
@@ -1119,7 +1430,7 @@ module Update =
 
             let model =
                 { model with
-                    pdfDocuments = pdfDocuments
+                    pdfDocuments = documentsForProcessingOutcome processedDocs (Canceled results) model.pdfDocuments
                     isBusy = false
                     documentProcessingCancellation = None
                     log = log }
@@ -1135,17 +1446,7 @@ module Update =
         | PdfProcessingCompleted(processedDocs, Error ex) ->
             disposeDocumentProcessingCancellation model
 
-            let canceled =
-                match ex with
-                | :? OperationCanceledException -> true
-                | _ -> false
-
-            let error =
-                if canceled then
-                    "Document processing canceled."
-                else
-                    $"Document processing failed: {ex.Message}"
-
+            let error = processingErrorMessage ex
             let pdfDocuments = failProcessingDocuments processedDocs error model.pdfDocuments
 
             let log = error :: model.log |> List.truncate C.MAX_LOG
@@ -1174,6 +1475,102 @@ module Update =
                 { model with
                     log = "Canceling document processing..." :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
+        | DocumentFilterChanged filter -> { model with documentFilter = filter }, Cmd.none
+        | DocumentSearchChanged value -> { model with documentSearch = value }, Cmd.none
+        | SelectReadyDocuments ->
+            if not (canChangeSourceSelection model) then
+                { model with
+                    log =
+                        "Changing selected sources is unavailable while realtime is connected or another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            else
+                let pdfDocuments =
+                    model.pdfDocuments
+                    |> List.map (fun doc ->
+                        if PdfDocuments.canSelect doc then
+                            { doc with selected = true }
+                        else
+                            doc)
+
+                let selectedCount =
+                    pdfDocuments
+                    |> List.filter (fun doc -> doc.selected && PdfDocuments.canSelect doc)
+                    |> List.length
+
+                let model =
+                    { model with
+                        pdfDocuments = pdfDocuments
+                        log =
+                            $"Selected {selectedCount} ready document(s)." :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                let model =
+                    { model with
+                        log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                postSources model
+                model, Cmd.none
+        | ClearDocumentSelection ->
+            if not (canChangeSourceSelection model) then
+                { model with
+                    log =
+                        "Changing selected sources is unavailable while realtime is connected or another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            else
+                let clearedCount =
+                    model.pdfDocuments |> List.filter (fun doc -> doc.selected) |> List.length
+
+                let pdfDocuments =
+                    model.pdfDocuments |> List.map (fun doc -> { doc with selected = false })
+
+                let model =
+                    { model with
+                        pdfDocuments = pdfDocuments
+                        log =
+                            $"Cleared {clearedCount} selected document(s)." :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                let model =
+                    { model with
+                        log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                postSources model
+                model, Cmd.none
+        | RetryFailedPdfProcessing ->
+            match documentMutationBlocked model "Retrying failed document processing" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let retry = model.pdfDocuments |> List.filter (fun doc -> doc.status = Failed)
+
+                if List.isEmpty retry then
+                    { model with
+                        log = "No failed documents need retry." :: model.log |> List.truncate C.MAX_LOG },
+                    Cmd.none
+                else
+                    let ids = retry |> List.map _.id |> Set.ofList
+
+                    let model =
+                        { model with
+                            pdfDocuments = retryDocs ids model.pdfDocuments
+                            isBusy = true }
+
+                    let report msg = processingReport model msg
+                    let cts = new CancellationTokenSource()
+
+                    let model =
+                        { model with
+                            log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+                    { model with
+                        documentProcessingCancellation = Some cts },
+                    documentProcessingCommand report cts model retry
         | PdfSelectionChanged(id, selected) ->
             if not (canChangeSourceSelection model) then
                 { model with
@@ -1269,7 +1666,7 @@ module Update =
                         model, Cmd.none
                 | Some doc ->
                     { model with isBusy = true },
-                    Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError
+                    Cmd.OfAsync.either (deleteDocumentAndIndexes model) doc DeletePdfCompleted EventError
         | DeletePdfCompleted(Ok result) ->
             let pdfDocuments =
                 model.pdfDocuments |> List.filter (fun doc -> doc.id <> result.id)
@@ -1358,8 +1755,14 @@ module Update =
                         |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Some _ ->
+                let returnsToLibrary =
+                    match model.currentPage with
+                    | Library -> true
+                    | _ -> false
+
                 { model with
                     currentPage = IndexPreview id
+                    indexPreviewReturnsToLibrary = returnsToLibrary
                     indexPreview = Some(PreviewLoading id) },
                 Cmd.OfAsync.either
                     (loadIndexPreviewForDocument model)
@@ -1377,12 +1780,16 @@ module Update =
                     (fun result -> IndexPreviewLoaded(id, result))
                     EventError
             | Main
+            | Library
             | Terms
             | Info
             | Settings -> model, Cmd.none
         | IndexPreviewBack ->
+            let returnPage = if model.indexPreviewReturnsToLibrary then Library else Main
+
             { model with
-                currentPage = Main
+                currentPage = returnPage
+                indexPreviewReturnsToLibrary = false
                 indexPreview = None },
             Cmd.none
         | IndexPreviewLoaded(id, Ok preview) ->
@@ -1396,6 +1803,7 @@ module Update =
                         |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Main
+            | Library
             | Terms
             | Info
             | Settings
@@ -1408,6 +1816,7 @@ module Update =
                     log = $"Index preview failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | Main
+            | Library
             | Terms
             | Info
             | Settings
@@ -1454,13 +1863,13 @@ module Update =
             | Some pendingId when String.Equals(pendingId, connectionId, StringComparison.OrdinalIgnoreCase) ->
                 let wasDisconnected = model.disconnectedConnectionIds |> Set.contains connectionId
 
-                let actualState = bundle.connection.WebRtcClient.State
+                let actualState = Connect.realtimeState bundle.connection.WebRtcClient.State
 
                 if wasDisconnected then
                     { model with
                         bundle = None
                         pendingConnectionId = Some connectionId
-                        sessionState = RTOpenAI.WebRTC.State.Disconnected
+                        sessionState = RealtimeDisconnected
                         isBusy = true
                         log =
                             "Realtime connection closed before session could start." :: model.log
@@ -1469,8 +1878,8 @@ module Update =
                     stopBundleCommand bundle
                 else
                     let activeState =
-                        if actualState = RTOpenAI.WebRTC.State.Disconnected then
-                            RTOpenAI.WebRTC.State.Connecting
+                        if actualState = RealtimeDisconnected then
+                            RealtimeConnecting
                         else
                             actualState
 
@@ -1489,7 +1898,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Start failed: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1501,7 +1910,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = "Realtime flow stopped." :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1510,7 +1919,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = "Realtime cleanup completed." :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1522,7 +1931,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Stop cleanup reported an issue: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1531,7 +1940,7 @@ module Update =
                 { model with
                     bundle = None
                     pendingConnectionId = None
-                    sessionState = RTOpenAI.WebRTC.State.Disconnected
+                    sessionState = RealtimeDisconnected
                     isBusy = false
                     log = $"Stop cleanup reported an issue: {ex.Message}" :: model.log }
                 |> forgetRealtimeDisconnected connectionId,
@@ -1540,6 +1949,9 @@ module Update =
         | WebRTC_StateChanged(connectionId, state) -> handleRealtimeStateChanged connectionId state model
         | RealtimeConnectFailed(connectionId, error) -> cleanupFailedRealtimeConnection connectionId error model
         | Log_Append text ->
+            mirrorActivityLogToDiagnostics text
+            appendActivityLogToFile text
+
             { model with
                 log = text :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
@@ -1558,6 +1970,13 @@ module Update =
             | Some _
             | None -> model, Cmd.none
         | ThemeChanged appTheme -> { model with appTheme = appTheme }, Cmd.none
+        | AppResumed ->
+            let model, changed = refreshPdfLibraryAfterAppResume model
+
+            if changed then
+                postSources model
+
+            model, Cmd.none
         | EventError ex ->
             disposeDocumentProcessingCancellation model
 
@@ -1566,6 +1985,11 @@ module Update =
                 documentProcessingCancellation = None
                 log = ex.Message :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
+
+    let update msg model =
+        let model, cmd = updateCore msg model
+        syncKeepScreenOn model
+        model, cmd
 
     let subscribeMailbox model =
         let background dispatch =
@@ -1592,12 +2016,12 @@ module Update =
 
     let internal statusText model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connected -> "Connected"
-        | RTOpenAI.WebRTC.State.Connecting -> "Connecting"
-        | _ -> "Disconnected"
+        | RealtimeConnected -> "Connected"
+        | RealtimeConnecting -> "Connecting"
+        | RealtimeDisconnected -> "Disconnected"
 
     let internal statusColor model =
         match model.sessionState with
-        | RTOpenAI.WebRTC.State.Connected -> Colors.SeaGreen
-        | RTOpenAI.WebRTC.State.Connecting -> Colors.DarkOrange
-        | _ -> Colors.DimGray
+        | RealtimeConnected -> Colors.SeaGreen
+        | RealtimeConnecting -> Colors.DarkOrange
+        | RealtimeDisconnected -> Colors.DimGray

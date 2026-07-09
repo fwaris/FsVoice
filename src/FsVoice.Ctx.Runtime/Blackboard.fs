@@ -320,6 +320,11 @@ module BlackboardSemantic =
           sourceDisplayName = BlackboardEntryKind.displayName record.kind
           sourceLocation = $"blackboard://{record.id}"
           index = index
+          sectionPath = []
+          contentRole = FsColbert.PassageContentRole.Unknown
+          pageNumbers = []
+          layoutLabels = []
+          captions = []
           text = record.text
           keywords = [] }
 

@@ -65,6 +65,7 @@ module internal QaResponses =
         |> List.tryPick (function
             | FsResponses.ResponseStreamEvent.Error event -> Some event.error
             | _ -> None)
+        |> Option.orElse (terminalResponse events |> Option.bind _.error)
 
     let diagnostics events =
         let eventNames =

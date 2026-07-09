@@ -13,7 +13,7 @@ type private AnswerConversationState =
 type internal QaResponsesAnswerer
     (
         options: QaSessionOptions,
-        transport: QaResponsesTransport,
+        transport: FsResponses.IResponsesTransport,
         sessionCancellation: CancellationTokenSource,
         report: string -> unit,
         contextSources: unit -> KnowledgeSource list,
@@ -21,6 +21,7 @@ type internal QaResponsesAnswerer
         recordObservation: string -> IQaTool -> string -> string -> QaToolObservation
     ) =
     let maxResponseToolRounds = max 1 options.answerToolCallLoopLimit
+    let answerTurnGate = new SemaphoreSlim(1, 1)
 
     let answerContextManagement () =
         match options.answerOpenAiCompactionThresholdTokens with
@@ -61,20 +62,19 @@ type internal QaResponsesAnswerer
                     Some FsResponses.ToolChoice.Auto }
         |> withAnswerPromptCache
 
-    let responseFinalAnswerRequest
+    let responseEvidenceFinalizerRequest
         (answerConfig: ModelRoleConfig)
         maxOutputTokens
         (prompt: AnswerPrompt)
-        previousResponseId
-        input
+        observations
         =
         { FsResponses.WebSocketCreateRequest.Default with
             model = answerConfig.modelId
-            input = input
+            input = [ QaAnswerModel.finalAnswerSynthesisUserItem prompt observations ]
             context_management = answerContextManagement ()
-            instructions = Some prompt.instructions
+            instructions = Some QaAnswerModel.finalAnswerSynthesisInstructions
             max_output_tokens = Some maxOutputTokens
-            previous_response_id = previousResponseId
+            previous_response_id = None
             generate = Some true
             reasoning = QaAnswerModel.answerReasoning answerConfig
             store = Some true
@@ -122,6 +122,9 @@ type internal QaResponsesAnswerer
         if options.logTimings then
             report message
 
+    let answerTransportModeText () =
+        QaAnswerTransportMode.storageName options.answerTransportMode
+
     let compactionItemsFromEvents events =
         events
         |> List.collect (function
@@ -145,6 +148,19 @@ type internal QaResponsesAnswerer
             report
                 $"OpenAI server-side answer compaction applied: phase={phase}; compactionItems={items.Length}; ids={ids}; {QaResponses.diagnostics events}."
 
+    let finalizerResponseIsClean events answer =
+        let hasToolCalls = QaResponseTools.functionCalls events |> List.isEmpty |> not
+
+        let completed =
+            QaResponses.terminalResponse events
+            |> Option.exists (fun response -> response.status.Contains("completed", StringComparison.OrdinalIgnoreCase))
+
+        completed
+        && not hasToolCalls
+        && not (QaResponses.isTokenLimit events)
+        && (QaResponses.responseError events |> Option.isNone)
+        && not (String.IsNullOrWhiteSpace answer)
+
     let responsesCreateAndComplete
         turnId
         answerConfig
@@ -157,6 +173,84 @@ type internal QaResponsesAnswerer
         cancellationToken
         =
         async {
+            let transportMode = answerTransportModeText ()
+
+            let runAnswerRequest phase previousResponseId inputItemLabel inputItems request =
+                async {
+                    let previousResponseIdText = previousResponseId |> Option.defaultValue "<none>"
+
+                    reportAnswerTiming
+                        $"Answer Responses request started: turn={turnId}; phase={phase}; transportMode={transportMode}; model={answerConfig.modelId}; previousResponseId={previousResponseIdText}; {inputItemLabel}={inputItems}."
+
+                    let sw = Stopwatch.StartNew()
+
+                    try
+                        let! events = transport.CreateAndCollectAsync(request, cancellationToken) |> Async.AwaitTask
+                        sw.Stop()
+                        reportOpenAiCompaction phase events
+
+                        reportAnswerTiming
+                            $"Answer Responses timing: turn={turnId}; phase={phase}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; previousResponseId={previousResponseIdText}; {inputItemLabel}={inputItems}; {QaResponses.diagnostics events}."
+
+                        return events
+                    with
+                    | :? OperationCanceledException as ex ->
+                        sw.Stop()
+
+                        reportAnswerTiming
+                            $"Answer Responses request canceled: turn={turnId}; phase={phase}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; previousResponseId={previousResponseIdText}; {inputItemLabel}={inputItems}; error={ex.Message}."
+
+                        return raise ex
+                    | ex ->
+                        sw.Stop()
+
+                        reportAnswerTiming
+                            $"Answer Responses request failed: turn={turnId}; phase={phase}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; transportMode={transportMode}; previousResponseId={previousResponseIdText}; {inputItemLabel}={inputItems}; error={ex.GetType().Name}: {ex.Message}."
+
+                        return raise ex
+                }
+
+            let runEvidenceFinalizer
+                (reason: string)
+                (sourceEvents: FsResponses.ResponseStreamEvent list)
+                (observations: QaToolObservation list)
+                =
+                async {
+                    report
+                        $"Answer Responses WebSocket tool loop reached final-answer synthesis boundary; reason={reason}; observations={observations.Length}; sending evidence-only finalizer."
+
+                    let finalizerRequest =
+                        responseEvidenceFinalizerRequest answerConfig maxOutputTokens prompt observations
+
+                    try
+                        let! finalizerEvents =
+                            runAnswerRequest
+                                "evidence_finalizer"
+                                None
+                                "inputItems"
+                                finalizerRequest.input.Length
+                                finalizerRequest
+
+                        let finalizerAnswer =
+                            FsResponses.ResponseStream.outputText finalizerEvents
+                            |> Text.normalizeWhitespace
+
+                        if finalizerResponseIsClean finalizerEvents finalizerAnswer then
+                            return finalizerEvents, finalizerAnswer, observations, true
+                        else
+                            report
+                                $"Answer Responses WebSocket evidence-only finalizer did not produce a clean answer; reason={reason}; answer_chars={finalizerAnswer.Length}; finalizer=({QaResponses.diagnostics finalizerEvents}); source=({QaResponses.diagnostics sourceEvents})."
+
+                            return sourceEvents, QaAnswerModel.reliableAnswerFallback, observations, false
+                    with
+                    | :? OperationCanceledException as ex -> return raise ex
+                    | ex ->
+                        report
+                            $"Answer Responses WebSocket evidence-only finalizer failed; reason={reason}; error={ex.GetType().Name}: {ex.Message}; source=({QaResponses.diagnostics sourceEvents})."
+
+                        return sourceEvents, QaAnswerModel.reliableAnswerFallback, observations, false
+                }
+
             let request =
                 responseCreateRequest
                     answerConfig
@@ -167,15 +261,7 @@ type internal QaResponsesAnswerer
                     requireInitialToolCall
                     responseTools.tools
 
-            let initialSw = Stopwatch.StartNew()
-            let! initialEvents = transport.RunAnswerRequest request cancellationToken |> Async.AwaitTask
-            initialSw.Stop()
-            reportOpenAiCompaction "initial" initialEvents
-
-            let previousResponseIdText = previousResponseId |> Option.defaultValue "<none>"
-
-            reportAnswerTiming
-                $"Answer Responses timing: phase=initial; elapsed={initialSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={previousResponseIdText}; inputItems={input.Length}; {QaResponses.diagnostics initialEvents}."
+            let! initialEvents = runAnswerRequest "initial" previousResponseId "inputItems" input.Length request
 
             let rec complete remainingToolTurns events observations =
                 async {
@@ -191,11 +277,7 @@ type internal QaResponsesAnswerer
                         report
                             $"Answer Responses WebSocket stopped after reaching the tool-call iteration limit; pendingToolCalls={calls.Length}; {QaResponses.diagnostics events}."
 
-                        return
-                            events,
-                            FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace,
-                            observations,
-                            false
+                        return! runEvidenceFinalizer "tool_call_limit" events observations
                     else
                         match QaResponses.responseIdFromEvents events with
                         | None ->
@@ -229,44 +311,9 @@ type internal QaResponsesAnswerer
 
                             if remainingToolTurns <= 1 then
                                 report
-                                    $"Answer Responses WebSocket reached the final tool-call round; sending a no-tool answer synthesis request. pendingToolCalls={calls.Length}; observations={allObservations.Length}; {QaResponses.diagnostics events}."
+                                    $"Answer Responses WebSocket reached the final tool-call round; sending an evidence-only finalizer. pendingToolCalls={calls.Length}; observations={allObservations.Length}; {QaResponses.diagnostics events}."
 
-                                let finalRequest =
-                                    responseFinalAnswerRequest
-                                        answerConfig
-                                        maxOutputTokens
-                                        prompt
-                                        (Some responseId)
-                                        outputs
-
-                                let finalSw = Stopwatch.StartNew()
-
-                                let! finalEvents =
-                                    transport.RunAnswerRequest finalRequest cancellationToken |> Async.AwaitTask
-
-                                finalSw.Stop()
-                                reportOpenAiCompaction "final_synthesis" finalEvents
-
-                                reportAnswerTiming
-                                    $"Answer Responses timing: phase=final_synthesis; elapsed={finalSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={responseId}; outputItems={outputs.Length}; {QaResponses.diagnostics finalEvents}."
-
-                                let finalCalls = QaResponseTools.functionCalls finalEvents
-
-                                if List.isEmpty finalCalls then
-                                    return
-                                        finalEvents,
-                                        FsResponses.ResponseStream.outputText finalEvents |> Text.normalizeWhitespace,
-                                        allObservations,
-                                        true
-                                else
-                                    report
-                                        $"Answer Responses WebSocket no-tool synthesis still produced tool calls; returning latest model text. pendingToolCalls={finalCalls.Length}; {QaResponses.diagnostics finalEvents}."
-
-                                    return
-                                        finalEvents,
-                                        FsResponses.ResponseStream.outputText finalEvents |> Text.normalizeWhitespace,
-                                        allObservations,
-                                        false
+                                return! runEvidenceFinalizer "final_tool_round" events allObservations
                             else
                                 let followUpRequest =
                                     responseCreateRequest
@@ -278,16 +325,13 @@ type internal QaResponsesAnswerer
                                         false
                                         responseTools.tools
 
-                                let followUpSw = Stopwatch.StartNew()
-
                                 let! nextEvents =
-                                    transport.RunAnswerRequest followUpRequest cancellationToken |> Async.AwaitTask
-
-                                followUpSw.Stop()
-                                reportOpenAiCompaction "tool_followup" nextEvents
-
-                                reportAnswerTiming
-                                    $"Answer Responses timing: phase=tool_followup; elapsed={followUpSw.Elapsed.TotalMilliseconds:F0}ms; previousResponseId={responseId}; outputItems={outputs.Length}; {QaResponses.diagnostics nextEvents}."
+                                    runAnswerRequest
+                                        "tool_followup"
+                                        (Some responseId)
+                                        "outputItems"
+                                        outputs.Length
+                                        followUpRequest
 
                                 return! complete (remainingToolTurns - 1) nextEvents allObservations
                 }
@@ -305,11 +349,11 @@ type internal QaResponsesAnswerer
 
             let token = linkedCts.Token
             let sw = Stopwatch.StartNew()
-            do! transport.PrepareAnswerConnection token
+            do! transport.PrepareAsync token
             sw.Stop()
 
             reportAnswerTiming
-                $"Answer Responses timing: phase=prepare_connection; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms."
+                $"Answer Responses timing: phase=prepare_connection; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; transportMode={answerTransportModeText ()}."
 
             return ()
         }
@@ -321,121 +365,137 @@ type internal QaResponsesAnswerer
             memoryHits: MemoryRecallHit list,
             chunks: SourceChunk list,
             observations: QaToolObservation list,
-            cancellationToken
+            cancellationToken: CancellationToken
         ) =
         async {
-            let answerConfig = QaAnswerModel.modelConfig options Answer
+            use linkedCts =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sessionCancellation.Token)
 
-            let prompt =
-                QaAnswerModel.answerPrompt options contextSources snapshot decision memoryHits chunks observations
+            let token = linkedCts.Token
+            let gateWaitSw = Stopwatch.StartNew()
+            do! answerTurnGate.WaitAsync(token) |> Async.AwaitTask
+            gateWaitSw.Stop()
 
-            let userItem = QaAnswerModel.answerUserItem prompt
+            if gateWaitSw.Elapsed.TotalMilliseconds >= 1.0 then
+                reportAnswerTiming
+                    $"Answer Responses timing: phase=serialized_wait; elapsed={gateWaitSw.Elapsed.TotalMilliseconds:F0}ms."
 
-            let answerAttempt maxOutputTokens replayHistory =
-                async {
-                    let responseTools = responseToolCatalog ()
+            try
+                let answerConfig = QaAnswerModel.modelConfig options Answer
 
-                    let conversation = getAnswerConversation ()
-                    let previousResponseId = conversation.previousResponseId
+                let prompt =
+                    QaAnswerModel.answerPrompt options contextSources snapshot decision memoryHits chunks observations
 
-                    let replayLocalHistory =
-                        replayHistory
-                        || (previousResponseId.IsNone && not (List.isEmpty conversation.items))
+                let userItem = QaAnswerModel.answerUserItem prompt
 
-                    let! events, answer, toolObservations, responseChainReusable =
-                        responsesCreateAndComplete
-                            snapshot.turnId
-                            answerConfig
-                            maxOutputTokens
-                            prompt
-                            responseTools
-                            previousResponseId
-                            (responsesInputItems userItem replayLocalHistory)
-                            options.answerRequireToolCall
-                            cancellationToken
+                let answerAttempt maxOutputTokens replayHistory =
+                    async {
+                        let responseTools = responseToolCatalog ()
 
-                    if QaResponses.isPreviousResponseNotFound events && previousResponseId.IsSome then
-                        report
-                            $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={(getAnswerConversation ()).items.Length}; {QaResponses.diagnostics events}."
+                        let conversation = getAnswerConversation ()
+                        let previousResponseId = conversation.previousResponseId
 
-                        updateAnswerConversationState (fun state -> { state with previousResponseId = None })
-                        |> ignore
+                        let replayLocalHistory =
+                            replayHistory
+                            || (previousResponseId.IsNone && not (List.isEmpty conversation.items))
 
-                        return!
+                        let! events, answer, toolObservations, responseChainReusable =
                             responsesCreateAndComplete
                                 snapshot.turnId
                                 answerConfig
                                 maxOutputTokens
                                 prompt
                                 responseTools
-                                None
-                                (responsesInputItems userItem true)
+                                previousResponseId
+                                (responsesInputItems userItem replayLocalHistory)
                                 options.answerRequireToolCall
-                                cancellationToken
+                                token
+
+                        if QaResponses.isPreviousResponseNotFound events && previousResponseId.IsSome then
+                            report
+                                $"Answer Responses WebSocket previous_response_id was not found; retrying from local append-only history: previousResponseId={previousResponseId.Value}; historyItems={(getAnswerConversation ()).items.Length}; {QaResponses.diagnostics events}."
+
+                            updateAnswerConversationState (fun state -> { state with previousResponseId = None })
+                            |> ignore
+
+                            return!
+                                responsesCreateAndComplete
+                                    snapshot.turnId
+                                    answerConfig
+                                    maxOutputTokens
+                                    prompt
+                                    responseTools
+                                    None
+                                    (responsesInputItems userItem true)
+                                    options.answerRequireToolCall
+                                    token
+                        else
+                            return events, answer, toolObservations, responseChainReusable
+                    }
+
+                let maxOutputTokens =
+                    QaAnswerModel.roleMaxTokens options Answer QaDefaults.answerMaxOutputTokens
+                let! events, answer, toolObservations, responseChainReusable = answerAttempt maxOutputTokens false
+
+                if QaResponses.isTokenLimit events then
+                    report
+                        $"Answer Responses WebSocket hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {QaResponses.diagnostics events}."
+
+                    return
+                        { answer = QaAnswerModel.tokenLimitFallback maxOutputTokens
+                          observations = toolObservations }
+                elif QaResponses.responseError events |> Option.isSome then
+                    report
+                        $"Answer Responses WebSocket returned error: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {QaResponses.diagnostics events}."
+
+                    return
+                        { answer = QaAnswerModel.emptyAnswerFallbackWithLimit maxOutputTokens
+                          observations = toolObservations }
+                elif not (String.IsNullOrWhiteSpace answer) then
+                    if responseChainReusable then
+                        updateAnswerConversation userItem answer events
                     else
-                        return events, answer, toolObservations, responseChainReusable
-                }
+                        resetAnswerConversationChain userItem answer
 
-            let maxOutputTokens = QaAnswerModel.roleMaxTokens options Answer 2500
-            let! events, answer, toolObservations, responseChainReusable = answerAttempt maxOutputTokens false
-
-            if QaResponses.isTokenLimit events then
-                report
-                    $"Answer Responses WebSocket hit output token limit: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; answer_chars={answer.Length}; contextChunks={chunks.Length}; {QaResponses.diagnostics events}."
-
-                return
-                    { answer = QaAnswerModel.tokenLimitFallback maxOutputTokens
-                      observations = toolObservations }
-            elif QaResponses.responseError events |> Option.isSome then
-                report
-                    $"Answer Responses WebSocket returned error: model={answerConfig.modelId}; maxOutputTokens={maxOutputTokens}; contextChunks={chunks.Length}; {QaResponses.diagnostics events}."
-
-                return
-                    { answer = QaAnswerModel.emptyAnswerFallbackWithLimit maxOutputTokens
-                      observations = toolObservations }
-            elif not (String.IsNullOrWhiteSpace answer) then
-                if responseChainReusable then
-                    updateAnswerConversation userItem answer events
+                    return
+                        { answer = answer
+                          observations = toolObservations }
                 else
-                    resetAnswerConversationChain userItem answer
+                    let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
 
-                return
-                    { answer = answer
-                      observations = toolObservations }
-            else
-                let retryMaxOutputTokens = max 1200 (maxOutputTokens * 2)
+                    let! retryEvents, retryAnswer, retryToolObservations, retryResponseChainReusable =
+                        answerAttempt retryMaxOutputTokens false
 
-                let! retryEvents, retryAnswer, retryToolObservations, retryResponseChainReusable =
-                    answerAttempt retryMaxOutputTokens false
+                    if QaResponses.isTokenLimit retryEvents then
+                        report
+                            $"Answer Responses WebSocket retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {QaResponses.diagnostics retryEvents}."
 
-                if QaResponses.isTokenLimit retryEvents then
-                    report
-                        $"Answer Responses WebSocket retry hit output token limit: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; answer_chars={retryAnswer.Length}; contextChunks={chunks.Length}; {QaResponses.diagnostics retryEvents}."
+                        return
+                            { answer = QaAnswerModel.tokenLimitFallback retryMaxOutputTokens
+                              observations = retryToolObservations }
+                    elif QaResponses.responseError retryEvents |> Option.isSome then
+                        report
+                            $"Answer Responses WebSocket retry returned error: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {QaResponses.diagnostics retryEvents}."
 
-                    return
-                        { answer = QaAnswerModel.tokenLimitFallback retryMaxOutputTokens
-                          observations = retryToolObservations }
-                elif QaResponses.responseError retryEvents |> Option.isSome then
-                    report
-                        $"Answer Responses WebSocket retry returned error: model={answerConfig.modelId}; maxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; {QaResponses.diagnostics retryEvents}."
+                        return
+                            { answer = QaAnswerModel.emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                              observations = retryToolObservations }
+                    elif not (String.IsNullOrWhiteSpace retryAnswer) then
+                        if retryResponseChainReusable then
+                            updateAnswerConversation userItem retryAnswer retryEvents
+                        else
+                            resetAnswerConversationChain userItem retryAnswer
 
-                    return
-                        { answer = QaAnswerModel.emptyAnswerFallbackWithLimit retryMaxOutputTokens
-                          observations = retryToolObservations }
-                elif not (String.IsNullOrWhiteSpace retryAnswer) then
-                    if retryResponseChainReusable then
-                        updateAnswerConversation userItem retryAnswer retryEvents
+                        return
+                            { answer = retryAnswer
+                              observations = retryToolObservations }
                     else
-                        resetAnswerConversationChain userItem retryAnswer
+                        report
+                            $"Answer Responses WebSocket returned empty text after retry: model={answerConfig.modelId}; initialMaxOutputTokens={maxOutputTokens}; retryMaxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; initial=({QaResponses.diagnostics events}); retry=({QaResponses.diagnostics retryEvents})."
 
-                    return
-                        { answer = retryAnswer
-                          observations = retryToolObservations }
-                else
-                    report
-                        $"Answer Responses WebSocket returned empty text after retry: model={answerConfig.modelId}; initialMaxOutputTokens={maxOutputTokens}; retryMaxOutputTokens={retryMaxOutputTokens}; contextChunks={chunks.Length}; initial=({QaResponses.diagnostics events}); retry=({QaResponses.diagnostics retryEvents})."
-
-                    return
-                        { answer = QaAnswerModel.emptyAnswerFallbackWithLimit retryMaxOutputTokens
-                          observations = retryToolObservations }
+                        return
+                            { answer = QaAnswerModel.emptyAnswerFallbackWithLimit retryMaxOutputTokens
+                              observations = retryToolObservations }
+            finally
+                answerTurnGate.Release() |> ignore
         }

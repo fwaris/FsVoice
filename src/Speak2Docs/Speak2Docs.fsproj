@@ -81,11 +81,11 @@
     <Compile Include="Constants.fs" />
     <Compile Include="Icons.fs" />
     <Compile Include="Log.fs" />
-    <Compile Include="ActivityLog.fs" />
     <Compile Include="Settings.fs" />
     <Compile Include="Audio.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
+    <Compile Include="SourceLibraryService.fs" />
     <Compile Include="Interaction\Connect.fs" />
     <Compile Include="Interaction\Update.fs" />
     <Compile Include="Views\Theme.fs" />
@@ -177,10 +177,11 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" />
-    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="RapidOcrNet" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="FsColbert" />
+    <PackageReference Include="FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 

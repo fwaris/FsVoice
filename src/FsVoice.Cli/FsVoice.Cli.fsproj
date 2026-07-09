@@ -25,6 +25,7 @@
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="OpenAI" />
+    <PackageReference Include="FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8" />
   </ItemGroup>
 
 </Project>

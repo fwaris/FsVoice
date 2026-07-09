@@ -10,6 +10,7 @@ module App =
         match model.currentPage with
         | Terms -> Views.TermsView.contentPage model
         | Main -> Views.MainView.contentPage model
+        | Library -> Views.PdfSourcesView.libraryPage model
         | Settings -> Views.SettingsView.contentPage model
         | Info -> Views.InfoView.contentPage model
         | IndexPreview _ -> Views.IndexPreviewView.contentPage model
@@ -24,5 +25,6 @@ module App =
 
             (Application() { Window(page model) })
                 .userAppTheme(AppTheme.Unspecified)
+                .onResume(AppResumed)
                 .onRequestedThemeChanged (ThemeChanged)
         }

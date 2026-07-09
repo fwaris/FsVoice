@@ -1,6 +1,7 @@
 namespace Speak2Docs
 
 open System
+open System.Text
 open System.Text.RegularExpressions
 
 type ActivityLogVerbosity =
@@ -118,6 +119,59 @@ module ActivityLog =
         prefixes
         |> List.exists (fun prefix -> value.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase))
 
+    let private utf8ByteCount (value: string) =
+        Encoding.UTF8.GetByteCount(defaultArg (Option.ofObj value) "")
+
+    let private utf8Tail maxBytes (value: string) =
+        let value = defaultArg (Option.ofObj value) ""
+
+        if maxBytes <= 0 then
+            ""
+        else
+            let bytes = Encoding.UTF8.GetBytes value
+
+            if bytes.Length <= maxBytes then
+                value
+            else
+                let mutable start = bytes.Length - maxBytes
+
+                while start < bytes.Length && (bytes[start] &&& 0xC0uy) = 0x80uy do
+                    start <- start + 1
+
+                if start >= bytes.Length then
+                    ""
+                else
+                    Encoding.UTF8.GetString(bytes, start, bytes.Length - start)
+
+    let private recentWholeLines maxBytes value =
+        let value = defaultArg (Option.ofObj value) ""
+
+        if utf8ByteCount value <= maxBytes then
+            value
+        else
+            let tail = utf8Tail maxBytes value
+            let newline = tail.IndexOf('\n')
+
+            if newline >= 0 then tail.Substring(newline + 1) else tail
+
+    let boundedFileText maxBytes trimBytes existing appendLine =
+        let existing = defaultArg (Option.ofObj existing) ""
+        let appendLine = defaultArg (Option.ofObj appendLine) ""
+        let maxBytes = max 0 maxBytes
+        let trimBytes = min maxBytes (max 0 trimBytes)
+        let candidate = existing + appendLine
+
+        if utf8ByteCount candidate <= maxBytes then
+            candidate
+        else
+            let retained = recentWholeLines trimBytes existing
+            let trimmedCandidate = retained + appendLine
+
+            if utf8ByteCount trimmedCandidate <= maxBytes then
+                trimmedCandidate
+            else
+                recentWholeLines maxBytes trimmedCandidate
+
     let private informationalPrefixes =
         [ "Document structure PDF parser starting"
           "Document structure PDF parser produced"
@@ -135,13 +189,21 @@ module ActivityLog =
           "Oracle final response:"
           "Oracle response ready:" ]
 
+    let private alwaysVerbosePrefixes =
+        [ "Answer Response timing"; "Answer Responses timing:" ]
+
     let private verbosePrefixes =
         [ "Context ready:"
           "Persisted document library:"
           "Realtime state changed:"
           "Realtime session created"
           "Realtime session updated"
+          "Realtime protected startup greeting requested"
           "Realtime greeting requested:"
+          "Realtime response created:"
+          "Realtime response audio started:"
+          "Realtime response audio stopped:"
+          "Realtime response done:"
           "Realtime response requested"
           "Realtime acknowledged"
           "Tool provider folder"
@@ -149,6 +211,18 @@ module ActivityLog =
           "Oracle tool call completed"
           "Oracle tool output ready"
           "Oracle tool output was blank"
+          "QA request started:"
+          "QA request returned:"
+          "QA memory started:"
+          "QA memory completed:"
+          "QA retrieval started:"
+          "QA retrieval completed:"
+          "QA answer started:"
+          "QA answer completed:"
+          "Answer Responses request started:"
+          "Answer Responses transport:"
+          "Answer Response timing"
+          "Answer Responses timing:"
           "QA session configured:"
           "QA source update skipped"
           "QA answer trace"
@@ -173,10 +247,21 @@ module ActivityLog =
           "Building missing FsColbert index"
           "Loaded FsColbert indices" ]
 
+    let private verboseDiagnosticContains =
+        [ "response_id=resp_"
+          "Server VAD active"
+          "Server VAD interruption requested"
+          "Server VAD is non-interrupting"
+          "protected greeting Server VAD active" ]
+
     let classify text =
         let text = normalize text
 
-        if
+        if startsWithAny alwaysVerbosePrefixes text then
+            Verbose
+        elif containsAny verboseDiagnosticContains text then
+            Verbose
+        elif
             containsAny
                 [ "failed"
                   "error"

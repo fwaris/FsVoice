@@ -100,7 +100,19 @@ type SourceFlags =
       elaborateIndexKeywords: bool
       useHybridPdfParsing: bool
       useLayoutAnalysis: bool
+      useOpticalParsing: bool
+      useAutoOcrFallback: bool
+      describePdfVisuals: bool
       answerToolCallLoopLimit: int }
+
+module SourceFlags =
+    let ingestionProfile flags =
+        SourceIngestionProfile.fromLegacyFlags
+            flags.useHybridPdfParsing
+            flags.useLayoutAnalysis
+            flags.useOpticalParsing
+            flags.useAutoOcrFallback
+            flags.describePdfVisuals
 
 type RealtimeConnectionState =
     | RealtimeDisconnected

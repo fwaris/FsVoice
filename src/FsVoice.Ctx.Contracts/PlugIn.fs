@@ -64,6 +64,7 @@ type ModelRole =
     | Answer
     | Keyword
     | QueryExpansion
+    | VisualDescription
 
 [<CLIMutable>]
 type ModelRoleConfig =
@@ -136,8 +137,10 @@ module ModelRole =
         | Answer -> "Answer"
         | Keyword -> "Keyword"
         | QueryExpansion -> "QueryExpansion"
+        | VisualDescription -> "VisualDescription"
 
-    let all = [ Realtime; Transcriber; Answer; Keyword; QueryExpansion ]
+    let all =
+        [ Realtime; Transcriber; Answer; Keyword; QueryExpansion; VisualDescription ]
 
     let tryParse value =
         let normalized =
@@ -412,6 +415,7 @@ Allowed direct actions:
 - handle short rapport, repetition, or simple clarification
 - ask a brief follow-up when the request is too vague to answer safely
 - answer simple conversational turns directly
+- never repeat the startup selected-document-count greeting after the opening greeting, unless the user explicitly asks what is selected
 
 Tool use:
 - For every user ask or question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
@@ -451,11 +455,12 @@ module PlugInDefinition =
           Transcriber, ModelRoleConfig.create "gpt-4o-mini-transcribe"
           Answer,
           { ModelRoleConfig.create "gpt-5.5" with
-              maxOutputTokens = Some 2500 }
+              maxOutputTokens = Some QaDefaults.answerMaxOutputTokens }
           Keyword,
-          { ModelRoleConfig.create "gpt-5-nano" with
+          { ModelRoleConfig.create QaDefaults.keywordModel with
               maxOutputTokens = Some 25000 }
-          QueryExpansion, ModelRoleConfig.create "gpt-5-nano" ]
+          QueryExpansion, ModelRoleConfig.create "gpt-5-nano"
+          VisualDescription, ModelRoleConfig.create "gpt-5-mini" ]
         |> Map.ofList
 
     let defaultPrompts =

@@ -3,6 +3,7 @@ namespace Speak2Docs
 open System
 open System.IO
 open System.IO.Compression
+open System.Security.Cryptography
 open System.Text.Json
 open System.Threading
 open Speak2Docs.WorkFlow
@@ -34,6 +35,11 @@ module PdfLibrary =
     let private prebuiltManifestAsset = "FsColbertIndexes/prebuilt-indexes.json"
 
     let private prebuiltBundleManifestAsset = "FsColbertIndexes/index-bundle.json"
+
+    let private fsColbertModelAssetFolder = "FsColbert/Models/mxbai-edge-colbert"
+
+    let private fsColbertModelFiles =
+        [ "model_int8.onnx"; "tokenizer.json"; "onnx_config.json" ]
 
     let private sanitizeFileName (name: string) =
         let invalid = Path.GetInvalidFileNameChars() |> Set.ofArray
@@ -83,26 +89,46 @@ module PdfLibrary =
                 return Error $"Unable to read JSON knowledge source '{path}': {ex.Message}"
         }
 
-    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif useHybridPdfParsing then
+        elif useHybridPdfParsing && (useOpticalParsing || useAutoOcrFallback) then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
-    let private readPassages report useHybridPdfParsing useLayoutAnalysis (doc: PdfDocumentSource) cancellationToken =
+    let private readPassages
+        report
+        visualOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        (doc: PdfDocumentSource)
+        cancellationToken
+        =
         let source: FsVoice.Ctx.KnowledgeSource =
             { FsVoice.Ctx.KnowledgeSource.kind = qaSourceKind doc.kind
               location = doc.storedPath
               enabled = true }
 
-        KnowledgeSources.configurePdfParser useLayoutAnalysis
+        KnowledgeSources.configurePdfParserWithVisualOptions
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            visualOptions
 
-        FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithCancellation
+        FsVoice.Retrieval.KnowledgeSources.loadPassagesForIndexingWithOptionsWithCancellation
             FileSystem.AppDataDirectory
             report
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback
+              enableOpticalParsing = useOpticalParsing
+              enableAutoOpticalParsing = useAutoOcrFallback
+              visualDescriptions =
+                if useHybridPdfParsing && useLayoutAnalysis then
+                    visualOptions
+                else
+                    FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
             source
             cancellationToken
 
@@ -162,6 +188,83 @@ module PdfLibrary =
                 use target = File.Create path
                 do! source.CopyToAsync(target) |> Async.AwaitTask
                 return true
+        }
+
+    let private hashStream (stream: Stream) =
+        use sha256 = SHA256.Create()
+        sha256.ComputeHash(stream) |> Convert.ToHexString
+
+    let private tryHashFile path =
+        try
+            if File.Exists path then
+                use stream = File.OpenRead path
+                Some(hashStream stream)
+            else
+                None
+        with _ ->
+            None
+
+    let private tryHashPackageFile logicalName =
+        async {
+            match! tryOpenPackageFile logicalName with
+            | None -> return None
+            | Some source ->
+                use source = source
+                return Some(hashStream source)
+        }
+
+    let private copyPackageFileIfChanged logicalName path =
+        async {
+            match! tryHashPackageFile logicalName with
+            | None -> return false
+            | Some packagedHash when tryHashFile path = Some packagedHash -> return false
+            | Some _ -> return! copyPackageFile logicalName path
+        }
+
+    let installPackagedFsColbertModel () =
+        async {
+            let modelFolder =
+                Path.Combine(FileSystem.AppDataDirectory, "FsVoice", "FsColbert", "Models", "mxbai-edge-colbert")
+
+            let! copied =
+                fsColbertModelFiles
+                |> List.map (fun fileName ->
+                    copyPackageFileIfChanged
+                        $"{fsColbertModelAssetFolder}/{fileName}"
+                        (Path.Combine(modelFolder, fileName)))
+                |> Async.Parallel
+
+            let copiedCount = copied |> Array.filter id |> Array.length
+
+            if copiedCount > 0 then
+                return [ $"Installed or refreshed packaged FsColbert model asset(s): {copiedCount} file(s)." ]
+            else
+                return []
+        }
+
+    let private rapidOcrV5ModelFileNames =
+        [ "ch_PP-OCRv5_mobile_det.onnx"
+          "ch_ppocr_mobile_v2.0_cls_infer.onnx"
+          "latin_PP-OCRv5_rec_mobile_infer.onnx"
+          "ppocrv5_latin_dict.txt" ]
+
+    let private rapidOcrV5ModelFolders () =
+        [ Path.Combine(AppContext.BaseDirectory, "models", "v5")
+          Path.Combine(AppContext.BaseDirectory, "models")
+          Path.Combine(FileSystem.AppDataDirectory, "models", "v5") ]
+
+    let private hasRapidOcrV5Models folder =
+        Directory.Exists folder
+        && rapidOcrV5ModelFileNames
+           |> List.forall (fun fileName -> File.Exists(Path.Combine(folder, fileName)))
+
+    let installPackagedRapidOcrModel () =
+        async {
+            match rapidOcrV5ModelFolders () |> List.tryFind hasRapidOcrV5Models with
+            | Some _ -> return []
+            | None ->
+                return
+                    [ "RapidOcrNet bundled OCR model assets were not found under the app runtime folders; Auto OCR Fallback may be unavailable." ]
         }
 
     let private readPrebuiltManifest () =
@@ -331,7 +434,6 @@ module PdfLibrary =
     let private installedBundleSourceMatches (doc: PdfDocumentSource) (source: FsColbert.IndexBundleSource) =
         seq {
             yield source.sourceId
-            yield source.sourceDisplayName
 
             match source.sourceLocation with
             | Some location -> yield location
@@ -339,7 +441,6 @@ module PdfLibrary =
         }
         |> Seq.exists (fun candidate ->
             String.Equals(candidate, doc.id, StringComparison.OrdinalIgnoreCase)
-            || String.Equals(candidate, doc.displayName, StringComparison.OrdinalIgnoreCase)
             || String.Equals(candidate, doc.storedPath, StringComparison.OrdinalIgnoreCase))
 
     let private removeInstalledBundleSource (doc: PdfDocumentSource) (errors: ResizeArray<string>) =
@@ -470,17 +571,9 @@ module PdfLibrary =
                     let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
                     let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
 
-                    let! documentCopied =
-                        if File.Exists storedPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.documentAsset storedPath
+                    let! documentCopied = copyPackageFileIfChanged asset.documentAsset storedPath
 
-                    let! indexCopied =
-                        if File.Exists indexPath then
-                            async.Return false
-                        else
-                            copyPackageFile asset.indexAsset indexPath
+                    let! indexCopied = copyPackageFileIfChanged asset.indexAsset indexPath
 
                     let chunkCount = prebuiltChunkCount indexPath
 
@@ -518,7 +611,7 @@ module PdfLibrary =
                           indexPath = indexPath }
 
                     if documentCopied || indexCopied then
-                        logs.Add $"Installed prebuilt knowledge index: {doc.displayName}."
+                        logs.Add $"Installed or refreshed prebuilt knowledge index: {doc.displayName}."
 
             match bundleManifest with
             | None -> ()
@@ -555,17 +648,9 @@ module PdfLibrary =
                             let storedPath = Path.Combine(folder (), $"{id}-{documentName}")
                             let indexPath = Path.Combine(prebuiltIndexFolder (), $"{id}.fsci")
 
-                            let! documentCopied =
-                                if File.Exists storedPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.documentAsset storedPath
+                            let! documentCopied = copyPackageFileIfChanged asset.documentAsset storedPath
 
-                            let! indexCopied =
-                                if File.Exists indexPath then
-                                    async.Return false
-                                else
-                                    copyPackageFile asset.indexAsset indexPath
+                            let! indexCopied = copyPackageFileIfChanged asset.indexAsset indexPath
 
                             let chunkCount = prebuiltChunkCount indexPath
 
@@ -611,7 +696,7 @@ module PdfLibrary =
                                     indexFile = Path.GetFileName indexPath }
 
                             if documentCopied || indexCopied then
-                                logs.Add $"Installed bundled FsColbert index: {doc.displayName}."
+                                logs.Add $"Installed or refreshed bundled FsColbert index: {doc.displayName}."
 
                 if installedBundleSources.Count > 0 then
                     writeInstalledBundleManifest
@@ -771,8 +856,11 @@ module PdfLibrary =
     let processDocument
         report
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (cancellationToken: CancellationToken)
         (doc: PdfDocumentSource)
         =
@@ -784,7 +872,17 @@ module PdfLibrary =
             cancellationToken.ThrowIfCancellationRequested()
             throwIfKeywordCancellationRequested keywordOptions
 
-            let! result = readPassages report useHybridPdfParsing useLayoutAnalysis doc cancellationToken
+            let! result =
+                readPassages
+                    report
+                    visualOptions
+                    useHybridPdfParsing
+                    useLayoutAnalysis
+                    useOpticalParsing
+                    useAutoOcrFallback
+                    doc
+                    cancellationToken
+
             cancellationToken.ThrowIfCancellationRequested()
 
             match result with
@@ -799,11 +897,19 @@ module PdfLibrary =
                       enabled = true }
 
                 match!
-                    FsVoice.Retrieval.KnowledgeSources.InindexPassagesWithCancellation
+                    FsVoice.Retrieval.KnowledgeSources.InindexPassagesWithOptionsWithCancellation
                         FileSystem.AppDataDirectory
                         report
                         keywordOptions
-                        (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+                        { parsingMode =
+                            pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback
+                          enableOpticalParsing = useOpticalParsing
+                          enableAutoOpticalParsing = useAutoOcrFallback
+                          visualDescriptions =
+                            if useHybridPdfParsing && useLayoutAnalysis then
+                                visualOptions
+                            else
+                                FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
                         source
                         passages
                         cancellationToken
@@ -835,8 +941,11 @@ module PdfLibrary =
     let processDocuments
         report
         keywordOptions
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (cancellationToken: CancellationToken)
         (docs: PdfDocumentSource list)
         =
@@ -854,8 +963,11 @@ module PdfLibrary =
                         processDocument
                             report
                             keywordOptions
+                            visualOptions
                             useHybridPdfParsing
                             useLayoutAnalysis
+                            useOpticalParsing
+                            useAutoOcrFallback
                             cancellationToken
                             doc
 
@@ -873,4 +985,16 @@ module PdfLibrary =
                 return false
             else
                 return deleteStoredDocumentFile doc
+        }
+
+    let deleteStoredDocumentAndPrebuiltIndexes (doc: PdfDocumentSource) =
+        async {
+            let removedFile =
+                if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
+                    false
+                else
+                    deleteStoredDocumentFile doc
+
+            let removedIndexCount, errors = cleanupPrebuiltStorageForDocument doc
+            return removedFile, removedIndexCount, errors
         }

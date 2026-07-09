@@ -21,7 +21,6 @@
     <Compile Include="QaAnswerModel.fs" />
     <Compile Include="QaResponseTools.fs" />
     <Compile Include="QaResponses.fs" />
-    <Compile Include="QaResponsesTransport.fs" />
     <Compile Include="QaResponsesAnswer.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
@@ -34,7 +33,6 @@
     <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
-    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

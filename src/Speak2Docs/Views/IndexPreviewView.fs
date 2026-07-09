@@ -4,7 +4,6 @@ open System
 open System.Globalization
 open Fabulous.Maui
 open Speak2Docs
-open Speak2Docs.WorkFlow
 open Microsoft.Maui
 open Microsoft.Maui.Controls
 open Microsoft.Maui.Graphics
@@ -31,7 +30,7 @@ module IndexPreviewView =
         | [] -> "None"
         | items -> String.concat ", " items
 
-    let private vectorText (vector: KnowledgeSources.IndexPreviewVectorSummary) =
+    let private vectorText (vector: FsVoice.Ctx.SourcePreviewVectorSummary) =
         let values =
             vector.valueSample
             |> List.map (fun value -> value.ToString("0.0000", CultureInfo.InvariantCulture))
@@ -42,7 +41,10 @@ module IndexPreviewView =
     let private mutedLabel appTheme text =
         Label(text).font(size = 12.).textColor(Theme.mutedTextColor appTheme).lineBreakMode (LineBreakMode.WordWrap)
 
-    let private recordView appTheme (record: KnowledgeSources.IndexPreviewRecord) =
+    let private recordView appTheme (record: FsVoice.Ctx.SourcePreviewRecord) =
+        let sectionPathText = String.concat " > " record.sectionPath
+        let pageNumbersText = record.pageNumbers |> List.map string |> String.concat ", "
+
         Border(
             (VStack(spacing = 6.) {
                 Label($"Chunk {record.index}")
@@ -51,6 +53,15 @@ module IndexPreviewView =
                     .lineBreakMode (LineBreakMode.TailTruncation)
 
                 Label(truncateText 900 record.text).font(size = 12.).lineBreakMode (LineBreakMode.WordWrap)
+
+                if not (List.isEmpty record.sectionPath) then
+                    mutedLabel appTheme $"Section: {sectionPathText}"
+
+                if record.contentRole <> FsVoice.Ctx.SourceContentRole.Unknown then
+                    mutedLabel appTheme $"Role: {FsVoice.Ctx.SourceContentRole.displayName record.contentRole}"
+
+                if not (List.isEmpty record.pageNumbers) then
+                    mutedLabel appTheme $"Pages: {pageNumbersText}"
 
                 mutedLabel appTheme $"Keywords: {listText record.keywords}"
                 mutedLabel appTheme $"Terms: {listText record.terms}"
@@ -100,7 +111,7 @@ module IndexPreviewView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private summaryView appTheme (preview: KnowledgeSources.IndexPreview) =
+    let private summaryView appTheme (preview: FsVoice.Ctx.SourcePreview) =
         Border(
             (Grid([ Dimension.Star ], [ Dimension.Absolute 26.; Dimension.Absolute 24. ]) {
                 Label(preview.source.DisplayName)
@@ -121,7 +132,7 @@ module IndexPreviewView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private previewContent appTheme (preview: KnowledgeSources.IndexPreview) =
+    let private previewContent appTheme (preview: FsVoice.Ctx.SourcePreview) =
         Grid([ Dimension.Star ], [ Dimension.Absolute 102.; Dimension.Star ]) {
             (summaryView appTheme preview).gridRow (0)
 

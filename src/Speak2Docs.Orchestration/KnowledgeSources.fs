@@ -9,6 +9,7 @@ module KnowledgeSources =
     type QueryType = FsVoice.Retrieval.KnowledgeSources.QueryType
     type Expansion = FsVoice.Retrieval.KnowledgeSources.Expansion
     type KeywordGenerationOptions = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions
+    type PdfVisualDescriptionOptions = FsVoice.Retrieval.PdfVisualDescriptionOptions
     type IndexPreviewVectorSummary = FsVoice.Retrieval.KnowledgeSources.IndexPreviewVectorSummary
     type IndexPreviewRecord = FsVoice.Retrieval.KnowledgeSources.IndexPreviewRecord
     type IndexPreview = FsVoice.Retrieval.KnowledgeSources.IndexPreview
@@ -16,6 +17,10 @@ module KnowledgeSources =
     module KeywordGenerationOptions =
         let defaults = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.defaults
         let disabled = FsVoice.Retrieval.KnowledgeSources.KeywordGenerationOptions.disabled
+
+    module PdfVisualDescriptionOptions =
+        let defaults = FsVoice.Retrieval.PdfVisualDescriptionOptions.defaults
+        let disabled = FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
 
     type RetrievalIndex = FsVoice.Retrieval.KnowledgeSources.RetrievalIndex
 
@@ -47,7 +52,7 @@ module KnowledgeSources =
     let loadInternalIndex (sources: KnowledgeSource list) : Async<RetrievalIndex * string list> =
         async { return! FsVoice.Retrieval.KnowledgeSources.loadInternalIndex sources }
 
-    let private defaultKeywordModel = "gpt-5-nano"
+    let private defaultKeywordModel = FsVoice.Ctx.QaDefaults.keywordModel
 
     let private fsColbertRoot storageRoot =
         Path.Combine(storageRoot, "Speak2Docs", "FsColbert")
@@ -82,18 +87,73 @@ module KnowledgeSources =
                     client = None
                     modelId = defaultKeywordModel }
 
-    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis =
+    let private pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback =
         if useHybridPdfParsing && useLayoutAnalysis then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif useHybridPdfParsing then
+        elif useHybridPdfParsing && (useOpticalParsing || useAutoOcrFallback) then
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
         else
             FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
 
-    let configurePdfParser useLayoutAnalysis =
+    let private pdfIngestionOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        visualOptions
+        : FsVoice.Retrieval.KnowledgeSources.PdfIngestionOptions =
+        { parsingMode = pdfParsingMode useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback
+          enableOpticalParsing = useOpticalParsing
+          enableAutoOpticalParsing = useAutoOcrFallback
+          visualDescriptions =
+            if useHybridPdfParsing && useLayoutAnalysis then
+                visualOptions
+            else
+                FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
+
+    let configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions =
         { FsVoice.Retrieval.DoclingHybrid.defaults with
-            enableLayoutAnalysis = useLayoutAnalysis }
+            enableLayoutAnalysis = useLayoutAnalysis
+            enableOcr = useOpticalParsing
+            enableAutoOpticalParsing = useAutoOcrFallback
+            visualDescriptions =
+                if useLayoutAnalysis then
+                    visualOptions
+                else
+                    FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled }
         |> FsVoice.Retrieval.DoclingHybrid.setDefaultOptions
+
+    let configurePdfParser useLayoutAnalysis useOpticalParsing useAutoOcrFallback =
+        configurePdfParserWithVisualOptions
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+
+    let InindexSourceWithVisualOptions
+        storageRoot
+        report
+        keywordOptions
+        visualOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        (source: KnowledgeSource)
+        =
+        configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions
+
+        source
+        |> FsVoice.Retrieval.KnowledgeSources.InindexSourceWithOptions
+            storageRoot
+            report
+            keywordOptions
+            (pdfIngestionOptions
+                useHybridPdfParsing
+                useLayoutAnalysis
+                useOpticalParsing
+                useAutoOcrFallback
+                visualOptions)
 
     let InindexSource
         storageRoot
@@ -101,47 +161,116 @@ module KnowledgeSources =
         keywordOptions
         useHybridPdfParsing
         useLayoutAnalysis
-        (source: KnowledgeSource)
-        =
-        configurePdfParser useLayoutAnalysis
-
+        useOpticalParsing
+        useAutoOcrFallback
         source
-        |> FsVoice.Retrieval.KnowledgeSources.InindexSource
+        =
+        InindexSourceWithVisualOptions
             storageRoot
             report
             keywordOptions
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            source
 
-    let loadIndex
+    let loadIndexWithVisualOptions
         storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
+        visualOptions
         useHybridPdfParsing
         useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
         (sources: KnowledgeSource list)
         =
         async {
-            configurePdfParser useLayoutAnalysis
+            configurePdfParserWithVisualOptions useLayoutAnalysis useOpticalParsing useAutoOcrFallback visualOptions
 
             let! index, errors =
                 sources
-                |> FsVoice.Retrieval.KnowledgeSources.loadIndex
+                |> FsVoice.Retrieval.KnowledgeSources.loadIndexWithOptions
                     storageRoot
                     report
                     keywordOptions
-                    (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+                    (pdfIngestionOptions
+                        useHybridPdfParsing
+                        useLayoutAnalysis
+                        useOpticalParsing
+                        useAutoOcrFallback
+                        visualOptions)
                     false
 
             return index, errors
         }
 
-    let loadIndexPreview storageRoot report useHybridPdfParsing useLayoutAnalysis maxRecords source =
-        source
-        |> FsVoice.Retrieval.KnowledgeSources.loadIndexPreview
+    let loadIndex
+        storageRoot
+        report
+        keywordOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        sources
+        =
+        loadIndexWithVisualOptions
             storageRoot
             report
-            (pdfParsingMode useHybridPdfParsing useLayoutAnalysis)
+            keywordOptions
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            sources
+
+    let loadIndexPreviewWithVisualOptions
+        storageRoot
+        report
+        visualOptions
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        maxRecords
+        source
+        =
+        source
+        |> FsVoice.Retrieval.KnowledgeSources.loadIndexPreviewWithOptions
+            storageRoot
+            report
+            (pdfIngestionOptions
+                useHybridPdfParsing
+                useLayoutAnalysis
+                useOpticalParsing
+                useAutoOcrFallback
+                visualOptions)
             maxRecords
+
+    let loadIndexPreview
+        storageRoot
+        report
+        useHybridPdfParsing
+        useLayoutAnalysis
+        useOpticalParsing
+        useAutoOcrFallback
+        maxRecords
+        source
+        =
+        loadIndexPreviewWithVisualOptions
+            storageRoot
+            report
+            FsVoice.Retrieval.PdfVisualDescriptionOptions.disabled
+            useHybridPdfParsing
+            useLayoutAnalysis
+            useOpticalParsing
+            useAutoOcrFallback
+            maxRecords
+            source
 
     let rank
         (apiKey: string option)
