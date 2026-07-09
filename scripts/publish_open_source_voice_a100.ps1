@@ -180,25 +180,41 @@ The SM80 binaries still require the CUDA 12.x runtime DLLs and cuDNN 9 on PATH,
 even when the NVIDIA driver reports CUDA 13.2. If needed, pass `-CudaBin` and
 `-CudnnBin` to `run-open-source-voice-a100.ps1`.
 
+WebRTC forwarding note:
+
+Forwarding only the HTTP port is not enough for WebRTC. The page uses the HTTP
+port for signaling, then ICE negotiates UDP for audio and the data channel.
+For remote/forwarded browser testing, either run through a TURN server or pin
+and forward a small UDP range:
+
+- TCP 5067 -> A100 TCP 5067
+- UDP 50670-50679 -> A100 UDP 50670-50679
+
+Then start the server with `-WebRtcIcePortStart 50670 -WebRtcIcePortEnd 50679`.
+Use `-WebRtcBindAddress` only when the A100 has multiple NICs and SIPSorcery
+chooses the wrong local address.
+
 Run:
 
-````powershell
+~~~powershell
 .\run-open-source-voice-a100.ps1 `
   -AssetsRoot G:\Chroma\VoiceAgent_assets `
   -CudaBin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" `
-  -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.12\bin\12.9" `
-  -TtsMaxSteps 256
-````
+  -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.23\bin\12.9\x64" `
+  -TtsMaxSteps 256 `
+  -WebRtcIcePortStart 50670 `
+  -WebRtcIcePortEnd 50679
+~~~
 
 Smoke:
 
-````powershell
+~~~powershell
 .\smoke-open-source-voice-a100.ps1 `
   -AssetsRoot G:\Chroma\VoiceAgent_assets `
   -CudaBin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" `
-  -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.12\bin\12.9" `
+  -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.23\bin\12.9\x64" `
   -RequireReady
-````
+~~~
 "@
 
 Set-Content -LiteralPath (Join-Path $runtimeRootFull "README.open-source-voice-a100.md") -Value $readme -Encoding UTF8

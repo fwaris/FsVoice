@@ -4,12 +4,14 @@ open System
 open System.Collections.Concurrent
 open System.Collections.Generic
 open System.IO
+open System.Net
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.Logging
 open SIPSorcery.Media
 open SIPSorcery.Net
+open SIPSorcery.Sys
 open SIPSorceryMedia.Abstractions
 open FsVoice.OpenSource
 
@@ -52,12 +54,64 @@ type OpenSourceVoiceWebRtcSession
     (
         agent: IVoiceAgentRuntime,
         session: VoiceAgentSessionInfo,
+        webRtcOptions: WebRtcRuntimeOptions,
         logger: ILogger<OpenSourceVoiceWebRtcSession>
     ) =
     let jsonOptions = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true)
     let audioFormat = AudioCommonlyUsedFormats.OpusWebRTC
     let audioEncoder = new AudioEncoder(false, true)
-    let pc = new RTCPeerConnection()
+    let createPeerConnection () =
+        let config =
+            RTCConfiguration(
+                X_UseRtpFeedbackProfile = true,
+                X_ICEIncludeAllInterfaceAddresses = webRtcOptions.IncludeAllInterfaceAddresses
+            )
+
+        if webRtcOptions.GatherTimeoutMs > 0 then
+            config.X_GatherTimeoutMs <- webRtcOptions.GatherTimeoutMs
+
+        if not (String.IsNullOrWhiteSpace webRtcOptions.BindAddress) then
+            match IPAddress.TryParse webRtcOptions.BindAddress with
+            | true, address ->
+                config.X_BindAddress <- address
+                logger.LogInformation("Open-source WebRTC binding RTP/ICE sockets to {BindAddress}.", address)
+            | false, _ ->
+                invalidArg
+                    (nameof webRtcOptions.BindAddress)
+                    $"Invalid OpenSourceVoice:WebRtc:BindAddress value '{webRtcOptions.BindAddress}'."
+
+        let portRange =
+            if webRtcOptions.IcePortStart = 0 && webRtcOptions.IcePortEnd = 0 then
+                None
+            else
+                if webRtcOptions.IcePortStart <= 0 || webRtcOptions.IcePortEnd <= 0 then
+                    invalidArg
+                        (nameof webRtcOptions.IcePortStart)
+                        "Both OpenSourceVoice:WebRtc:IcePortStart and IcePortEnd must be set when pinning WebRTC ICE ports."
+
+                if webRtcOptions.IcePortStart > webRtcOptions.IcePortEnd then
+                    invalidArg
+                        (nameof webRtcOptions.IcePortStart)
+                        "OpenSourceVoice:WebRtc:IcePortStart must be less than or equal to IcePortEnd."
+
+                if webRtcOptions.IcePortStart % 2 <> 0 then
+                    invalidArg
+                        (nameof webRtcOptions.IcePortStart)
+                        "OpenSourceVoice:WebRtc:IcePortStart must be an even UDP port."
+
+                let range = PortRange(webRtcOptions.IcePortStart, webRtcOptions.IcePortEnd, false, Nullable<int>())
+                logger.LogInformation(
+                    "Open-source WebRTC using UDP ICE port range {IcePortStart}-{IcePortEnd}.",
+                    webRtcOptions.IcePortStart,
+                    webRtcOptions.IcePortEnd
+                )
+                Some range
+
+        match portRange with
+        | Some range -> new RTCPeerConnection(config, 0, range, false)
+        | None -> new RTCPeerConnection(config)
+
+    let pc = createPeerConnection ()
     let incoming = TurnBuffer(agent.MaxTurnAudioSamples24k)
     let syncRoot = obj()
     let iceComplete = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -356,7 +410,7 @@ type OpenSourceVoiceWebRtcSession
     interface IDisposable with
         member this.Dispose() = this.Dispose()
 
-type OpenSourceVoiceWebRtcSessionStore(agent: IVoiceAgentRuntime, loggerFactory: ILoggerFactory) =
+type OpenSourceVoiceWebRtcSessionStore(agent: IVoiceAgentRuntime, options: OpenSourceVoiceOptions, loggerFactory: ILoggerFactory) =
     let sessions = ConcurrentDictionary<string, OpenSourceVoiceWebRtcSession>(StringComparer.Ordinal)
 
     member _.CreateOrReplace(session: VoiceAgentSessionInfo) =
@@ -364,6 +418,7 @@ type OpenSourceVoiceWebRtcSessionStore(agent: IVoiceAgentRuntime, loggerFactory:
             new OpenSourceVoiceWebRtcSession(
                 agent,
                 session,
+                options.WebRtc,
                 loggerFactory.CreateLogger<OpenSourceVoiceWebRtcSession>()
             )
 

@@ -148,6 +148,20 @@ module OpenSourceVoiceWebApp =
       session = await createSession();
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       pc = new RTCPeerConnection();
+      pc.oniceconnectionstatechange = () => {
+        message.textContent = `ICE: ${pc.iceConnectionState}`;
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+          message.textContent = 'WebRTC ICE failed. If this page is port-forwarded, forward the configured UDP ICE ports too, or use a TURN/TCP fallback.';
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+          message.textContent = 'WebRTC connection failed before the data channel opened.';
+        }
+      };
+      pc.onicecandidateerror = event => {
+        message.textContent = `ICE candidate error ${event.errorCode || ''} ${event.errorText || ''}`.trim();
+      };
       pc.ontrack = event => {
         remoteAudio.srcObject = event.streams[0];
         remoteAudio.play().catch(() => {});
@@ -171,6 +185,21 @@ module OpenSourceVoiceWebApp =
       if (!answerResponse.ok) throw new Error(await answerResponse.text());
       const answerSdp = await answerResponse.json();
       await pc.setRemoteDescription(answerSdp);
+      await new Promise((resolve, reject) => {
+        if (dc.readyState === 'open') {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(() => reject(new Error('Timed out waiting for WebRTC data channel. Check UDP ICE port forwarding or TURN configuration.')), 12000);
+        dc.addEventListener('open', () => {
+          clearTimeout(timer);
+          resolve();
+        }, { once: true });
+        dc.addEventListener('error', () => {
+          clearTimeout(timer);
+          reject(new Error('WebRTC data channel failed to open.'));
+        }, { once: true });
+      });
     }
 
     connectButton.onclick = () => connect().catch(error => {

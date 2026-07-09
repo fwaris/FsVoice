@@ -5,6 +5,10 @@ param(
     [int]$TtsMaxSteps = 96,
     [string]$CudaBin = "",
     [string]$CudnnBin = "",
+    [string]$WebRtcBindAddress = "",
+    [int]$WebRtcIcePortStart = 0,
+    [int]$WebRtcIcePortEnd = 0,
+    [switch]$WebRtcIncludeAllInterfaceAddresses,
     [switch]$RequireReady
 )
 
@@ -70,6 +74,15 @@ if (-not [string]::IsNullOrWhiteSpace($CudaBin)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($CudnnBin)) {
     $startArgs += @("-CudnnBin", $CudnnBin)
+}
+if (-not [string]::IsNullOrWhiteSpace($WebRtcBindAddress)) {
+    $startArgs += @("-WebRtcBindAddress", $WebRtcBindAddress)
+}
+if ($WebRtcIcePortStart -gt 0 -or $WebRtcIcePortEnd -gt 0) {
+    $startArgs += @("-WebRtcIcePortStart", "$WebRtcIcePortStart", "-WebRtcIcePortEnd", "$WebRtcIcePortEnd")
+}
+if ($WebRtcIncludeAllInterfaceAddresses) {
+    $startArgs += "-WebRtcIncludeAllInterfaceAddresses"
 }
 
 $process = Start-Process powershell.exe `

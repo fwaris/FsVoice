@@ -91,7 +91,13 @@ module Program =
             new GemmaVoiceAgentRuntime(options, contextProviders = contextProviders) :> IVoiceAgentRuntime)
         |> ignore
 
-        builder.Services.AddSingleton<OpenSourceVoiceWebRtcSessionStore>() |> ignore
+        builder.Services.AddSingleton<OpenSourceVoiceWebRtcSessionStore>(fun serviceProvider ->
+            new OpenSourceVoiceWebRtcSessionStore(
+                serviceProvider.GetRequiredService<IVoiceAgentRuntime>(),
+                options,
+                serviceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>()
+            ))
+        |> ignore
 
         let app = builder.Build()
         let agent = app.Services.GetRequiredService<IVoiceAgentRuntime>()

@@ -5,7 +5,11 @@ param(
     [int]$TtsMaxSteps = 256,
     [string]$WorkDir = "served_runs",
     [string]$CudaBin = "",
-    [string]$CudnnBin = ""
+    [string]$CudnnBin = "",
+    [string]$WebRtcBindAddress = "",
+    [int]$WebRtcIcePortStart = 0,
+    [int]$WebRtcIcePortEnd = 0,
+    [switch]$WebRtcIncludeAllInterfaceAddresses
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,6 +126,16 @@ $env:OpenSourceVoice__Tts__ExecutionProvider = "cuda"
 $env:OpenSourceVoice__Tts__Variant = "q4f16"
 $env:OpenSourceVoice__Tts__VoiceSamplePath = $voicePath
 $env:OpenSourceVoice__Tts__MaxSteps = "$TtsMaxSteps"
+if (-not [string]::IsNullOrWhiteSpace($WebRtcBindAddress)) {
+    $env:OpenSourceVoice__WebRtc__BindAddress = $WebRtcBindAddress
+}
+if ($WebRtcIcePortStart -gt 0 -or $WebRtcIcePortEnd -gt 0) {
+    $env:OpenSourceVoice__WebRtc__IcePortStart = "$WebRtcIcePortStart"
+    $env:OpenSourceVoice__WebRtc__IcePortEnd = "$WebRtcIcePortEnd"
+}
+if ($WebRtcIncludeAllInterfaceAddresses) {
+    $env:OpenSourceVoice__WebRtc__IncludeAllInterfaceAddresses = "true"
+}
 
 $exe = Join-Path $PSScriptRoot "FsVoice.OpenSource.Server.exe"
 
@@ -129,5 +143,7 @@ Write-Host "Starting FsVoice open-source backend on $Urls"
 Write-Host "AssetsRoot: $assetsRootFull"
 Write-Host "GemmaModelDir: $gemmaDir"
 Write-Host "ChatterboxModelDir: $chatterboxDir"
+if (-not [string]::IsNullOrWhiteSpace($WebRtcBindAddress)) { Write-Host "WebRtcBindAddress: $WebRtcBindAddress" }
+if ($WebRtcIcePortStart -gt 0 -or $WebRtcIcePortEnd -gt 0) { Write-Host "WebRtcIcePorts: $WebRtcIcePortStart-$WebRtcIcePortEnd/udp" }
 Write-Host "Default paper index: $(Join-Path $serviceDir "FsColbertIndexes\index-bundle.json")"
 & $exe --urls $Urls

@@ -34,12 +34,20 @@ type TtsRuntimeOptions() =
     member val CudaDeviceId = 0 with get, set
     member val GpuMemoryLimitGb = 0.0 with get, set
 
+type WebRtcRuntimeOptions() =
+    member val BindAddress = "" with get, set
+    member val IcePortStart = 0 with get, set
+    member val IcePortEnd = 0 with get, set
+    member val IncludeAllInterfaceAddresses = false with get, set
+    member val GatherTimeoutMs = 1500 with get, set
+
 type OpenSourceVoiceOptions() =
     member val WorkDir = "served_runs" with get, set
     member val MaxHistoryTurns = 8 with get, set
     member val MaxTurnAudioSeconds = 30.0 with get, set
     member val Gemma = GemmaRuntimeOptions() with get, set
     member val Tts = TtsRuntimeOptions() with get, set
+    member val WebRtc = WebRtcRuntimeOptions() with get, set
 
 module RuntimePaths =
     let resolveAgainst (basePath: string) (path: string) =
