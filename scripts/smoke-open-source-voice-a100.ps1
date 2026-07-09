@@ -3,6 +3,8 @@ param(
     [string]$AssetsRoot,
     [string]$Url = "http://localhost:5067",
     [int]$TtsMaxSteps = 96,
+    [string]$CudaBin = "",
+    [string]$CudnnBin = "",
     [switch]$RequireReady
 )
 
@@ -11,6 +13,25 @@ $ErrorActionPreference = "Stop"
 $runScript = Join-Path $PSScriptRoot "run-open-source-voice-a100.ps1"
 if (-not (Test-Path -LiteralPath $runScript -PathType Leaf)) {
     throw "Run script was not found: $runScript"
+}
+
+function Assert-PathExists([string]$Path, [string]$Label) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "$Label was not found: $Path"
+    }
+}
+
+foreach ($runtimePath in @(
+    (Join-Path $PSScriptRoot "FsVoice.OpenSource.Server.exe"),
+    (Join-Path $PSScriptRoot "onnxruntime.dll"),
+    (Join-Path $PSScriptRoot "onnxruntime_providers_cuda.dll"),
+    (Join-Path $PSScriptRoot "onnxruntime_providers_shared.dll"),
+    (Join-Path $PSScriptRoot "onnxruntime-genai.dll"),
+    (Join-Path $PSScriptRoot "onnxruntime-genai-cuda.dll"),
+    (Join-Path $PSScriptRoot "FsColbertIndexes\index-bundle.json"),
+    (Join-Path $PSScriptRoot "FsColbert\Models\mxbai-edge-colbert\model_int8.onnx")
+)) {
+    Assert-PathExists $runtimePath "Runtime dependency"
 }
 
 $assetsRootFull = (Resolve-Path -LiteralPath $AssetsRoot).Path
@@ -47,7 +68,9 @@ $process = Start-Process powershell.exe `
         "-File", $runScript,
         "-AssetsRoot", $AssetsRoot,
         "-Urls", "http://0.0.0.0:5067",
-        "-TtsMaxSteps", "$TtsMaxSteps"
+        "-TtsMaxSteps", "$TtsMaxSteps",
+        "-CudaBin", $CudaBin,
+        "-CudnnBin", $CudnnBin
     )
 
 try {

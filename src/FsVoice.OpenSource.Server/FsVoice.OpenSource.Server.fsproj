@@ -19,10 +19,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsVoice.OpenSource.Runtime\FsVoice.OpenSource.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8" />
     <PackageReference Include="SIPSorcery" />
   </ItemGroup>
 
