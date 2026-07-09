@@ -9,6 +9,15 @@ obj/
 *.user
 temp/
 artifacts/
+served_runs/
+**/served_runs/
+models/
+**/models/
+voices/
+**/voices/
+*.onnx
+*.onnx_data
+*.data
 # Release signing material and store upload credentials.
 *.p12
 *.mobileprovision

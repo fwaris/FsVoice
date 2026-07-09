@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.OpenSource</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.OpenSource.Runtime</PackageId>
+    <Description>Local open-source Gemma and Chatterbox runtime for FsVoice voice agents.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Options.fs" />
+    <Compile Include="Audio.fs" />
+    <Compile Include="GemmaTypes.fs" />
+    <Compile Include="GemmaProcessor.fs" />
+    <Compile Include="GemmaOrtGenAiRunner.fs" />
+    <Compile Include="GemmaOnnxRunner.fs" />
+    <Compile Include="VoiceAgentTypes.fs" />
+    <Compile Include="ChatterboxOnnxTtsRuntime.fs" />
+    <Compile Include="TtsRuntime.fs" />
+    <Compile Include="Tooling.fs" />
+    <Compile Include="GemmaVoiceAgentRuntime.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" />
+    <PackageReference Include="Tokenizers.HuggingFace" />
+    <PackageReference Include="TorchSharp" />
+    <PackageReference Include="libtorch-cpu" />
+  </ItemGroup>
+
+</Project>

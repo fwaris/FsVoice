@@ -6,12 +6,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="OpenSourceVoiceTests.fs" />
     <Compile Include="Tests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.Extensions.AI" />
@@ -24,6 +26,8 @@
     <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
     <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
     <ProjectReference Include="..\FsVoice.Hosting.AspNetCore\FsVoice.Hosting.AspNetCore.fsproj" />
+    <ProjectReference Include="..\FsVoice.OpenSource.Runtime\FsVoice.OpenSource.Runtime.fsproj" />
+    <ProjectReference Include="..\FsVoice.OpenSource.Server\FsVoice.OpenSource.Server.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Tools\FsVoice.Ctx.Tools.fsproj" />
     <ProjectReference Include="..\FsVoice.Tools\FsVoice.Tools.fsproj" />
     <ProjectReference Include="..\FsVoice.Platform\FsVoice.Platform.fsproj" />

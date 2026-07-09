@@ -8,6 +8,8 @@
     <Project Path="src/FsVoice.Ctx.Tools/FsVoice.Ctx.Tools.fsproj" />
     <Project Path="src/FsVoice.Retrieval.PdfRasterization/FsVoice.Retrieval.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Hosting.AspNetCore/FsVoice.Hosting.AspNetCore.fsproj" />
+    <Project Path="src/FsVoice.OpenSource.Runtime/FsVoice.OpenSource.Runtime.fsproj" />
+    <Project Path="src/FsVoice.OpenSource.Server/FsVoice.OpenSource.Server.fsproj" />
     <Project Path="src/FsVoice.PdfRasterization/FsVoice.PdfRasterization.fsproj" />
     <Project Path="src/FsVoice.Tools/FsVoice.Tools.fsproj" />
     <Project Path="src/FsVoice.Cli/FsVoice.Cli.fsproj" />
