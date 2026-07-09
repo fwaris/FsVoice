@@ -57,21 +57,27 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $outLog = Join-Path $logDir "open_source_voice.out.log"
 $errLog = Join-Path $logDir "open_source_voice.err.log"
 
+$startArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $runScript,
+    "-AssetsRoot", $AssetsRoot,
+    "-Urls", "http://0.0.0.0:5067",
+    "-TtsMaxSteps", "$TtsMaxSteps"
+)
+if (-not [string]::IsNullOrWhiteSpace($CudaBin)) {
+    $startArgs += @("-CudaBin", $CudaBin)
+}
+if (-not [string]::IsNullOrWhiteSpace($CudnnBin)) {
+    $startArgs += @("-CudnnBin", $CudnnBin)
+}
+
 $process = Start-Process powershell.exe `
     -WindowStyle Hidden `
     -PassThru `
     -RedirectStandardOutput $outLog `
     -RedirectStandardError $errLog `
-    -ArgumentList @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $runScript,
-        "-AssetsRoot", $AssetsRoot,
-        "-Urls", "http://0.0.0.0:5067",
-        "-TtsMaxSteps", "$TtsMaxSteps",
-        "-CudaBin", $CudaBin,
-        "-CudnnBin", $CudnnBin
-    )
+    -ArgumentList $startArgs
 
 try {
     $deadline = (Get-Date).AddSeconds(90)
