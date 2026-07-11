@@ -42,6 +42,21 @@ module internal QaAnswerModel =
         || answer = reliableAnswerFallback
         || answer.StartsWith("I was unable to obtain", StringComparison.OrdinalIgnoreCase)
 
+    let containsReasoningLeakage (answer: string) =
+        let contains (value: string) =
+            answer.Contains(value, StringComparison.OrdinalIgnoreCase)
+
+        not (String.IsNullOrWhiteSpace answer)
+        && (contains "thinking process"
+            || contains "analyze the request"
+            || contains "analyze the retrieved source"
+            || contains "scan the content"
+            || contains "synthesize the answer"
+            || contains "formulate the response"
+            || contains "refine for conciseness"
+            || contains "self-correction/refinement during drafting"
+            || contains "final output generation")
+
     let renderObservations (observations: QaToolObservation list) =
         if List.isEmpty observations then
             "No tool observations were recorded."
@@ -85,6 +100,7 @@ Do not call tools.
 Do not describe your reasoning, tool choices, lookup process, or limitations.
 Do not include process phrases such as "I need to", "let me", "I should", or "I can use".
 If the evidence is insufficient, say that plainly and concisely.
+When speech recognition has obviously distorted a name or phrase, and the supplied evidence makes the intended question unambiguous, answer that intended question and briefly state the interpretation.
 Return only the answer text."""
 
     let finalAnswerSynthesisUserItem (prompt: AnswerPrompt) (observations: QaToolObservation list) =

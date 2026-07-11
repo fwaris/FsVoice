@@ -1809,6 +1809,158 @@ let ``qa session evidence finalizer replaces tool-limit musing with clean answer
         Assert.Contains("Fake Context inventory.", finalizerInput)
     }
 
+[<Fact>]
+let ``qa session evidence finalizer replaces ordinary reasoning leakage with clean answer`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-reasoning-leakage"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+        let logs = ResizeArray<string>()
+
+        let leakedAnswer =
+            "Thinking Process: 1. Analyze the Request. 2. Scan the Content. 3. Final Output Generation."
+
+        let cleanAnswer =
+            "Assuming you mean which algorithms UniTS is compared against, the paper compares it with 12 anomaly-detection methods."
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                match captured.Count with
+                | 1 -> [ responsesCompletedEvent "resp_leaked_answer" leakedAnswer ]
+                | _ -> [ responsesCompletedEvent "resp_clean_answer" cleanAnswer ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                report = fun message -> logs.Add message }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What angredness is unity as compared against?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal(cleanAnswer, answer.answer)
+        Assert.Equal(2, captured.Count)
+        Assert.Equal(Some FsResponses.ToolChoice.None, captured[1].tool_choice)
+        Assert.Contains("What angredness is unity as compared against?", inputTextFromResponseRequest captured[1])
+        Assert.Contains(logs, fun log -> log.Contains("reason=reasoning_leakage"))
+        Assert.DoesNotContain(logs, fun log -> log.Contains(leakedAnswer))
+    }
+
+[<Fact>]
+let ``qa session ignores protocol reasoning output and keeps clean answer`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-typed-reasoning"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let output =
+            [ FsResponses.IOitem.Reasoning
+                  { id = "reasoning_1"
+                    summary =
+                      [ { text = "Analyze the Request"
+                          ``type`` = "summary_text" } ]
+                    status = Some "completed" }
+              FsResponses.IOitem.Message
+                  { FsResponses.Message.Default with
+                      id = Some "msg_typed_reasoning"
+                      status = Some "completed"
+                      role = "assistant"
+                      content =
+                          [ FsResponses.Content.Output_text
+                                { text = "Clean user-facing answer."
+                                  annotations = None } ] } ]
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+                [ responsesCompletedEventWithOutput "resp_typed_reasoning" output ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Answer from the selected source."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("Clean user-facing answer.", answer.answer)
+        Assert.Single(captured) |> ignore
+    }
+
+[<Fact>]
+let ``qa session reasoning leakage in finalizer returns controlled fallback`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake-websocket-finalizer-reasoning-leakage"
+              enabled = true }
+
+        let captured = ResizeArray<FsResponses.WebSocketCreateRequest>()
+
+        let transport =
+            websocketAnswerTransport (fun request _ ->
+                captured.Add request
+
+                [ responsesCompletedEvent
+                      $"resp_leaked_{captured.Count}"
+                      "Thinking Process: 1. Analyze the Request. 2. Final Output Generation." ])
+
+        let options =
+            { testQaSessionOptions (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ] }
+
+        use session = new QaSession(options, transport)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "Answer from the selected source."
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal(QaAnswerModel.reliableAnswerFallback, answer.answer)
+        Assert.Equal(2, captured.Count)
+    }
+
+[<Theory>]
+[<InlineData("1. First result. 2. Second result.")>]
+[<InlineData("The analysis section compares the study results.")>]
+[<InlineData("A concise final answer with no process notes.")>]
+let ``answer quality validator accepts ordinary answer text`` answer =
+    Assert.False(QaAnswerModel.containsReasoningLeakage answer)
+
+[<Theory>]
+[<InlineData("Thinking Process: inspect the sources")>]
+[<InlineData("1. Analyze the Request: identify the question")>]
+[<InlineData("Self-Correction/Refinement during drafting: revise it")>]
+[<InlineData("Final Output Generation: proceed to answer")>]
+let ``answer quality validator rejects strong process markers`` answer =
+    Assert.True(QaAnswerModel.containsReasoningLeakage answer)
+
 [<Theory>]
 [<InlineData("empty")>]
 [<InlineData("error")>]

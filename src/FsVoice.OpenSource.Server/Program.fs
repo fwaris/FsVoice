@@ -6,6 +6,7 @@ open System.Threading
 open Microsoft.AspNetCore.Builder
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.Logging
 open FsVoice.Ctx
 open FsVoice.OpenSource
 open FsVoice.Retrieval
@@ -29,7 +30,8 @@ module Program =
 
     let private defaultPaperBundleCandidates () =
         [ yield Path.Combine(AppContext.BaseDirectory, "FsColbertIndexes")
-          yield Path.Combine(Directory.GetCurrentDirectory(), "src", "Speak2Docs", "Resources", "Raw", "FsColbertIndexes")
+          yield
+              Path.Combine(Directory.GetCurrentDirectory(), "src", "Speak2Docs", "Resources", "Raw", "FsColbertIndexes")
 
           match tryFindRepoRoot (Directory.GetCurrentDirectory()) with
           | Some root -> yield Path.Combine(root, "src", "Speak2Docs", "Resources", "Raw", "FsColbertIndexes")
@@ -42,16 +44,24 @@ module Program =
         for file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories) do
             let relative = Path.GetRelativePath(source, file)
             let destination = Path.Combine(target, relative)
-            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath destination)) |> ignore
+
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath destination))
+            |> ignore
+
             File.Copy(file, destination, true)
 
     let private resolveWorkDir (options: OpenSourceVoiceOptions) =
         RuntimePaths.resolveAgainst (Directory.GetCurrentDirectory()) options.WorkDir
 
     let private stageDefaultPaperIndex workDir =
-        match defaultPaperBundleCandidates () |> List.tryFind (fun path -> File.Exists(Path.Combine(path, "index-bundle.json"))) with
+        match
+            defaultPaperBundleCandidates ()
+            |> List.tryFind (fun path -> File.Exists(Path.Combine(path, "index-bundle.json")))
+        with
         | None ->
-            printfn "Default paper FsColbert index bundle was not found. Source QA will start without the built-in paper index."
+            printfn
+                "Default paper FsColbert index bundle was not found. Source QA will start without the built-in paper index."
+
             false
         | Some source ->
             let target = Path.Combine(workDir, "FsVoice", "FsColbert", "Prebuilt")
@@ -87,8 +97,15 @@ module Program =
         let options = OpenSourceVoiceWebApp.bindOptions builder.Configuration
         let contextProviders = createDefaultPaperContextProviders options
 
-        builder.Services.AddSingleton<IVoiceAgentRuntime>(fun _ ->
-            new GemmaVoiceAgentRuntime(options, contextProviders = contextProviders) :> IVoiceAgentRuntime)
+        builder.Services.AddSingleton<IVoiceAgentRuntime>(fun serviceProvider ->
+            let logger = serviceProvider.GetRequiredService<ILogger<GemmaVoiceAgentRuntime>>()
+
+            new GemmaVoiceAgentRuntime(
+                options,
+                contextProviders = contextProviders,
+                report = fun message -> logger.LogInformation("{VoiceAgentEvent}", message)
+            )
+            :> IVoiceAgentRuntime)
         |> ignore
 
         builder.Services.AddSingleton<OpenSourceVoiceWebRtcSessionStore>(fun serviceProvider ->
@@ -101,7 +118,10 @@ module Program =
 
         let app = builder.Build()
         let agent = app.Services.GetRequiredService<IVoiceAgentRuntime>()
-        let webRtcStore = app.Services.GetRequiredService<OpenSourceVoiceWebRtcSessionStore>()
+
+        let webRtcStore =
+            app.Services.GetRequiredService<OpenSourceVoiceWebRtcSessionStore>()
+
         OpenSourceVoiceWebApp.map app agent webRtcStore |> ignore
 
         app.Run()

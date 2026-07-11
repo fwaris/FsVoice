@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="OpenSourceVoiceWebRtc.fs" />
+    <Compile Include="OpenSourceVoiceWebSocket.fs" />
     <Compile Include="OpenSourceVoiceWebApp.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

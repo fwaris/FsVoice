@@ -13,12 +13,14 @@ open Microsoft.ML.OnnxRuntime.Tensors
 module private GemmaTensorMath =
     let argmaxLast (logits: DenseTensor<float32>) =
         let dims = logits.Dimensions
+
         if dims.Length <> 3 then
             invalidArg (nameof logits) "Expected logits shape [batch, sequence, vocab]."
 
         let batch = dims[0]
         let sequence = dims[1]
         let vocab = dims[2]
+
         if batch < 1 || sequence < 1 || vocab < 1 then
             invalidArg (nameof logits) "Expected logits shape [batch, sequence, vocab] with positive dimensions."
 
@@ -33,6 +35,7 @@ module private GemmaTensorMath =
 
             for vocabIndex in 1 .. vocab - 1 do
                 let value = values[rowStart + (vocabIndex * strides[2])]
+
                 if value > bestValue then
                     bestValue <- value
                     bestIndex <- vocabIndex
@@ -43,16 +46,22 @@ module private GemmaTensorMath =
 
     let sampleLast (rng: Random) (temperature: float) (topP: float) (topK: int) (logits: DenseTensor<float32>) =
         let dims = logits.Dimensions
+
         if dims.Length <> 3 then
             invalidArg (nameof logits) "Expected logits shape [batch, sequence, vocab]."
 
         let batch = dims[0]
         let sequence = dims[1]
         let vocab = dims[2]
+
         if batch < 1 || sequence < 1 || vocab < 1 then
             invalidArg (nameof logits) "Expected logits shape [batch, sequence, vocab] with positive dimensions."
 
-        if not (Double.IsNaN temperature) && not (Double.IsInfinity temperature) && temperature = 0.0 then
+        if
+            not (Double.IsNaN temperature)
+            && not (Double.IsInfinity temperature)
+            && temperature = 0.0
+        then
             argmaxLast logits
         else
             let temperature =
@@ -67,11 +76,7 @@ module private GemmaTensorMath =
                 else
                     topP
 
-            let topK =
-                if topK <= 0 || topK > vocab then
-                    vocab
-                else
-                    topK
+            let topK = if topK <= 0 || topK > vocab then vocab else topK
 
             let values = logits.Buffer.Span
             let strides = logits.Strides
@@ -83,7 +88,13 @@ module private GemmaTensorMath =
 
                 for vocabIndex in 0 .. vocab - 1 do
                     let value = float values[rowStart + (vocabIndex * strides[2])]
-                    candidates[vocabIndex] <- vocabIndex, if Double.IsNaN value then Double.NegativeInfinity else value
+
+                    candidates[vocabIndex] <-
+                        vocabIndex,
+                        if Double.IsNaN value then
+                            Double.NegativeInfinity
+                        else
+                            value
 
                 Array.sortInPlaceWith (fun (_, left) (_, right) -> compare right left) candidates
 
@@ -99,6 +110,7 @@ module private GemmaTensorMath =
                     denominator <- denominator + weight
 
                 let mutable keepCount = topK
+
                 if topP < 1.0 && denominator > 0.0 then
                     let mutable cumulative = 0.0
                     let mutable index = 0
@@ -106,12 +118,15 @@ module private GemmaTensorMath =
 
                     while not foundCutoff && index < topK do
                         cumulative <- cumulative + (weights[index] / denominator)
+
                         if cumulative >= topP then
                             keepCount <- index + 1
                             foundCutoff <- true
+
                         index <- index + 1
 
                 let mutable sampleTotal = 0.0
+
                 for index in 0 .. keepCount - 1 do
                     sampleTotal <- sampleTotal + weights[index]
 
@@ -126,10 +141,12 @@ module private GemmaTensorMath =
 
                     while not selected && index < keepCount do
                         cumulative <- cumulative + weights[index]
+
                         if target <= cumulative then
                             let candidateId, _ = candidates[index]
                             chosen <- candidateId
                             selected <- true
+
                         index <- index + 1
 
                 ids[batchIndex] <- int64 chosen
@@ -159,9 +176,19 @@ type private GemmaOrtTensor =
     | TensorHalf of DenseTensor<Half>
     | TensorOrtFloat16 of DenseTensor<Float16>
 
-type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: string, ?maxAudioSeconds: float) =
+type GemmaOnnxRunner
+    (
+        modelDir: string,
+        variant: string,
+        executionProvider: string,
+        audioEncoderExecutionProvider: string,
+        ?maxAudioSeconds: float
+    ) =
     let normalizedVariant =
-        if String.IsNullOrWhiteSpace variant then "Q4_K_M/cuda" else variant.Trim()
+        if String.IsNullOrWhiteSpace variant then
+            "Q4_K_M/cuda"
+        else
+            variant.Trim()
 
     let variantParts =
         normalizedVariant.Split([| '/'; '\\' |], StringSplitOptions.RemoveEmptyEntries)
@@ -189,15 +216,19 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             Path.GetFullPath modelDir
 
     let layout =
-        if directMobiusDir
-           || looksLikeMobiusVariant
-           || File.Exists(Path.Combine(effectiveModelDir, "genai_config.json")) then
+        if
+            directMobiusDir
+            || looksLikeMobiusVariant
+            || File.Exists(Path.Combine(effectiveModelDir, "genai_config.json"))
+        then
             MobiusGenAi
         else
             TransformersJs
 
-    let processor = GemmaProcessor(effectiveModelDir, ?maxAudioSeconds = maxAudioSeconds)
-    let syncRoot = obj()
+    let processor =
+        GemmaProcessor(effectiveModelDir, ?maxAudioSeconds = maxAudioSeconds)
+
+    let syncRoot = obj ()
     let mutable loaded: GemmaOnnxLoadedSessions option = None
 
     let graphPath name =
@@ -208,8 +239,7 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             | "audio_encoder" -> Path.Combine(effectiveModelDir, "audio_encoder", "model.onnx")
             | "decoder_model_merged" -> Path.Combine(effectiveModelDir, "decoder", "model.onnx")
             | _ -> invalidArg (nameof name) $"Unsupported Mobius Gemma graph '{name}'."
-        | TransformersJs ->
-            Path.Combine(effectiveModelDir, "onnx", $"{name}_{normalizedVariant}.onnx")
+        | TransformersJs -> Path.Combine(effectiveModelDir, "onnx", $"{name}_{normalizedVariant}.onnx")
 
     let requiredFiles =
         match layout with
@@ -241,27 +271,37 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
     let missingFiles () =
         requiredFiles |> Array.filter (File.Exists >> not)
 
-    let createOptions () =
+    let audioEncoderExecutionProvider =
+        if String.IsNullOrWhiteSpace audioEncoderExecutionProvider then
+            executionProvider
+        else
+            audioEncoderExecutionProvider
+
+    let createOptions (provider: string) =
         let options = new SessionOptions()
         options.GraphOptimizationLevel <- GraphOptimizationLevel.ORT_ENABLE_EXTENDED
         options.LogSeverityLevel <- OrtLoggingLevel.ORT_LOGGING_LEVEL_ERROR
 
-        match executionProvider.Trim().ToLowerInvariant() with
-        | "" | "cuda" ->
+        match provider.Trim().ToLowerInvariant() with
+        | ""
+        | "cuda" ->
             let cudaOptions = new OrtCUDAProviderOptions()
+
             try
                 cudaOptions.UpdateOptions(
                     Dictionary<string, string>(
-                        dict [ "device_id", "0"
-                               "enable_skip_layer_norm_strict_mode", "1"
-                               "enable_cuda_graph", "0" ]
+                        dict
+                            [ "device_id", "0"
+                              "enable_skip_layer_norm_strict_mode", "1"
+                              "enable_cuda_graph", "0" ]
                     )
                 )
+
                 options.AppendExecutionProvider_CUDA(cudaOptions)
             finally
                 cudaOptions.Dispose()
         | "cpu" -> options.AppendExecutionProvider_CPU(0)
-        | value -> invalidArg (nameof executionProvider) $"Unsupported Gemma execution provider '{value}'. Use cuda or cpu."
+        | value -> invalidArg (nameof provider) $"Unsupported Gemma execution provider '{value}'. Use cuda or cpu."
 
         options
 
@@ -273,19 +313,27 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                 match loaded with
                 | Some sessions -> sessions
                 | None ->
-                    let missing = missingFiles()
+                    let missing = missingFiles ()
+
                     if missing.Length > 0 then
                         let missingText = String.Join(", ", missing)
                         invalidOp $"Gemma ONNX model is not ready. Missing files: {missingText}"
 
-                    let embedOptions = createOptions()
-                    let decoderOptions = createOptions()
-                    let audioOptions = if File.Exists optionalAudioFile then Some(createOptions()) else None
+                    let embedOptions = createOptions executionProvider
+                    let decoderOptions = createOptions executionProvider
+
+                    let audioOptions =
+                        if File.Exists optionalAudioFile then
+                            Some(createOptions audioEncoderExecutionProvider)
+                        else
+                            None
 
                     try
                         let sessions =
                             { EmbedTokens = new InferenceSession(graphPath "embed_tokens", embedOptions)
-                              AudioEncoder = audioOptions |> Option.map (fun options -> new InferenceSession(optionalAudioFile, options))
+                              AudioEncoder =
+                                audioOptions
+                                |> Option.map (fun options -> new InferenceSession(optionalAudioFile, options))
                               Decoder = new InferenceSession(graphPath "decoder_model_merged", decoderOptions)
                               Options =
                                 [| yield embedOptions
@@ -301,7 +349,7 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                         embedOptions.Dispose()
                         decoderOptions.Dispose()
                         audioOptions |> Option.iter _.Dispose()
-                        reraise())
+                        reraise ())
 
     let inputNames (session: InferenceSession) =
         session.InputMetadata.Keys |> Seq.toArray
@@ -329,21 +377,26 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                 sum <- sum + attentionMask[index]
 
         let finalValues =
-            if takeLast > 0 && takeLast < values.Length then values[values.Length - takeLast ..] else values
+            if takeLast > 0 && takeLast < values.Length then
+                values[values.Length - takeLast ..]
+            else
+                values
 
         DenseTensor<int64>(finalValues, [| 1; finalValues.Length |])
 
     let metadataDims (metadata: NodeMetadata) batchSize =
         metadata.Dimensions
-        |> Seq.map (fun dim -> if dim > 0 then dim elif dim = -1 then 0 else 0)
+        |> Seq.map (fun dim ->
+            if dim > 0 then dim
+            elif dim = -1 then 0
+            else 0)
         |> Seq.toArray
         |> Array.mapi (fun index value -> if index = 0 && value = 0 then batchSize else value)
 
     let tensorCount dims =
         dims |> Array.fold (fun total dim -> total * dim) 1
 
-    let toFloat16 (value: float32) : Float16 =
-        Float16.op_Explicit value
+    let toFloat16 (value: float32) : Float16 = Float16.op_Explicit value
 
     let zeroTensorForMetadata name (metadata: NodeMetadata) batchSize =
         let dims = metadataDims metadata batchSize
@@ -352,13 +405,22 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
         if metadata.ElementType = typeof<float32> then
             NamedOnnxValue.CreateFromTensor(name, DenseTensor<float32>(Array.zeroCreate<float32> count, dims))
         elif metadata.ElementType = typeof<Half> then
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Half>(Memory<Half>(Array.zeroCreate<Half> count), ReadOnlySpan<int>(dims), false))
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Half>(Memory<Half>(Array.zeroCreate<Half> count), ReadOnlySpan<int>(dims), false)
+            )
         elif metadata.ElementType = typeof<Float16> then
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Float16>(Memory<Float16>(Array.zeroCreate<Float16> count), ReadOnlySpan<int>(dims), false))
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Float16>(Memory<Float16>(Array.zeroCreate<Float16> count), ReadOnlySpan<int>(dims), false)
+            )
         elif metadata.ElementType = typeof<int64> then
             NamedOnnxValue.CreateFromTensor(name, DenseTensor<int64>(Array.zeroCreate<int64> count, dims))
         elif metadata.ElementType = typeof<bool> then
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<bool>(Memory<bool>(Array.zeroCreate<bool> count), ReadOnlySpan<int>(dims), false))
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<bool>(Memory<bool>(Array.zeroCreate<bool> count), ReadOnlySpan<int>(dims), false)
+            )
         else
             invalidOp $"Unsupported Gemma empty cache tensor type {metadata.ElementType} for {name}."
 
@@ -377,9 +439,15 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
         if metadata.ElementType = typeof<float32> then
             NamedOnnxValue.CreateFromTensor(name, DenseTensor<float32>(Array.empty<float32>, dims))
         elif metadata.ElementType = typeof<Half> then
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Half>(Memory<Half>(Array.empty<Half>), ReadOnlySpan<int>(dims), false))
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Half>(Memory<Half>(Array.empty<Half>), ReadOnlySpan<int>(dims), false)
+            )
         elif metadata.ElementType = typeof<Float16> then
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Float16>(Memory<Float16>(Array.empty<Float16>), ReadOnlySpan<int>(dims), false))
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Float16>(Memory<Float16>(Array.empty<Float16>), ReadOnlySpan<int>(dims), false)
+            )
         else
             invalidOp $"Unsupported Gemma feature tensor type {metadata.ElementType} for {name}."
 
@@ -388,9 +456,17 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
 
     let cloneOrtTensor (value: DisposableNamedOnnxValue) =
         match value.Value with
-        | :? Tensor<float32> as tensor -> TensorFloat(DenseTensor<float32>(tensor.ToArray(), tensor.Dimensions.ToArray()))
+        | :? Tensor<float32> as tensor ->
+            TensorFloat(DenseTensor<float32>(tensor.ToArray(), tensor.Dimensions.ToArray()))
         | :? Tensor<Half> as tensor -> TensorHalf(DenseTensor<Half>(tensor.ToArray(), tensor.Dimensions.ToArray()))
-        | :? Tensor<Float16> as tensor -> TensorOrtFloat16(DenseTensor<Float16>(Memory<Float16>(tensor.ToArray()), ReadOnlySpan<int>(tensor.Dimensions.ToArray()), false))
+        | :? Tensor<Float16> as tensor ->
+            TensorOrtFloat16(
+                DenseTensor<Float16>(
+                    Memory<Float16>(tensor.ToArray()),
+                    ReadOnlySpan<int>(tensor.Dimensions.ToArray()),
+                    false
+                )
+            )
         | other -> invalidOp $"Gemma output {value.Name} has unsupported tensor value type {other.GetType().FullName}."
 
     let readFloatTensor (value: DisposableNamedOnnxValue) =
@@ -420,19 +496,38 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
         match tensor with
         | TensorFloat value -> DenseTensor<float32>(value.ToArray(), value.Dimensions.ToArray())
         | TensorHalf value -> DenseTensor<float32>(value |> Seq.map float32 |> Seq.toArray, value.Dimensions.ToArray())
-        | TensorOrtFloat16 value -> DenseTensor<float32>(value |> Seq.map (fun item -> float32 item) |> Seq.toArray, value.Dimensions.ToArray())
+        | TensorOrtFloat16 value ->
+            DenseTensor<float32>(value |> Seq.map (fun item -> float32 item) |> Seq.toArray, value.Dimensions.ToArray())
 
     let squeezeBatch tensor =
         match tensor with
         | TensorFloat value ->
             let dims = value.Dimensions.ToArray()
-            if dims.Length = 3 && dims[0] = 1 then TensorFloat(DenseTensor<float32>(value.ToArray(), [| dims[1]; dims[2] |])) else tensor
+
+            if dims.Length = 3 && dims[0] = 1 then
+                TensorFloat(DenseTensor<float32>(value.ToArray(), [| dims[1]; dims[2] |]))
+            else
+                tensor
         | TensorHalf value ->
             let dims = value.Dimensions.ToArray()
-            if dims.Length = 3 && dims[0] = 1 then TensorHalf(DenseTensor<Half>(value.ToArray(), [| dims[1]; dims[2] |])) else tensor
+
+            if dims.Length = 3 && dims[0] = 1 then
+                TensorHalf(DenseTensor<Half>(value.ToArray(), [| dims[1]; dims[2] |]))
+            else
+                tensor
         | TensorOrtFloat16 value ->
             let dims = value.Dimensions.ToArray()
-            if dims.Length = 3 && dims[0] = 1 then TensorOrtFloat16(DenseTensor<Float16>(Memory<Float16>(value.ToArray()), ReadOnlySpan<int>([| dims[1]; dims[2] |]), false)) else tensor
+
+            if dims.Length = 3 && dims[0] = 1 then
+                TensorOrtFloat16(
+                    DenseTensor<Float16>(
+                        Memory<Float16>(value.ToArray()),
+                        ReadOnlySpan<int>([| dims[1]; dims[2] |]),
+                        false
+                    )
+                )
+            else
+                tensor
 
     let createAudioFeatureValue name (metadata: NodeMetadata) (features: GemmaAudioFeatures) =
         let dims = features.InputFeatures.Dimensions.ToArray()
@@ -442,10 +537,18 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             NamedOnnxValue.CreateFromTensor(name, DenseTensor<float32>(values, dims))
         elif metadata.ElementType = typeof<Half> then
             let converted = values |> Array.map Half.op_Explicit
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Half>(Memory<Half>(converted), ReadOnlySpan<int>(dims), false))
+
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Half>(Memory<Half>(converted), ReadOnlySpan<int>(dims), false)
+            )
         elif metadata.ElementType = typeof<Float16> then
             let converted = values |> Array.map toFloat16
-            NamedOnnxValue.CreateFromTensor(name, DenseTensor<Float16>(Memory<Float16>(converted), ReadOnlySpan<int>(dims), false))
+
+            NamedOnnxValue.CreateFromTensor(
+                name,
+                DenseTensor<Float16>(Memory<Float16>(converted), ReadOnlySpan<int>(dims), false)
+            )
         else
             invalidOp $"Unsupported Gemma audio feature tensor type {metadata.ElementType} for {name}."
 
@@ -456,14 +559,20 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             let inputSet = HashSet<string>(inputNames session, StringComparer.Ordinal)
 
             let featureName =
-                if inputSet.Contains("input_features") then "input_features"
-                elif inputSet.Contains("audio_embeds") then "audio_embeds"
-                else invalidOp "Gemma audio_encoder has no supported feature input."
+                if inputSet.Contains("input_features") then
+                    "input_features"
+                elif inputSet.Contains("audio_embeds") then
+                    "audio_embeds"
+                else
+                    invalidOp "Gemma audio_encoder has no supported feature input."
 
             let maskName =
-                if inputSet.Contains("input_features_mask") then "input_features_mask"
-                elif inputSet.Contains("attention_mask") then "attention_mask"
-                else invalidOp "Gemma audio_encoder has no supported mask input."
+                if inputSet.Contains("input_features_mask") then
+                    "input_features_mask"
+                elif inputSet.Contains("attention_mask") then
+                    "attention_mask"
+                else
+                    invalidOp "Gemma audio_encoder has no supported mask input."
 
             use results =
                 [ createAudioFeatureValue featureName session.InputMetadata[featureName] features
@@ -473,10 +582,16 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             let outputName = outputNameOrDefault session "audio_features" "audio_features"
             results |> Seq.find (fun value -> value.Name = outputName) |> cloneOrtTensor
 
-    let runEmbed (sessions: GemmaOnnxLoadedSessions) (inputIds: DenseTensor<int64>) (audioFeatures: GemmaOrtTensor option) =
+    let runEmbed
+        (sessions: GemmaOnnxLoadedSessions)
+        (inputIds: DenseTensor<int64>)
+        (audioFeatures: GemmaOrtTensor option)
+        =
         let feeds = ResizeArray<NamedOnnxValue>()
         feeds.Add(NamedOnnxValue.CreateFromTensor("input_ids", inputIds))
-        let inputSet = HashSet<string>(inputNames sessions.EmbedTokens, StringComparer.Ordinal)
+
+        let inputSet =
+            HashSet<string>(inputNames sessions.EmbedTokens, StringComparer.Ordinal)
 
         if inputSet.Contains("image_features") then
             feeds.Add(createEmptyFeatureInput "image_features" sessions.EmbedTokens.InputMetadata["image_features"])
@@ -484,11 +599,16 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
         if inputSet.Contains("audio_features") then
             match audioFeatures with
             | Some tensor -> feeds.Add(tensorToInput "audio_features" (squeezeBatch tensor))
-            | None -> feeds.Add(createEmptyFeatureInput "audio_features" sessions.EmbedTokens.InputMetadata["audio_features"])
+            | None ->
+                feeds.Add(createEmptyFeatureInput "audio_features" sessions.EmbedTokens.InputMetadata["audio_features"])
 
         use results = sessions.EmbedTokens.Run(feeds)
-        let inputsEmbedsName = outputNameOrDefault sessions.EmbedTokens "inputs_embeds" "inputs_embeds"
-        let perLayerName = outputNameOrDefault sessions.EmbedTokens "per_layer_inputs" "per_layer_inputs"
+
+        let inputsEmbedsName =
+            outputNameOrDefault sessions.EmbedTokens "inputs_embeds" "inputs_embeds"
+
+        let perLayerName =
+            outputNameOrDefault sessions.EmbedTokens "per_layer_inputs" "per_layer_inputs"
 
         let inputsEmbeds =
             results
@@ -502,8 +622,13 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
 
         inputsEmbeds, perLayerInputs
 
-    let mergeAudioFeatures (inputIds: DenseTensor<int64>) (audioFeatures: DenseTensor<float32>) (embeds: DenseTensor<float32>) =
+    let mergeAudioFeatures
+        (inputIds: DenseTensor<int64>)
+        (audioFeatures: DenseTensor<float32>)
+        (embeds: DenseTensor<float32>)
+        =
         let embedDims = embeds.Dimensions.ToArray()
+
         if embedDims.Length <> 3 then
             invalidOp "Gemma inputs_embeds must have shape [batch, sequence, hidden]."
 
@@ -527,7 +652,8 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                 invalidOp $"Unsupported Gemma audio_features shape: {shapeText}"
 
         if featureHidden <> hidden then
-            invalidOp $"Gemma audio feature hidden size {featureHidden} does not match token embedding hidden size {hidden}."
+            invalidOp
+                $"Gemma audio feature hidden size {featureHidden} does not match token embedding hidden size {hidden}."
 
         let mutable featureIndex = 0
         let embedValues = embeds.Buffer.Span
@@ -588,7 +714,12 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
         | _ -> ()
 
         if decoderInputSet.Contains("attention_mask") then
-            feeds.Add(NamedOnnxValue.CreateFromTensor("attention_mask", DenseTensor<int64>(attentionMaskValues, [| 1; attentionMaskValues.Length |])))
+            feeds.Add(
+                NamedOnnxValue.CreateFromTensor(
+                    "attention_mask",
+                    DenseTensor<int64>(attentionMaskValues, [| 1; attentionMaskValues.Length |])
+                )
+            )
 
         if decoderInputSet.Contains("position_ids") then
             let dims = tensorDims inputsEmbeds
@@ -630,7 +761,7 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
 
     interface IGemmaRuntime with
         member _.Status() =
-            let missing = missingFiles()
+            let missing = missingFiles ()
 
             let loadedNames =
                 match loaded with
@@ -639,7 +770,8 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                     [| match sessions.Layout with
                        | MobiusGenAi -> "embedding"
                        | TransformersJs -> "embed_tokens"
-                       if sessions.AudioEncoder.IsSome then "audio_encoder"
+                       if sessions.AudioEncoder.IsSome then
+                           "audio_encoder"
                        match sessions.Layout with
                        | MobiusGenAi -> "decoder"
                        | TransformersJs -> "decoder_model_merged" |]
@@ -663,12 +795,14 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
             task {
                 cancellationToken.ThrowIfCancellationRequested()
                 let stopwatch = Stopwatch.StartNew()
-                let sessions = loadSessions()
+                let sessions = loadSessions ()
                 let prepared = processor.Prepare request
                 let promptMs = stopwatch.Elapsed.TotalMilliseconds
                 let inputIds = prepared.InputIds
                 let mutable attentionMask = prepared.AttentionMask.Buffer.Span.ToArray()
-                let embedInputs = HashSet<string>(inputNames sessions.EmbedTokens, StringComparer.Ordinal)
+
+                let embedInputs =
+                    HashSet<string>(inputNames sessions.EmbedTokens, StringComparer.Ordinal)
 
                 let audioForEmbedding =
                     match prepared.AudioFeatures with
@@ -676,7 +810,9 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                         Some(runAudioEncoder sessions features |> squeezeBatch)
                     | _ -> None
 
-                let initialInputsEmbeds, initialPerLayerInputs = runEmbed sessions inputIds audioForEmbedding
+                let initialInputsEmbeds, initialPerLayerInputs =
+                    runEmbed sessions inputIds audioForEmbedding
+
                 let mutable inputsEmbeds = initialInputsEmbeds
                 let mutable perLayerInputs = initialPerLayerInputs
 
@@ -714,9 +850,7 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                     let logitsName = outputNameOrDefault sessions.Decoder "logits" "logits"
 
                     let logits =
-                        results
-                        |> Seq.find (fun value -> value.Name = logitsName)
-                        |> readFloatTensor
+                        results |> Seq.find (fun value -> value.Name = logitsName) |> readFloatTensor
 
                     let token = sampleNextToken rng request.Temperature request.TopP request.TopK logits
 
@@ -741,8 +875,7 @@ type GemmaOnnxRunner(modelDir: string, variant: string, executionProvider: strin
                       OutputTokenIds = outputIds |> Array.map int
                       StopReason = stopReason
                       TimingsMs =
-                        [ "prepareMs", promptMs
-                          "totalMs", stopwatch.Elapsed.TotalMilliseconds ]
+                        [ "prepareMs", promptMs; "totalMs", stopwatch.Elapsed.TotalMilliseconds ]
                         |> Map.ofList }
             }
 

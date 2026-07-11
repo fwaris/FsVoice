@@ -10,6 +10,81 @@ open Microsoft.ML.OnnxRuntime.Tensors
 open Tokenizers.HuggingFace.Tokenizer
 open TorchSharp
 
+[<RequireQualifiedAccess>]
+module GemmaResponse =
+    [<Literal>]
+    let ThoughtStart = "<|channel>thought"
+
+    [<Literal>]
+    let ThoughtEnd = "<channel|>"
+
+    let private occurrenceCount (token: string) (text: string) =
+        let rec countFrom index count =
+            let found = text.IndexOf(token, index, StringComparison.Ordinal)
+
+            if found < 0 then
+                count
+            else
+                countFrom (found + token.Length) (count + 1)
+
+        countFrom 0 0
+
+    let containsProcessLeakage (text: string) =
+        let text = if Object.ReferenceEquals(text, null) then "" else text
+
+        let contains (value: string) =
+            text.Contains(value, StringComparison.OrdinalIgnoreCase)
+
+        contains "thinking process"
+        || contains "analyze the request"
+        || contains "analyze the retrieved source"
+        || contains "scan the content"
+        || contains "synthesize the answer"
+        || contains "formulate the response"
+        || contains "self-correction/refinement during drafting"
+        || contains "final output generation"
+
+    let parse (text: string) : Result<GemmaParsedResponse, GemmaResponseParseError> =
+        let source =
+            if Object.ReferenceEquals(text, null) then
+                ""
+            else
+                text.Trim()
+
+        if String.IsNullOrWhiteSpace source then
+            Error GemmaResponseParseError.EmptyContent
+        else
+            let startCount = occurrenceCount ThoughtStart source
+            let endCount = occurrenceCount ThoughtEnd source
+
+            match startCount, endCount with
+            | 0, 0 when containsProcessLeakage source -> Error GemmaResponseParseError.UntaggedProcessText
+            | 0, 0 -> Ok { Thought = None; Content = source }
+            | 0, _ -> Error GemmaResponseParseError.UnexpectedThoughtChannelDelimiter
+            | _, 0 -> Error GemmaResponseParseError.UnclosedThoughtChannel
+            | 1, 1 when source.StartsWith(ThoughtStart, StringComparison.Ordinal) ->
+                let endIndex =
+                    source.IndexOf(ThoughtEnd, ThoughtStart.Length, StringComparison.Ordinal)
+
+                if endIndex < ThoughtStart.Length then
+                    Error GemmaResponseParseError.UnexpectedThoughtChannelDelimiter
+                else
+                    let thought =
+                        source.Substring(ThoughtStart.Length, endIndex - ThoughtStart.Length).Trim()
+
+                    let content = source.Substring(endIndex + ThoughtEnd.Length).Trim()
+
+                    if String.IsNullOrWhiteSpace content then
+                        Error GemmaResponseParseError.EmptyContent
+                    elif containsProcessLeakage content then
+                        Error GemmaResponseParseError.UntaggedProcessText
+                    else
+                        Ok
+                            { Thought = thought |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                              Content = content }
+            | 1, 1 -> Error GemmaResponseParseError.UnexpectedThoughtChannelDelimiter
+            | _ -> Error GemmaResponseParseError.RepeatedThoughtChannel
+
 type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
     let modelDir = defaultArg modelDir ""
     let tokenizerPath = Path.Combine(modelDir, "tokenizer.json")
@@ -89,71 +164,86 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
             | _ -> fallback
         | _ -> fallback
 
-    let featurePaths = [| processorConfigPath; audioFeatureConfigPath; genAiConfigPath |]
+    let featurePaths =
+        [| processorConfigPath; audioFeatureConfigPath; genAiConfigPath |]
+
     let modelConfigPaths = [| configPath; genAiConfigPath |]
     let generationConfigPath = Path.Combine(modelDir, "generation_config.json")
 
     let samplingRate =
-        intFrom featurePaths [| "feature_extractor"; "sampling_rate" |]
+        intFrom
+            featurePaths
+            [| "feature_extractor"; "sampling_rate" |]
             (intFrom featurePaths [| "sampling_rate" |] 16000)
 
     let featureSize =
-        intFrom featurePaths [| "feature_extractor"; "feature_size" |]
-            (intFrom featurePaths [| "feature_size" |] 128)
+        intFrom featurePaths [| "feature_extractor"; "feature_size" |] (intFrom featurePaths [| "feature_size" |] 128)
 
     let fftLength =
-        intFrom featurePaths [| "feature_extractor"; "fft_length" |]
-            (intFrom featurePaths [| "fft_length" |] 512)
+        intFrom featurePaths [| "feature_extractor"; "fft_length" |] (intFrom featurePaths [| "fft_length" |] 512)
 
     let frameLength =
-        intFrom featurePaths [| "feature_extractor"; "frame_length" |]
-            (intFrom featurePaths [| "frame_length" |] 320)
+        intFrom featurePaths [| "feature_extractor"; "frame_length" |] (intFrom featurePaths [| "frame_length" |] 320)
 
     let hopLength =
-        intFrom featurePaths [| "feature_extractor"; "hop_length" |]
-            (intFrom featurePaths [| "hop_length" |] 160)
+        intFrom featurePaths [| "feature_extractor"; "hop_length" |] (intFrom featurePaths [| "hop_length" |] 160)
 
     let minFrequency =
-        floatFrom featurePaths [| "feature_extractor"; "min_frequency" |]
+        floatFrom
+            featurePaths
+            [| "feature_extractor"; "min_frequency" |]
             (floatFrom featurePaths [| "min_frequency" |] 0.0)
 
     let maxFrequency =
-        floatFrom featurePaths [| "feature_extractor"; "max_frequency" |]
+        floatFrom
+            featurePaths
+            [| "feature_extractor"; "max_frequency" |]
             (floatFrom featurePaths [| "max_frequency" |] 8000.0)
 
     let melFloor =
-        floatFrom featurePaths [| "feature_extractor"; "mel_floor" |]
-            (floatFrom featurePaths [| "mel_floor" |] 0.001)
+        floatFrom featurePaths [| "feature_extractor"; "mel_floor" |] (floatFrom featurePaths [| "mel_floor" |] 0.001)
 
     let paddingValue =
-        floatFrom featurePaths [| "feature_extractor"; "padding_value" |]
+        floatFrom
+            featurePaths
+            [| "feature_extractor"; "padding_value" |]
             (floatFrom featurePaths [| "padding_value" |] 0.0)
 
     let audioSeqLength =
-        intFrom featurePaths [| "audio_seq_length" |]
-            (intFrom modelConfigPaths [| "model"; "audio_seq_length" |] 750)
+        intFrom featurePaths [| "audio_seq_length" |] (intFrom modelConfigPaths [| "model"; "audio_seq_length" |] 750)
 
     let audioMsPerToken = intFrom featurePaths [| "audio_ms_per_token" |] 40
 
     let audioTokenId =
-        intFrom modelConfigPaths [| "audio_token_id" |]
+        intFrom
+            modelConfigPaths
+            [| "audio_token_id" |]
             (intFrom modelConfigPaths [| "model"; "audio_token_id" |] 258881)
 
     let bosTokenId =
-        intFrom modelConfigPaths [| "text_config"; "bos_token_id" |]
+        intFrom
+            modelConfigPaths
+            [| "text_config"; "bos_token_id" |]
             (intFrom modelConfigPaths [| "model"; "bos_token_id" |] 2)
 
     let eosTokenIds =
-        let configured = arrayIntFrom [| generationConfigPath; genAiConfigPath |] [| "eos_token_id" |] Array.empty
+        let configured =
+            arrayIntFrom [| generationConfigPath; genAiConfigPath |] [| "eos_token_id" |] Array.empty
+
         if configured.Length > 0 then
             configured
         else
             let nested = arrayIntFrom modelConfigPaths [| "model"; "eos_token_id" |] Array.empty
-            if nested.Length > 0 then nested else arrayIntFrom modelConfigPaths [| "eos_token_id" |] [| 1L; 106L; 50L |]
+
+            if nested.Length > 0 then
+                nested
+            else
+                arrayIntFrom modelConfigPaths [| "eos_token_id" |] [| 1L; 106L; 50L |]
 
     let tokenStringFromTokenizerConfig name fallback =
         match tryPropertyAny [| Path.Combine(modelDir, "tokenizer_config.json") |] [| name |] with
-        | Some value when value.ValueKind = JsonValueKind.String -> value.GetString() |> Option.ofObj |> Option.defaultValue fallback
+        | Some value when value.ValueKind = JsonValueKind.String ->
+            value.GetString() |> Option.ofObj |> Option.defaultValue fallback
         | _ -> fallback
 
     let audioToken = tokenStringFromTokenizerConfig "audio_token" "<|audio|>"
@@ -181,8 +271,7 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
             let melMax = hertzToHtkMel maxFrequency
 
             let filterFreqs =
-                linspace melMin melMax (featureSize + 2)
-                |> Array.map htkMelToHertz
+                linspace melMin melMax (featureSize + 2) |> Array.map htkMelToHertz
 
             let fftFreqs = linspace 0.0 (Math.Floor(float samplingRate / 2.0)) numFrequencyBins
             let values = Array.zeroCreate<float32> (featureSize * numFrequencyBins)
@@ -194,32 +283,28 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
                 for freqIndex in 0 .. numFrequencyBins - 1 do
                     let freq = fftFreqs[freqIndex]
-                    let down = if center = left then 0.0 else (freq - left) / (center - left)
-                    let up = if right = center then 0.0 else (right - freq) / (right - center)
+
+                    let down =
+                        if center = left then
+                            0.0
+                        else
+                            (freq - left) / (center - left)
+
+                    let up =
+                        if right = center then
+                            0.0
+                        else
+                            (right - freq) / (right - center)
+
                     values[melIndex * numFrequencyBins + freqIndex] <- float32 (max 0.0 (min down up))
 
             values
 
     let encode (text: string) =
         let encoding =
-            tokenizer.Value.Encode(
-                text,
-                false,
-                null,
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
-                false
-            )
+            tokenizer.Value.Encode(text, false, null, false, false, false, false, false, true, false)
 
-        encoding
-        |> Seq.head
-        |> fun value -> value.Ids
-        |> Seq.map int64
-        |> Seq.toArray
+        encoding |> Seq.head |> (fun value -> value.Ids) |> Seq.map int64 |> Seq.toArray
 
     let decodeByReflection (ids: int64 array) =
         let tok = tokenizer.Value
@@ -230,13 +315,22 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
             |> Array.sortBy (fun method -> method.GetParameters().Length)
 
         let idsForType (targetType: Type) =
-            if targetType = typeof<int64 array> || targetType.IsAssignableFrom(typeof<int64 array>) then
+            if
+                targetType = typeof<int64 array>
+                || targetType.IsAssignableFrom(typeof<int64 array>)
+            then
                 box ids
             elif targetType = typeof<int array> || targetType.IsAssignableFrom(typeof<int array>) then
                 ids |> Array.map int |> box
-            elif targetType = typeof<uint32 array> || targetType.IsAssignableFrom(typeof<uint32 array>) then
+            elif
+                targetType = typeof<uint32 array>
+                || targetType.IsAssignableFrom(typeof<uint32 array>)
+            then
                 ids |> Array.map uint32 |> box
-            elif targetType = typeof<uint64 array> || targetType.IsAssignableFrom(typeof<uint64 array>) then
+            elif
+                targetType = typeof<uint64 array>
+                || targetType.IsAssignableFrom(typeof<uint64 array>)
+            then
                 ids |> Array.map uint64 |> box
             elif targetType.IsAssignableFrom(typeof<IEnumerable<uint32>>) then
                 ids |> Array.map uint32 |> box
@@ -250,7 +344,9 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
                 let args =
                     match parameters.Length with
                     | 1 -> [| idsForType parameters[0].ParameterType |]
-                    | 2 -> [| idsForType parameters[0].ParameterType; box true |]
+                    // Preserve Gemma control tokens so thought/tool channels can be parsed safely.
+                    // Tokenizers.HuggingFace names this argument skipSpecialTokens.
+                    | 2 -> [| idsForType parameters[0].ParameterType; box false |]
                     | _ -> [||]
 
                 if args.Length = parameters.Length then
@@ -308,17 +404,19 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
         | GemmaChatRole.Tool ->
             let name = message.ToolName |> Option.defaultValue "tool"
             $"<|turn>tool\n<|tool_response>response:{name}{{value:{quoteValue message.Content}}}<tool_response|><turn|>\n"
-        | _ ->
-            $"<|turn>{normalizedRole message.Role}\n{escapeText message.Content}<turn|>\n"
+        | _ -> $"<|turn>{normalizedRole message.Role}\n{escapeText message.Content}<turn|>\n"
 
     let computeAudioTokenCount sampleCount =
         let padLeft = frameLength / 2
-        let mutable frames = int (Math.Floor((float (sampleCount + padLeft - frameLength - 1)) / float hopLength)) + 1
+
+        let mutable frames =
+            int (Math.Floor((float (sampleCount + padLeft - frameLength - 1)) / float hopLength))
+            + 1
 
         if frames <= 0 then
             0
         else
-            for _ in 0 .. 1 do
+            for _ in 0..1 do
                 frames <- ((frames - 1) / 2) + 1
 
             min frames audioSeqLength
@@ -332,7 +430,9 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
     let parseToolArguments (body: string) =
         let arguments = Dictionary<string, string>(StringComparer.Ordinal)
-        let pattern = @"(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:<\|""\|>(?<quoted>.*?)<\|""\|>|(?<bare>[^,}]+))"
+
+        let pattern =
+            @"(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:<\|""\|>(?<quoted>.*?)<\|""\|>|(?<bare>[^,}]+))"
 
         for item in Regex.Matches(body, pattern, RegexOptions.Singleline) do
             let name = item.Groups["name"].Value
@@ -366,12 +466,21 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
     member _.ComputeAudioTokenCount(sampleCount: int) = computeAudioTokenCount sampleCount
 
-    member _.RenderChat(messages: GemmaChatMessage array, tools: GemmaToolDeclaration array, addGenerationPrompt: bool, ?audio: float32 array) =
+    member _.RenderChat
+        (
+            messages: GemmaChatMessage array,
+            tools: GemmaToolDeclaration array,
+            addGenerationPrompt: bool,
+            ?audio: float32 array
+        ) =
         let builder = StringBuilder()
         builder.Append(bosToken) |> ignore
 
-        let systemMessages = messages |> Array.filter (fun message -> message.Role = GemmaChatRole.System)
-        let nonSystemMessages = messages |> Array.filter (fun message -> message.Role <> GemmaChatRole.System)
+        let systemMessages =
+            messages |> Array.filter (fun message -> message.Role = GemmaChatRole.System)
+
+        let nonSystemMessages =
+            messages |> Array.filter (fun message -> message.Role <> GemmaChatRole.System)
 
         if systemMessages.Length > 0 || tools.Length > 0 then
             builder.Append("<|turn>system\n") |> ignore
@@ -385,8 +494,11 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
                 |> ignore
 
             if tools.Length > 0 then
-                if systemMessages.Length > 0 then builder.Append("\n\n") |> ignore
-                tools |> Array.iter (fun tool -> builder.Append(renderToolDeclaration tool).Append("\n") |> ignore)
+                if systemMessages.Length > 0 then
+                    builder.Append("\n\n") |> ignore
+
+                tools
+                |> Array.iter (fun tool -> builder.Append(renderToolDeclaration tool).Append("\n") |> ignore)
 
             builder.Append("<turn|>\n") |> ignore
 
@@ -399,9 +511,14 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
         expandAudioToken (builder.ToString()) audio
 
     member this.Prepare(request: GemmaGenerationRequest) =
-        let prompt = this.RenderChat(request.Messages, request.Tools, request.AddGenerationPrompt, ?audio = request.Audio16k)
+        let prompt =
+            this.RenderChat(request.Messages, request.Tools, request.AddGenerationPrompt, ?audio = request.Audio16k)
+
         let ids = encode prompt
-        if ids.Length = 0 then invalidArg (nameof request) "Gemma prompt produced no tokenizer ids."
+
+        if ids.Length = 0 then
+            invalidArg (nameof request) "Gemma prompt produced no tokenizer ids."
+
         let inputIds = DenseTensor<int64>(ids, [| 1; ids.Length |])
         let mask = DenseTensor<int64>(Array.create ids.Length 1L, [| 1; ids.Length |])
         let audioFeatures = request.Audio16k |> Option.map this.ExtractAudioFeatures
@@ -430,7 +547,11 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
         let paddedLength =
             let remainder = original.Length % padToMultiple
-            if remainder = 0 then original.Length else original.Length + (padToMultiple - remainder)
+
+            if remainder = 0 then
+                original.Length
+            else
+                original.Length + (padToMultiple - remainder)
 
         let paddedAudio = Array.zeroCreate<float32> paddedLength
         Array.Copy(original, paddedAudio, original.Length)
@@ -442,8 +563,16 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
         let padLeft = frameLength / 2
         let semicausal = Array.zeroCreate<float32> (paddedAudio.Length + padLeft)
         Array.Copy(paddedAudio, 0, semicausal, padLeft, paddedAudio.Length)
-        let numFrames = max 0 (int (Math.Floor(float (semicausal.Length - frameLength) / float hopLength)) + 1)
-        let frameCountForMask = max 0 (int (Math.Floor(float (paddedAudio.Length + padLeft - (frameLength + 1)) / float hopLength)) + 1)
+
+        let numFrames =
+            max 0 (int (Math.Floor(float (semicausal.Length - frameLength) / float hopLength)) + 1)
+
+        let frameCountForMask =
+            max
+                0
+                (int (Math.Floor(float (paddedAudio.Length + padLeft - (frameLength + 1)) / float hopLength))
+                 + 1)
+
         let featureValues = Array.zeroCreate<float32> (max 0 numFrames * featureSize)
         let maskValues = Array.zeroCreate<bool> (max 0 numFrames)
 
@@ -451,16 +580,16 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
             let numFrequencyBins = fftLength / 2 + 1
 
             use waveform =
-                torch.tensor(
+                torch.tensor (
                     semicausal,
                     ReadOnlySpan<int64>([| int64 semicausal.Length |]),
                     dtype = Nullable(torch.float32)
                 )
 
-            use window = torch.hann_window(int64 frameLength, dtype = Nullable(torch.float32))
+            use window = torch.hann_window (int64 frameLength, dtype = Nullable(torch.float32))
 
             use stft =
-                torch.stft(
+                torch.stft (
                     waveform,
                     int64 fftLength,
                     hop_length = int64 hopLength,
@@ -472,17 +601,17 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
                     return_complex = true
                 )
 
-            use magnitude = stft.abs()
+            use magnitude = stft.abs ()
 
             use melFilters =
                 torch
                     .tensor(melFilterBank.Value, dtype = Nullable(torch.float32))
-                    .reshape([| int64 featureSize; int64 numFrequencyBins |])
+                    .reshape ([| int64 featureSize; int64 numFrequencyBins |])
 
-            use melSpectrum = torch.matmul(melFilters, magnitude)
-            use logMel = (melSpectrum + float32 melFloor).log()
-            use transposed = logMel.transpose(0L, 1L).contiguous()
-            let active = transposed.data<float32>()
+            use melSpectrum = torch.matmul (melFilters, magnitude)
+            use logMel = (melSpectrum + float32 melFloor).log ()
+            use transposed = logMel.transpose(0L, 1L).contiguous ()
+            let active = transposed.data<float32> ()
             active.CopyTo(featureValues.AsSpan(0, featureValues.Length), 0, 0L)
 
             let sampleMask = Array.zeroCreate<byte> (original.Length + padLeft + padToMultiple)
@@ -495,7 +624,12 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
             for frameIndex in 0 .. validFrameCount - 1 do
                 let sampleIndex = frameIndex * hopLength + frameSizeForUnfold - 1
-                let valid = sampleIndex >= 0 && sampleIndex < sampleMask.Length && sampleMask[sampleIndex] <> 0uy
+
+                let valid =
+                    sampleIndex >= 0
+                    && sampleIndex < sampleMask.Length
+                    && sampleMask[sampleIndex] <> 0uy
+
                 maskValues[frameIndex] <- valid
 
                 if not valid then

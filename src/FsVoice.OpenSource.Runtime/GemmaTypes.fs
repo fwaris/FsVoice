@@ -84,6 +84,18 @@ type GemmaGenerationResult =
       StopReason: string
       TimingsMs: Map<string, float> }
 
+type GemmaParsedResponse =
+    { Thought: string option
+      Content: string }
+
+[<RequireQualifiedAccess>]
+type GemmaResponseParseError =
+    | EmptyContent
+    | UnclosedThoughtChannel
+    | UnexpectedThoughtChannelDelimiter
+    | RepeatedThoughtChannel
+    | UntaggedProcessText
+
 type GemmaRuntimeStatus =
     { Ready: bool
       ModelDir: string
@@ -97,5 +109,4 @@ type IGemmaRuntime =
     abstract Status: unit -> GemmaRuntimeStatus
 
     abstract GenerateAsync:
-        request: GemmaGenerationRequest *
-        cancellationToken: CancellationToken -> Task<GemmaGenerationResult>
+        request: GemmaGenerationRequest * cancellationToken: CancellationToken -> Task<GemmaGenerationResult>

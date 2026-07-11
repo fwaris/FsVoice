@@ -7,6 +7,8 @@ open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Configuration
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
 open FsVoice.OpenSource
 
 module OpenSourceVoiceWebApp =
@@ -91,7 +93,16 @@ module OpenSourceVoiceWebApp =
     let session = null;
     let pc = null;
     let dc = null;
+    let ws = null;
     let localStream = null;
+    let audioContext = null;
+    let captureNode = null;
+    let recording = false;
+    let transport = null;
+    let fallbackStarted = false;
+    let playbackTime = 0;
+    const preferWebSocket = new URLSearchParams(location.search).get('transport') === 'websocket';
+    const playbackSources = new Set();
 
     function setGeneratedAudioUrl(url) {
       const cacheSafeUrl = `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
@@ -118,6 +129,69 @@ module OpenSourceVoiceWebApp =
       if (payload.type === 'error') message.textContent = payload.message;
     }
 
+    function stopPlayback() {
+      for (const source of playbackSources) {
+        try { source.stop(); } catch (_) {}
+      }
+      playbackSources.clear();
+      playbackTime = audioContext ? audioContext.currentTime : 0;
+    }
+
+    function playPcmPacket(buffer) {
+      if (!audioContext || buffer.byteLength < 12) return;
+      const header = new Uint8Array(buffer, 0, 4);
+      if (header[0] !== 70 || header[1] !== 83 || header[2] !== 65 || header[3] !== 49) return;
+      const view = new DataView(buffer);
+      const sampleRate = view.getInt32(4, true);
+      const samples = new Float32Array(buffer, 12);
+      const audioBuffer = audioContext.createBuffer(1, samples.length, sampleRate);
+      audioBuffer.copyToChannel(samples, 0);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+      playbackTime = Math.max(playbackTime, audioContext.currentTime + 0.03);
+      source.start(playbackTime);
+      playbackTime += audioBuffer.duration;
+      playbackSources.add(source);
+      source.onended = () => playbackSources.delete(source);
+    }
+
+    function sendControl(payload) {
+      const json = JSON.stringify(payload);
+      if (transport === 'webrtc' && dc?.readyState === 'open') dc.send(json);
+      else if (transport === 'websocket' && ws?.readyState === WebSocket.OPEN) ws.send(json);
+    }
+
+    async function setupWebSocketCapture() {
+      audioContext ||= new AudioContext();
+      await audioContext.resume();
+      if (captureNode) return;
+      const workletSource = `
+        class FsVoiceCapture extends AudioWorkletProcessor {
+          process(inputs) {
+            const channel = inputs[0] && inputs[0][0];
+            if (channel) {
+              const copy = channel.slice();
+              this.port.postMessage(copy.buffer, [copy.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor('fsvoice-capture', FsVoiceCapture);`;
+      const moduleUrl = URL.createObjectURL(new Blob([workletSource], { type: 'text/javascript' }));
+      try { await audioContext.audioWorklet.addModule(moduleUrl); }
+      finally { URL.revokeObjectURL(moduleUrl); }
+      const source = audioContext.createMediaStreamSource(localStream);
+      captureNode = new AudioWorkletNode(audioContext, 'fsvoice-capture');
+      const silent = audioContext.createGain();
+      silent.gain.value = 0;
+      source.connect(captureNode).connect(silent).connect(audioContext.destination);
+      captureNode.port.onmessage = event => {
+        if (recording && ws?.readyState === WebSocket.OPEN) ws.send(event.data);
+      };
+      sendControl({ type: 'audio.config', sampleRate: audioContext.sampleRate, format: 'float32le', channels: 1 });
+    }
+
     async function createSession() {
       const response = await fetch('/api/open-source/sessions', {
         method: 'POST',
@@ -142,21 +216,44 @@ module OpenSourceVoiceWebApp =
       });
     }
 
-    async function connect() {
-      connectButton.disabled = true;
-      message.textContent = 'Connecting...';
-      session = await createSession();
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    async function connectWebSocket(reason) {
+      if (fallbackStarted) return;
+      fallbackStarted = true;
+      try { dc?.close(); } catch (_) {}
+      try { pc?.close(); } catch (_) {}
+      dc = null;
+      pc = null;
+      message.textContent = `${reason} Using WebSocket fallback...`;
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${scheme}://${location.host}/api/open-source/sessions/${session.id}/ws`);
+      ws.binaryType = 'arraybuffer';
+      ws.onmessage = event => {
+        if (typeof event.data === 'string') logEvent(JSON.parse(event.data));
+        else playPcmPacket(event.data);
+      };
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timed out opening WebSocket fallback.')), 10000);
+        ws.onopen = () => { clearTimeout(timer); resolve(); };
+        ws.onerror = () => { clearTimeout(timer); reject(new Error('WebSocket fallback failed to connect.')); };
+      });
+      transport = 'websocket';
+      await setupWebSocketCapture();
+      message.textContent = 'Connected over WebSocket. Press Start Turn, speak, then End Turn.';
+      startButton.disabled = false;
+      cancelButton.disabled = false;
+    }
+
+    async function connectWebRtc() {
       pc = new RTCPeerConnection();
       pc.oniceconnectionstatechange = () => {
         message.textContent = `ICE: ${pc.iceConnectionState}`;
         if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-          message.textContent = 'WebRTC ICE failed. If this page is port-forwarded, forward the configured UDP ICE ports too, or use a TURN/TCP fallback.';
+          connectWebSocket('WebRTC ICE failed.').catch(error => message.textContent = error.message);
         }
       };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === 'failed') {
-          message.textContent = 'WebRTC connection failed before the data channel opened.';
+          connectWebSocket('WebRTC connection failed.').catch(error => message.textContent = error.message);
         }
       };
       pc.onicecandidateerror = event => {
@@ -169,6 +266,7 @@ module OpenSourceVoiceWebApp =
       for (const track of localStream.getAudioTracks()) pc.addTrack(track, localStream);
       dc = pc.createDataChannel('fsvoice-events');
       dc.onopen = () => {
+        transport = 'webrtc';
         message.textContent = 'Connected. Press Start Turn, speak, then End Turn.';
         startButton.disabled = false;
         cancelButton.disabled = false;
@@ -202,6 +300,22 @@ module OpenSourceVoiceWebApp =
       });
     }
 
+    async function connect() {
+      connectButton.disabled = true;
+      message.textContent = 'Connecting...';
+      session = await createSession();
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (preferWebSocket) {
+        await connectWebSocket('WebSocket transport requested.');
+        return;
+      }
+      try {
+        await connectWebRtc();
+      } catch (error) {
+        await connectWebSocket(`WebRTC unavailable: ${error.message}`);
+      }
+    }
+
     connectButton.onclick = () => connect().catch(error => {
       message.textContent = error.message;
       connectButton.disabled = false;
@@ -209,19 +323,24 @@ module OpenSourceVoiceWebApp =
     startButton.onclick = () => {
       transcript.textContent = '';
       answer.textContent = '';
-      dc.send(JSON.stringify({ type: 'turn.start' }));
+      stopPlayback();
+      sendControl({ type: 'turn.start' });
+      recording = transport === 'websocket';
       startButton.disabled = true;
       endButton.disabled = false;
       message.textContent = 'Listening...';
     };
     endButton.onclick = () => {
-      dc.send(JSON.stringify({ type: 'turn.end' }));
+      recording = false;
+      sendControl({ type: 'turn.end' });
       endButton.disabled = true;
       startButton.disabled = false;
       message.textContent = 'Thinking...';
     };
     cancelButton.onclick = () => {
-      dc.send(JSON.stringify({ type: 'turn.cancel' }));
+      recording = false;
+      stopPlayback();
+      sendControl({ type: 'turn.cancel' });
       endButton.disabled = true;
       startButton.disabled = false;
     };
@@ -322,6 +441,19 @@ module OpenSourceVoiceWebApp =
                     | ex -> do! writeJson ctx 500 (error 500 ex.Message)
         }
 
+    let private acceptWebSocket (agent: IVoiceAgentRuntime) (ctx: HttpContext) =
+        task {
+            let sessionId = routeValue ctx "id"
+            if not (safeId sessionId) then
+                do! writeJson ctx 400 (error 400 "Invalid session id.")
+            else
+                match agent.TryGetSession sessionId with
+                | None -> do! writeJson ctx 404 (error 404 "Open-source voice session was not found.")
+                | Some session ->
+                    let logger = ctx.RequestServices.GetRequiredService<ILogger<OpenSourceVoiceWebSocketSession>>()
+                    do! OpenSourceVoiceWebSocket.acceptAsync agent logger ctx session
+        }
+
     let private deleteSession (webRtcStore: OpenSourceVoiceWebRtcSessionStore) (ctx: HttpContext) =
         task {
             let sessionId = routeValue ctx "id"
@@ -354,11 +486,13 @@ module OpenSourceVoiceWebApp =
         }
 
     let map (app: WebApplication) (agent: IVoiceAgentRuntime) (webRtcStore: OpenSourceVoiceWebRtcSessionStore) =
+        app.UseWebSockets() |> ignore
         app.MapGet("/", RequestDelegate(fun ctx -> task { do! writeText ctx "text/html; charset=utf-8" indexHtml })) |> ignore
         app.MapGet("/healthz", RequestDelegate(fun ctx -> writeJson ctx 200 {| ok = true |})) |> ignore
         app.MapGet("/api/status", RequestDelegate(fun ctx -> writeJson ctx 200 (statusPayload agent))) |> ignore
         app.MapPost("/api/open-source/sessions", RequestDelegate(fun ctx -> createSession agent ctx)) |> ignore
         app.MapPost("/api/open-source/sessions/{id}/webrtc/offer", RequestDelegate(fun ctx -> acceptOffer agent webRtcStore ctx)) |> ignore
+        app.MapGet("/api/open-source/sessions/{id}/ws", RequestDelegate(fun ctx -> acceptWebSocket agent ctx)) |> ignore
         app.MapDelete("/api/open-source/sessions/{id}", RequestDelegate(fun ctx -> deleteSession webRtcStore ctx)) |> ignore
         app.MapMethods("/api/open-source/sessions/{id}/turns/{turnIndex}/details.json", [| "GET"; "HEAD" |], RequestDelegate(fun ctx -> serveTurnArtifact agent "details.json" ctx)) |> ignore
         app.MapMethods("/api/open-source/sessions/{id}/turns/{turnIndex}/audio.wav", [| "GET"; "HEAD" |], RequestDelegate(fun ctx -> serveTurnArtifact agent "audio.wav" ctx)) |> ignore

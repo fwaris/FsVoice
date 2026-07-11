@@ -160,6 +160,7 @@ type internal QaResponsesAnswerer
         && not (QaResponses.isTokenLimit events)
         && (QaResponses.responseError events |> Option.isNone)
         && not (String.IsNullOrWhiteSpace answer)
+        && not (QaAnswerModel.containsReasoningLeakage answer)
 
     let responsesCreateAndComplete
         turnId
@@ -217,7 +218,7 @@ type internal QaResponsesAnswerer
                 =
                 async {
                     report
-                        $"Answer Responses WebSocket tool loop reached final-answer synthesis boundary; reason={reason}; observations={observations.Length}; sending evidence-only finalizer."
+                        $"Answer Responses WebSocket reached final-answer synthesis boundary; reason={reason}; observations={observations.Length}; sending evidence-only finalizer."
 
                     let finalizerRequest =
                         responseEvidenceFinalizerRequest answerConfig maxOutputTokens prompt observations
@@ -263,16 +264,25 @@ type internal QaResponsesAnswerer
 
             let! initialEvents = runAnswerRequest "initial" previousResponseId "inputItems" input.Length request
 
-            let rec complete remainingToolTurns events observations =
+            let rec complete
+                remainingToolTurns
+                (events: FsResponses.ResponseStreamEvent list)
+                (observations: QaToolObservation list)
+                =
                 async {
                     let calls = QaResponseTools.functionCalls events
 
                     if List.isEmpty calls then
-                        return
-                            events,
-                            FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace,
-                            observations,
-                            true
+                        let answer =
+                            FsResponses.ResponseStream.outputText events |> Text.normalizeWhitespace
+
+                        if QaAnswerModel.containsReasoningLeakage answer then
+                            report
+                                $"Answer Responses WebSocket rejected output_text containing process leakage; reason=reasoning_leakage; answer_chars={answer.Length}; observations={observations.Length}; {QaResponses.diagnostics events}."
+
+                            return! runEvidenceFinalizer "reasoning_leakage" events observations
+                        else
+                            return events, answer, observations, true
                     elif remainingToolTurns <= 0 then
                         report
                             $"Answer Responses WebSocket stopped after reaching the tool-call iteration limit; pendingToolCalls={calls.Length}; {QaResponses.diagnostics events}."
@@ -435,6 +445,7 @@ type internal QaResponsesAnswerer
 
                 let maxOutputTokens =
                     QaAnswerModel.roleMaxTokens options Answer QaDefaults.answerMaxOutputTokens
+
                 let! events, answer, toolObservations, responseChainReusable = answerAttempt maxOutputTokens false
 
                 if QaResponses.isTokenLimit events then

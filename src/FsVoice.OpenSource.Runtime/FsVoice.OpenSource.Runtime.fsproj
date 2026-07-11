@@ -17,6 +17,8 @@
     <Compile Include="GemmaOnnxRunner.fs" />
     <Compile Include="VoiceAgentTypes.fs" />
     <Compile Include="ChatterboxOnnxTtsRuntime.fs" />
+    <Compile Include="PocketTtsOnnxRuntime.fs" />
+    <Compile Include="PocketTtsOnnxV2Runtime.fs" />
     <Compile Include="TtsRuntime.fs" />
     <Compile Include="Tooling.fs" />
     <Compile Include="GemmaVoiceAgentRuntime.fs" />
@@ -31,6 +33,8 @@
     <PackageReference Include="FSharp.Core" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
     <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx" />
     <PackageReference Include="Tokenizers.HuggingFace" />
     <PackageReference Include="TorchSharp" />
     <PackageReference Include="libtorch-cpu" />
