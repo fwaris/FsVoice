@@ -5,21 +5,19 @@
     <RootNamespace>FsVoice.OpenSource</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <PackageId>FsVoice.OpenSource.Runtime</PackageId>
-    <Description>Local open-source Gemma and Chatterbox runtime for FsVoice voice agents.</Description>
+    <Description>Local open-source Gemma and Pocket TTS ONNX runtime for FsVoice voice agents.</Description>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="Options.fs" />
     <Compile Include="Audio.fs" />
     <Compile Include="GemmaTypes.fs" />
+    <Compile Include="OnnxAudioFeatureExtractor.fs" />
     <Compile Include="GemmaProcessor.fs" />
     <Compile Include="GemmaOrtGenAiRunner.fs" />
     <Compile Include="GemmaOnnxRunner.fs" />
     <Compile Include="VoiceAgentTypes.fs" />
-    <Compile Include="ChatterboxOnnxTtsRuntime.fs" />
-    <Compile Include="PocketTtsOnnxRuntime.fs" />
     <Compile Include="PocketTtsOnnxV2Runtime.fs" />
-    <Compile Include="TtsRuntime.fs" />
     <Compile Include="Tooling.fs" />
     <Compile Include="GemmaVoiceAgentRuntime.fs" />
   </ItemGroup>
@@ -34,10 +32,7 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
     <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" />
     <PackageReference Include="Microsoft.ML.Tokenizers" />
-    <PackageReference Include="org.k2fsa.sherpa.onnx" />
     <PackageReference Include="Tokenizers.HuggingFace" />
-    <PackageReference Include="TorchSharp" />
-    <PackageReference Include="libtorch-cpu" />
   </ItemGroup>
 
 </Project>

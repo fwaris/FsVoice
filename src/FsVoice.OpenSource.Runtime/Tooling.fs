@@ -109,7 +109,7 @@ type private GetAgentStatusTool(status: unit -> string) =
         member _.Name = "get_agent_status"
 
         member _.Description =
-            "Return a compact status snapshot for the local Gemma and Chatterbox voice agent runtime."
+            "Return a compact status snapshot for the local Gemma and Pocket TTS voice agent runtime."
 
         member _.Parameters = []
 

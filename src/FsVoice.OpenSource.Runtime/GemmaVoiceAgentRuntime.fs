@@ -264,7 +264,7 @@ type GemmaVoiceAgentRuntime
     let ownedTts =
         match ttsRuntime with
         | Some _ -> None
-        | None -> Some(TtsRuntimeFactory.create options.Tts pathBase)
+        | None -> Some(new PocketTtsOnnxV2Runtime(options.Tts, pathBase) :> ITtsRuntime)
 
     let tts = ttsRuntime |> Option.defaultWith (fun () -> ownedTts.Value)
     let contextProviders = defaultArg contextProviders []
@@ -592,11 +592,7 @@ type GemmaVoiceAgentRuntime
                               OutputDirectory = turnDir
                               OutputFileName = outputFileName
                               VoiceSamplePath = voiceSample
-                              VoiceSampleTranscript =
-                                if String.IsNullOrWhiteSpace options.Tts.VoiceSampleTranscript then
-                                    None
-                                else
-                                    Some options.Tts.VoiceSampleTranscript },
+                              VoiceSampleTranscript = None },
                             (fun samples ->
                                 emit (
                                     TtsAudioChunk(
@@ -624,15 +620,15 @@ type GemmaVoiceAgentRuntime
 
     let normalizeMode mode =
         if String.IsNullOrWhiteSpace mode then
-            "gemma-chatterbox"
+            "gemma-pocket-tts"
         else
             match mode.Trim().ToLowerInvariant() with
-            | "gemma-chatterbox"
-            | "gemma_chatterbox"
             | "open-source"
             | "opensource"
-            | "gemma-tts" -> "gemma-chatterbox"
-            | other -> invalidArg (nameof mode) $"Unsupported open-source voice mode '{other}'. Use gemma-chatterbox."
+            | "gemma-tts"
+            | "gemma-pocket-tts"
+            | "gemma_pocket_tts" -> "gemma-pocket-tts"
+            | other -> invalidArg (nameof mode) $"Unsupported open-source voice mode '{other}'. Use gemma-pocket-tts."
 
     interface IVoiceAgentRuntime with
         member _.MaxTurnAudioSamples24k = maxTurnAudioSamples24k
@@ -644,7 +640,7 @@ type GemmaVoiceAgentRuntime
 
             { Ready = gemmaStatus.Ready && sttStatus.Ready && ttsStatus.Ready
               ServiceName = "FsVoiceOpenSource"
-              Mode = "gemma-chatterbox"
+              Mode = "gemma-pocket-tts"
               WorkDir = resolvedWorkDir
               MaxHistoryTurns = maxHistoryTurns
               MaxTurnAudioSeconds = maxTurnAudioSeconds

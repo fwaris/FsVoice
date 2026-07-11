@@ -150,8 +150,11 @@ if (Test-Path -LiteralPath (Join-Path $paperIndexSource "index-bundle.json") -Pa
 
 Copy-Item -LiteralPath (Join-Path $scriptRoot "run-open-source-voice-a100.ps1") -Destination $runtimeRootFull -Force
 Copy-Item -LiteralPath (Join-Path $scriptRoot "smoke-open-source-voice-a100.ps1") -Destination $runtimeRootFull -Force
-Copy-Item -LiteralPath (Join-Path $scriptRoot "download-pocket-tts-onnx-assets.ps1") -Destination $runtimeRootFull -Force
 Copy-Item -LiteralPath (Join-Path $scriptRoot "download-pocket-tts-onnx-v2-assets.ps1") -Destination $runtimeRootFull -Force
+
+# Symbols are not needed for the A100 test runtime and add substantial transfer size.
+Get-ChildItem -LiteralPath $runtimeRootFull -Recurse -File -Filter "*.pdb" |
+    Remove-Item -Force
 
 foreach ($required in @(
     "FsVoice.OpenSource.Server.exe",
@@ -164,8 +167,6 @@ foreach ($required in @(
     "Microsoft.ML.OnnxRuntime.dll",
     "Microsoft.ML.OnnxRuntimeGenAI.dll",
     "Microsoft.ML.Tokenizers.dll",
-    "sherpa-onnx.dll",
-    "sherpa-onnx-c-api.dll",
     "onnxruntime.dll",
     "onnxruntime-genai.dll",
     "onnxruntime-genai-cuda.dll",
@@ -199,6 +200,21 @@ if ($packagedTtsWeights.Count -gt 0) {
     throw "The A100 service package unexpectedly contains TTS model weights: $($packagedTtsWeights.FullName -join ', ')"
 }
 
+$forbiddenLegacyRuntimeNames = @(
+    "TorchSharp.dll",
+    "LibTorchSharp.dll",
+    "torch_cpu.dll",
+    "sherpa-onnx.dll",
+    "sherpa-onnx-c-api.dll"
+)
+$packagedLegacyRuntimes = @(
+    Get-ChildItem -LiteralPath $runtimeRootFull -Recurse -File |
+    Where-Object { $forbiddenLegacyRuntimeNames -contains $_.Name }
+)
+if ($packagedLegacyRuntimes.Count -gt 0) {
+    throw "The A100 service package unexpectedly contains removed runtime files: $($packagedLegacyRuntimes.FullName -join ', ')"
+}
+
 $readme = @"
 # FsVoice OSS A100 Runtime
 
@@ -213,17 +229,15 @@ The runtime includes:
 - FsVoice OSS server binaries
 - built-in FsColbert query encoder model
 - default paper index bundle for source QA
+- embedded opset-17 ONNX STFT/log-mel audio preprocessing; no TorchSharp/LibTorch
 - direct ONNX Runtime support for the April Pocket TTS voice-conditioning architecture
-- Sherpa ONNX Pocket TTS managed/native Windows x64 runtime
 - SM80/A100 ONNX Runtime CUDA native DLLs copied from:
   `$OrtNativeDir
 - SM80/A100 ORT GenAI native DLLs copied from:
   `$OrtGenAiBuildDir
 
-The runtime intentionally excludes Gemma, Pocket TTS, and Chatterbox model weights.
-Pocket TTS April ONNX v2 is the default because it preserves the newer voice
-conditioning path while avoiding the long full-utterance Chatterbox pass. Stage
-the Gemma and Pocket TTS assets under:
+The runtime intentionally excludes Gemma and Pocket TTS model weights. Pocket
+TTS April ONNX is the only supported speech runtime. Stage the assets under:
 
 `G:\Chroma\VoiceAgent_assets\models\gemma-4-e2b-it-onnx-mobius\Q4_K_M\cuda`
 `G:\Chroma\VoiceAgent_assets\models\pocket-tts-onnx-english-2026-04`
@@ -241,21 +255,6 @@ The downloader pins the tested `KevinAHM/pocket-tts-onnx` revision and downloads
 only the selected language/precision graphs. Model weights remain outside this
 service zip. To test FP32, rerun it with `-Precision fp32`; the two precisions can
 coexist in the same model directory.
-
-The older sherpa-compatible January runtime remains available explicitly with
-`-TtsRuntime pocket-tts-onnx`. Its assets use:
-
-`G:\Chroma\VoiceAgent_assets\models\sherpa-onnx-pocket-tts-int8-2026-01-26`
-
-Download and validate the legacy sherpa model with:
-
-~~~powershell
-.\download-pocket-tts-onnx-assets.ps1 -AssetsRoot G:\Chroma\VoiceAgent_assets
-~~~
-
-Chatterbox also remains available as a fallback and uses:
-
-`G:\Chroma\VoiceAgent_assets\models\chatterbox-onnx`
 
 Tool filler note:
 
@@ -282,8 +281,8 @@ even when the NVIDIA driver reports CUDA 13.2. If needed, pass `-CudaBin` and
 
 The launcher defaults the Gemma audio encoder to CPU because its exported Slice
 graph has failed on A100 CUDA with `cudaErrorNoKernelImageForDevice`. Gemma token
-embedding/decoding remain on CUDA. Both Pocket TTS backends use their optimized
-CPU ONNX path by default, which is intentional even on the A100. Set
+embedding/decoding remain on CUDA. Pocket TTS uses its optimized CPU ONNX path
+by default, which is intentional even on the A100. Set
 `-GemmaAudioEncoderExecutionProvider cuda` only after validating a compatible
 ONNX Runtime provider on the target.
 
@@ -313,7 +312,6 @@ Run:
 ~~~powershell
 .\run-open-source-voice-a100.ps1 `
   -AssetsRoot G:\Chroma\VoiceAgent_assets `
-  -TtsRuntime pocket-tts-onnx-v2 `
   -VoiceSamplePath G:\Chroma\VoiceAgent_assets\voices\default_voice.wav `
   -PocketTtsPrecision int8 `
   -PocketTtsTemperature 0.7 `
@@ -331,7 +329,6 @@ Smoke:
 ~~~powershell
 .\smoke-open-source-voice-a100.ps1 `
   -AssetsRoot G:\Chroma\VoiceAgent_assets `
-  -TtsRuntime pocket-tts-onnx-v2 `
   -PocketTtsPrecision int8 `
   -CudaBin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" `
   -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.23\bin\12.9\x64" `
@@ -363,11 +360,12 @@ $manifest = [pscustomobject]@{
     }
     cudaTarget = "sm_80"
     frameworkDependent = $true
+    includesDebugSymbols = $false
     includesModelWeights = $false
-    includesPocketTtsRuntime = $true
-    pocketTtsRuntimeVersion = "1.13.4"
+    audioPreprocessing = "onnx-stft-logmel-opset17"
+    includesTorchRuntime = $false
     includesPocketTtsOnnxV2Runtime = $true
-    defaultTtsRuntime = "pocket-tts-onnx-v2"
+    ttsRuntime = "pocket-tts-onnx-v2"
     pocketTtsOnnxV2AssetRepo = "KevinAHM/pocket-tts-onnx"
     pocketTtsOnnxV2AssetRevision = "58a6d00cf13d239b6748cb0769f35c580a8f606c"
     pocketTtsOnnxV2DefaultPrecision = "int8"

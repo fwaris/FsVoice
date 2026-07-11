@@ -158,7 +158,6 @@ let private runtimeOptions workDir =
     let options = OpenSourceVoiceOptions()
     options.WorkDir <- workDir
     options.MaxHistoryTurns <- 8
-    options.Tts.Runtime <- "chatterbox-onnx"
     options
 
 [<Fact>]
@@ -238,7 +237,7 @@ let ``Open-source runtime supports two turns and a tool call`` () =
         let session =
             agent.CreateSession(
                 { SystemPrompt = "You are concise."
-                  Mode = "gemma-chatterbox" }
+                  Mode = "gemma-pocket-tts" }
             )
 
         let events = ResizeArray<VoiceAgentStreamingEvent>()
@@ -320,7 +319,7 @@ let ``Structured tool filler rejects tool syntax before events and TTS`` () =
         let session =
             agent.CreateSession(
                 { SystemPrompt = "You are concise."
-                  Mode = "gemma-chatterbox" }
+                  Mode = "gemma-pocket-tts" }
             )
 
         let events = ResizeArray<VoiceAgentStreamingEvent>()
@@ -377,7 +376,7 @@ let ``Open-source runtime synthesizes one filler across multiple tool rounds`` (
         let session =
             agent.CreateSession(
                 { SystemPrompt = "You are concise."
-                  Mode = "gemma-chatterbox" }
+                  Mode = "gemma-pocket-tts" }
             )
 
         let! result =
@@ -444,7 +443,7 @@ let ``Open-source runtime hides thoughts across ASR filler tools and final speec
         let session =
             agent.CreateSession(
                 { SystemPrompt = "You are concise."
-                  Mode = "gemma-chatterbox" }
+                  Mode = "gemma-pocket-tts" }
             )
 
         let run requestId =
@@ -527,7 +526,7 @@ let ``Gemma thought text logging is opt in`` () =
                 let session =
                     agent.CreateSession(
                         { SystemPrompt = "You are concise."
-                          Mode = "gemma-chatterbox" }
+                          Mode = "gemma-pocket-tts" }
                     )
 
                 let! _ =
@@ -572,7 +571,7 @@ let ``Open-source runtime cleans filler and final text before TTS`` () =
         let session =
             agent.CreateSession(
                 { SystemPrompt = "You are concise."
-                  Mode = "gemma-chatterbox" }
+                  Mode = "gemma-pocket-tts" }
             )
 
         let! result =
@@ -625,18 +624,6 @@ let ``Open-source source search reports query and result count`` () =
     }
 
 [<Fact>]
-let ``Chatterbox status reports missing assets without loading models`` () =
-    let options = TtsRuntimeOptions()
-    options.ModelDir <- Path.Combine(Path.GetTempPath(), "missing-chatterbox-assets", Guid.NewGuid().ToString("N"))
-
-    let runtime =
-        new ChatterboxOnnxTtsRuntime(options, Directory.GetCurrentDirectory()) :> ITtsRuntime
-
-    let status = runtime.Status()
-    Assert.False(status.Ready)
-    Assert.NotEmpty(status.MissingFiles)
-
-[<Fact>]
 let ``Pocket TTS v2 reference preprocessing trims only edge silence and keeps padding`` () =
     let sampleRate = 1000
 
@@ -669,38 +656,30 @@ let ``Pocket TTS v2 reference preprocessing resamples to 24 kHz without changing
     Assert.InRange(peak, 0.95f, 1.0f)
 
 [<Fact>]
-let ``Pocket TTS factory status reports streaming and missing assets without loading models`` () =
+let ``Gemma ONNX audio preprocessing produces finite log-mel features`` () =
+    let samples =
+        Array.init 16000 (fun index -> Math.Sin(2.0 * Math.PI * 220.0 * float index / 16000.0) |> float32)
+
+    let features = GemmaProcessor().ExtractAudioFeatures samples
+    let values = features.InputFeatures.Buffer.Span.ToArray()
+
+    Assert.Equal<int>([| 1; 100; 128 |], features.InputFeatures.Dimensions.ToArray())
+    Assert.Equal(100, features.FrameCount)
+    Assert.Equal(99, features.ValidFrameCount)
+    Assert.DoesNotContain(values, fun value -> Single.IsNaN value || Single.IsInfinity value)
+    Assert.Contains(values, fun value -> abs value > 0.001f)
+
+[<Fact>]
+let ``Pocket TTS factory selects the direct ONNX runtime without loading models`` () =
     let options = TtsRuntimeOptions()
-    options.Runtime <- "pocket-tts-onnx"
-    options.ExecutionProvider <- "cpu"
-    options.ModelDir <- Path.Combine(Path.GetTempPath(), "missing-pocket-tts-assets", Guid.NewGuid().ToString("N"))
-    options.VoiceSamplePath <- ""
-
-    use runtime =
-        TtsRuntimeFactory.create options (Directory.GetCurrentDirectory()) :?> IDisposable
-
-    let status = (runtime :?> ITtsRuntime).Status()
-    Assert.Equal("pocket-tts-onnx", status.Runtime)
-    Assert.True(status.SupportsStreaming)
-    Assert.True(status.SupportsVoiceCloning)
-    Assert.False(status.Ready)
-    Assert.NotEmpty(status.MissingFiles)
-
-[<Theory>]
-[<InlineData("pocket-tts-onnx-v2")>]
-[<InlineData("pocket-tts-v2")>]
-let ``Pocket TTS v2 factory aliases select the direct ONNX runtime without loading models`` runtimeName =
-    let options = TtsRuntimeOptions()
-    options.Runtime <- runtimeName
     options.ExecutionProvider <- "cpu"
     options.Precision <- "int8"
     options.ModelDir <- Path.Combine(Path.GetTempPath(), "missing-pocket-tts-v2-assets", Guid.NewGuid().ToString("N"))
     options.VoiceSamplePath <- Path.Combine(Path.GetTempPath(), "missing-pocket-tts-v2-voice.wav")
 
-    use runtime =
-        TtsRuntimeFactory.create options (Directory.GetCurrentDirectory()) :?> IDisposable
+    use runtime = new PocketTtsOnnxV2Runtime(options, Directory.GetCurrentDirectory())
 
-    let status = (runtime :?> ITtsRuntime).Status()
+    let status = (runtime :> ITtsRuntime).Status()
     Assert.Equal("pocket-tts-onnx-v2", status.Runtime)
     Assert.Equal("cpu", status.ExecutionProvider)
     Assert.Equal(24000, status.OutputSampleRate)
@@ -714,16 +693,14 @@ let ``Pocket TTS v2 factory aliases select the direct ONNX runtime without loadi
 [<InlineData("fp32", "flow_lm_main.onnx", "flow_lm_main_int8.onnx")>]
 let ``Pocket TTS v2 status selects precision-specific model assets`` precision requiredMain excludedMain =
     let options = TtsRuntimeOptions()
-    options.Runtime <- "pocket-tts-onnx-v2"
     options.ExecutionProvider <- "cpu"
     options.Precision <- precision
     options.ModelDir <- Path.Combine(Path.GetTempPath(), "missing-pocket-tts-v2-assets", Guid.NewGuid().ToString("N"))
     options.VoiceSamplePath <- Path.Combine(Path.GetTempPath(), "missing-pocket-tts-v2-voice.wav")
 
-    use runtime =
-        TtsRuntimeFactory.create options (Directory.GetCurrentDirectory()) :?> IDisposable
+    use runtime = new PocketTtsOnnxV2Runtime(options, Directory.GetCurrentDirectory())
 
-    let status = (runtime :?> ITtsRuntime).Status()
+    let status = (runtime :> ITtsRuntime).Status()
 
     let missingNames = status.MissingFiles |> Array.map Path.GetFileName |> Set.ofArray
 
@@ -786,14 +763,13 @@ let ``Pocket TTS v2 status resolves a complete nested bundle without loading ONN
         Wave.writeMono16 voicePath 24000 [| 0.0f |]
 
         let options = TtsRuntimeOptions()
-        options.Runtime <- "pocket-tts-onnx-v2"
         options.ExecutionProvider <- "cpu"
         options.Precision <- "int8"
         options.ModelDir <- root
         options.VoiceSamplePath <- voicePath
 
-        use runtime = TtsRuntimeFactory.create options root :?> IDisposable
-        let status = (runtime :?> ITtsRuntime).Status()
+        use runtime = new PocketTtsOnnxV2Runtime(options, root)
+        let status = (runtime :> ITtsRuntime).Status()
         Assert.True(status.Ready, status.Message)
         Assert.Empty(status.MissingFiles)
         Assert.Equal(Path.GetFullPath bundleDir, status.ModelDir)
@@ -816,7 +792,7 @@ type private FakeAgentRuntime() =
     let session =
         { Id = "fake"
           ServiceName = "FsVoiceOpenSource"
-          Mode = "gemma-chatterbox"
+          Mode = "gemma-pocket-tts"
           SystemPrompt = "test"
           WebRtcOfferUrl = "/api/open-source/sessions/fake/webrtc/offer"
           CreatedUtc = DateTimeOffset.UtcNow }
@@ -857,7 +833,7 @@ type private FakeAgentRuntime() =
 
             { Ready = true
               ServiceName = "FsVoiceOpenSource"
-              Mode = "gemma-chatterbox"
+              Mode = "gemma-pocket-tts"
               WorkDir = "fake"
               MaxHistoryTurns = 8
               MaxTurnAudioSeconds = 30
@@ -929,7 +905,7 @@ let ``Open-source web app exposes status and session route`` () =
             client.PostAsJsonAsync(
                 "/api/open-source/sessions",
                 {| systemPrompt = "hello"
-                   mode = "gemma-chatterbox" |}
+                   mode = "gemma-pocket-tts" |}
             )
 
         response.EnsureSuccessStatusCode() |> ignore

@@ -196,7 +196,7 @@ module OpenSourceVoiceWebApp =
       const response = await fetch('/api/open-source/sessions', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ systemPrompt: document.getElementById('systemPrompt').value, mode: 'gemma-chatterbox' })
+        body: JSON.stringify({ systemPrompt: document.getElementById('systemPrompt').value, mode: 'gemma-pocket-tts' })
       });
       if (!response.ok) throw new Error(await response.text());
       return await response.json();

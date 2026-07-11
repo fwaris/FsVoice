@@ -8,7 +8,6 @@ open System.Text.Json
 open System.Text.RegularExpressions
 open Microsoft.ML.OnnxRuntime.Tensors
 open Tokenizers.HuggingFace.Tokenizer
-open TorchSharp
 
 [<RequireQualifiedAccess>]
 module GemmaResponse =
@@ -300,6 +299,30 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
 
             values
 
+    let paddedHannWindow =
+        lazy
+            let values = Array.zeroCreate<float32> fftLength
+            let offset = (fftLength - frameLength) / 2
+
+            for index in 0 .. frameLength - 1 do
+                values[offset + index] <-
+                    float32 (0.5 - 0.5 * Math.Cos(2.0 * Math.PI * float index / float frameLength))
+
+            values
+
+    let transposedMelFilterBank =
+        lazy
+            let frequencyBins = fftLength / 2 + 1
+            let source = melFilterBank.Value
+            let values = Array.zeroCreate<float32> source.Length
+
+            for featureIndex in 0 .. featureSize - 1 do
+                for frequencyIndex in 0 .. frequencyBins - 1 do
+                    values[frequencyIndex * featureSize + featureIndex] <-
+                        source[featureIndex * frequencyBins + frequencyIndex]
+
+            values
+
     let encode (text: string) =
         let encoding =
             tokenizer.Value.Encode(text, false, null, false, false, false, false, false, true, false)
@@ -576,43 +599,21 @@ type GemmaProcessor(?modelDir: string, ?maxAudioSeconds: float) =
         let featureValues = Array.zeroCreate<float32> (max 0 numFrames * featureSize)
         let maskValues = Array.zeroCreate<bool> (max 0 numFrames)
 
-        if numFrames > 0 then
+        if numFrames > 0 && semicausal.Length >= fftLength then
             let numFrequencyBins = fftLength / 2 + 1
 
-            use waveform =
-                torch.tensor (
-                    semicausal,
-                    ReadOnlySpan<int64>([| int64 semicausal.Length |]),
-                    dtype = Nullable(torch.float32)
-                )
+            let active =
+                OnnxAudioFeatureExtractor.extract
+                    semicausal
+                    hopLength
+                    fftLength
+                    paddedHannWindow.Value
+                    transposedMelFilterBank.Value
+                    numFrequencyBins
+                    featureSize
+                    (float32 melFloor)
 
-            use window = torch.hann_window (int64 frameLength, dtype = Nullable(torch.float32))
-
-            use stft =
-                torch.stft (
-                    waveform,
-                    int64 fftLength,
-                    hop_length = int64 hopLength,
-                    win_length = int64 frameLength,
-                    window = window,
-                    center = false,
-                    normalized = false,
-                    onesided = true,
-                    return_complex = true
-                )
-
-            use magnitude = stft.abs ()
-
-            use melFilters =
-                torch
-                    .tensor(melFilterBank.Value, dtype = Nullable(torch.float32))
-                    .reshape ([| int64 featureSize; int64 numFrequencyBins |])
-
-            use melSpectrum = torch.matmul (melFilters, magnitude)
-            use logMel = (melSpectrum + float32 melFloor).log ()
-            use transposed = logMel.transpose(0L, 1L).contiguous ()
-            let active = transposed.data<float32> ()
-            active.CopyTo(featureValues.AsSpan(0, featureValues.Length), 0, 0L)
+            Array.Copy(active, featureValues, min active.Length featureValues.Length)
 
             let sampleMask = Array.zeroCreate<byte> (original.Length + padLeft + padToMultiple)
 
