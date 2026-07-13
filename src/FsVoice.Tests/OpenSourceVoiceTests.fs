@@ -23,7 +23,8 @@ type private FakeGemmaRuntime
         ?toolCallsBeforeAnswer: int,
         ?finalText: string,
         ?wrapThoughts: bool,
-        ?requests: ResizeArray<GemmaGenerationRequest>
+        ?requests: ResizeArray<GemmaGenerationRequest>,
+        ?transcript: string
     ) =
     let mutable toolCallsEmitted = 0
     let fillerText = defaultArg fillerText "Let me check the current time."
@@ -33,6 +34,7 @@ type private FakeGemmaRuntime
         defaultArg finalText "The current time is available from the tool result."
 
     let wrapThoughts = defaultArg wrapThoughts false
+    let transcript = defaultArg transcript "What time is it?"
 
     let response content =
         if wrapThoughts then
@@ -64,7 +66,7 @@ type private FakeGemmaRuntime
 
             let text =
                 if request.Audio16k.IsSome then
-                    response "What time is it?"
+                    response transcript
                 elif
                     request.Tools.Length = 0
                     && request.Messages
@@ -158,7 +160,145 @@ let private runtimeOptions workDir =
     let options = OpenSourceVoiceOptions()
     options.WorkDir <- workDir
     options.MaxHistoryTurns <- 8
+    options.Gemma.AdaptiveReasoning <- false
+    options.Gemma.EnableDeterministicToolRouting <- false
     options
+
+[<Theory>]
+[<InlineData("Hello", "fast", 96, false)>]
+[<InlineData("What is 2 + 2?", "fast", 96, false)>]
+[<InlineData("Summarize the release notes", "balanced", 384, true)>]
+[<InlineData("What time will it be 47 minutes after 3:48 PM?", "deep", 512, true)>]
+[<InlineData("Mira has twice as many books as Jo. Jo has 7 fewer than 19. How many books does Mira have?",
+             "deep",
+             512,
+             true)>]
+let ``Adaptive reasoning assigns conservative token budgets`` transcript expectedDepth expectedTokens expectedThinking =
+    let options = GemmaRuntimeOptions()
+    let decision = ReasoningPolicy.decide options transcript
+
+    Assert.Equal(expectedDepth, ReasoningDepth.name decision.Depth)
+    Assert.Equal(expectedTokens, decision.MaxNewTokens)
+    Assert.Equal(expectedThinking, decision.EnableThinking)
+
+[<Theory>]
+[<InlineData("What time is it?", "get_current_time")>]
+[<InlineData("Show the runtime status", "get_agent_status")>]
+[<InlineData("What files are loaded?", "source_inventory")>]
+[<InlineData("According to the study, what was the primary outcome?", "selected_source_search")>]
+let ``Deterministic routing recognizes unambiguous tool requests`` transcript expectedTool =
+    let route = ReasoningPolicy.tryPreRoute transcript
+    Assert.True(route.IsSome)
+    Assert.Equal(expectedTool, route.Value.Name)
+
+[<Fact>]
+let ``Deterministic routing avoids the model tool-selection round`` () =
+    task {
+        let workDir =
+            Path.Combine(Path.GetTempPath(), "fsvoice-open-source-tests", Guid.NewGuid().ToString("N"))
+
+        let gemmaRequests = ResizeArray<GemmaGenerationRequest>()
+        let options = runtimeOptions workDir
+        options.Gemma.AdaptiveReasoning <- true
+        options.Gemma.EnableDeterministicToolRouting <- true
+
+        use runtime =
+            new GemmaVoiceAgentRuntime(
+                options,
+                FakeGemmaRuntime(toolCallsBeforeAnswer = 0, requests = gemmaRequests),
+                ttsRuntime = FakeTtsRuntime()
+            )
+
+        let agent = runtime :> IVoiceAgentRuntime
+
+        let session =
+            agent.CreateSession(
+                { SystemPrompt = "You are concise."
+                  Mode = "gemma-pocket-tts" }
+            )
+
+        let! result =
+            agent.RunTurnAsync(
+                { SessionId = session.Id
+                  UserAudio24k = Array.create 2400 0.02f
+                  RequestId = Some "pre-routed-time" },
+                (fun _ -> Task.CompletedTask),
+                CancellationToken.None
+            )
+
+        let reasoningRequests =
+            gemmaRequests
+            |> Seq.filter (fun request -> request.Tools.Length > 0)
+            |> Seq.toArray
+
+        Assert.Single(reasoningRequests) |> ignore
+        Assert.Equal(96, reasoningRequests[0].MaxNewTokens)
+
+        let systemPrompt =
+            reasoningRequests[0].Messages
+            |> Array.find (fun message -> message.Role = GemmaChatRole.System)
+            |> _.Content
+
+        Assert.False(systemPrompt.StartsWith("<|think|>", StringComparison.Ordinal))
+
+        Assert.Equal("fast", result.Details.GetProperty("reasoningPolicy").GetProperty("depth").GetString())
+        Assert.Equal(1, result.Details.GetProperty("reasoningRounds").GetArrayLength())
+        let firstToolExecution = result.Details.GetProperty("toolExecutions")[0]
+        Assert.True(firstToolExecution.GetProperty("preRouted").GetBoolean())
+        Assert.Equal("get_current_time", result.ToolCalls[0].Name)
+    }
+
+[<Fact>]
+let ``Balanced reasoning applies the tested concise prompt and budget`` () =
+    task {
+        let workDir =
+            Path.Combine(Path.GetTempPath(), "fsvoice-open-source-tests", Guid.NewGuid().ToString("N"))
+
+        let gemmaRequests = ResizeArray<GemmaGenerationRequest>()
+        let options = runtimeOptions workDir
+        options.Gemma.AdaptiveReasoning <- true
+
+        use runtime =
+            new GemmaVoiceAgentRuntime(
+                options,
+                FakeGemmaRuntime(
+                    toolCallsBeforeAnswer = 0,
+                    requests = gemmaRequests,
+                    transcript = "Summarize the release notes"
+                ),
+                ttsRuntime = FakeTtsRuntime()
+            )
+
+        let agent = runtime :> IVoiceAgentRuntime
+
+        let session =
+            agent.CreateSession(
+                { SystemPrompt = "You are concise."
+                  Mode = "gemma-pocket-tts" }
+            )
+
+        let! result =
+            agent.RunTurnAsync(
+                { SessionId = session.Id
+                  UserAudio24k = Array.create 2400 0.02f
+                  RequestId = Some "balanced-reasoning" },
+                (fun _ -> Task.CompletedTask),
+                CancellationToken.None
+            )
+
+        let reasoningRequest =
+            gemmaRequests |> Seq.find (fun request -> request.Tools.Length > 0)
+
+        let systemPrompt =
+            reasoningRequest.Messages
+            |> Array.find (fun message -> message.Role = GemmaChatRole.System)
+            |> _.Content
+
+        Assert.Equal(384, reasoningRequest.MaxNewTokens)
+        Assert.StartsWith("<|think|>", systemPrompt)
+        Assert.Contains(ReasoningPolicy.balancedGuidance, systemPrompt)
+        Assert.Equal("balanced", result.Details.GetProperty("reasoningPolicy").GetProperty("depth").GetString())
+    }
 
 [<Fact>]
 let ``Gemma processor renders tool declarations and parses tool calls`` () =

@@ -23,6 +23,23 @@ type private VoiceTurn =
       ToolResults: AgentToolResultInfo array
       WorkDir: string }
 
+type ReasoningRoundTrace =
+    { ModelRound: int
+      ToolRound: int
+      InputTokens: int
+      OutputTokens: int
+      ThoughtChars: int
+      ParseSucceeded: bool
+      StopReason: string
+      TimingsMs: Map<string, float> }
+
+type ToolExecutionTrace =
+    { Round: int
+      Name: string
+      PreRouted: bool
+      Success: bool
+      DurationMs: float }
+
 type private VoiceSession =
     { Id: string
       SystemPrompt: string
@@ -197,8 +214,6 @@ type GemmaVoiceAgentRuntime
     let maxGemmaAudioSeconds = Math.Max(0.1, options.Gemma.MaxAudioSeconds)
     let maxHistoryTurns = max 0 options.MaxHistoryTurns
     let asrMaxNewTokens = max 1 options.Gemma.AsrMaxNewTokens
-    let reasoningMaxNewTokens = max 1 options.Gemma.ReasoningMaxNewTokens
-    let toolMaxRounds = max 0 options.Gemma.ToolMaxRounds
 
     let jsonOptions =
         JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true)
@@ -471,7 +486,7 @@ type GemmaVoiceAgentRuntime
 
         { call with Arguments = arguments }, selected, source, reason
 
-    let reasoningSystemPrompt (session: VoiceSession) includeStructuredFiller =
+    let reasoningSystemPrompt (session: VoiceSession) enableThinking reasoningGuidance includeStructuredFiller =
         let basePrompt =
             if String.IsNullOrWhiteSpace session.SystemPrompt then
                 "You are a concise voice assistant. Use tools when useful. Reply with one or two short spoken sentences unless the user explicitly asks for detail."
@@ -490,14 +505,32 @@ type GemmaVoiceAgentRuntime
                 voicePrompt
                 + " When calling a tool, place only the canonical tool-call envelope after the closed thought channel with no surrounding public prose or status phrase."
 
-        if options.Gemma.EnableThinking then
+        let voicePrompt =
+            if String.IsNullOrWhiteSpace reasoningGuidance then
+                voicePrompt
+            else
+                voicePrompt + " " + reasoningGuidance
+
+        if enableThinking then
             "<|think|>\n" + voicePrompt
         else
             voicePrompt
 
-    let reasoningMessages (session: VoiceSession) transcript toolMessages includeStructuredFiller =
+    let reasoningMessages
+        (session: VoiceSession)
+        transcript
+        toolMessages
+        enableThinking
+        reasoningGuidance
+        includeStructuredFiller
+        =
         let messages = ResizeArray<GemmaChatMessage>()
-        messages.Add(GemmaChatMessage.system (reasoningSystemPrompt session includeStructuredFiller))
+
+        messages.Add(
+            GemmaChatMessage.system (
+                reasoningSystemPrompt session enableThinking reasoningGuidance includeStructuredFiller
+            )
+        )
 
         completedTurns session
         |> Array.sortBy _.TurnIndex
@@ -708,14 +741,199 @@ type GemmaVoiceAgentRuntime
                         File.WriteAllText(Path.Combine(turnDir, "transcript.txt"), transcript)
                         do! emit (VoiceAgentTranscription(session.Id, requestId, turnIndex, transcript))
 
+                        let reasoningDecision = ReasoningPolicy.decide options.Gemma transcript
+                        let reasoningDepth = ReasoningDepth.name reasoningDecision.Depth
+
+                        let reasoningGuidance =
+                            match reasoningDecision.Depth with
+                            | ReasoningDepth.Balanced -> ReasoningPolicy.balancedGuidance
+                            | _ -> ""
+
+                        reportEvent
+                            {| event = "reasoning.policy.selected"
+                               sessionId = session.Id
+                               requestId = requestId
+                               turnIndex = turnIndex
+                               depth = reasoningDepth
+                               enableThinking = reasoningDecision.EnableThinking
+                               maxNewTokens = reasoningDecision.MaxNewTokens
+                               maxToolRounds = reasoningDecision.MaxToolRounds
+                               reason = reasoningDecision.Reason |}
+
                         let toolCalls = ResizeArray<AgentToolCallInfo>()
                         let toolResults = ResizeArray<AgentToolResultInfo>()
                         let toolMessages = ResizeArray<GemmaChatMessage>()
                         let fillerResults = ResizeArray<TtsSynthesisResult>()
+                        let reasoningRounds = ResizeArray<ReasoningRoundTrace>()
+                        let toolExecutions = ResizeArray<ToolExecutionTrace>()
                         let mutable finalText = ""
                         let mutable round = 0
                         let mutable fillerWasSynthesized = false
                         let mutable doneReasoning = false
+
+                        let executeToolCall
+                            (call: GemmaToolCall)
+                            selectedFiller
+                            fillerSource
+                            fillerReason
+                            modelContent
+                            preRouted
+                            =
+                            task {
+                                round <- round + 1
+
+                                let callInfo =
+                                    { Round = round
+                                      Name = call.Name
+                                      Arguments = call.Arguments
+                                      RawText = call.RawText }
+
+                                toolCalls.Add callInfo
+
+                                reportEvent
+                                    {| event = "tool.call"
+                                       sessionId = session.Id
+                                       requestId = requestId
+                                       turnIndex = turnIndex
+                                       round = round
+                                       toolName = call.Name
+                                       arguments = call.Arguments
+                                       preRouted = preRouted |}
+
+                                do! emit (VoiceAgentToolCall(session.Id, requestId, turnIndex, callInfo))
+
+                                let toolTask =
+                                    task {
+                                        let stopwatch = Stopwatch.StartNew()
+                                        let! invocation = toolCatalog.Invoke call.Name call.Arguments cancellationToken
+                                        stopwatch.Stop()
+                                        return invocation, stopwatch.Elapsed.TotalMilliseconds
+                                    }
+
+                                if fillerWasSynthesized then
+                                    reportEvent
+                                        {| event = "filler.suppressed"
+                                           sessionId = session.Id
+                                           requestId = requestId
+                                           turnIndex = turnIndex
+                                           round = round
+                                           toolName = call.Name
+                                           reason = "already_synthesized" |}
+                                else
+                                    let! fillerText =
+                                        if options.Gemma.UseStructuredToolFiller then
+                                            Task.FromResult selectedFiller
+                                        else
+                                            generateFillerText session transcript call cancellationToken
+
+                                    let fillerText =
+                                        sanitizeSpeechText fillerText
+                                        |> fun value ->
+                                            if String.IsNullOrWhiteSpace value then
+                                                fallbackFiller call.Name
+                                            else
+                                                value
+
+                                    reportEvent
+                                        {| event = "filler.selected"
+                                           sessionId = session.Id
+                                           requestId = requestId
+                                           turnIndex = turnIndex
+                                           round = round
+                                           toolName = call.Name
+                                           source = fillerSource
+                                           reason = fillerReason
+                                           text = fillerText |}
+
+                                    do! emit (VoiceAgentFillerText(session.Id, requestId, turnIndex, fillerText))
+
+                                    let! filler =
+                                        synthesize
+                                            session
+                                            requestId
+                                            turnIndex
+                                            turnDir
+                                            "filler"
+                                            "filler_1.wav"
+                                            fillerText
+                                            emit
+                                            cancellationToken
+
+                                    filler |> Option.iter fillerResults.Add
+                                    fillerWasSynthesized <- true
+
+                                let! (success, result, error), toolDurationMs = toolTask
+
+                                toolExecutions.Add
+                                    { Round = round
+                                      Name = call.Name
+                                      PreRouted = preRouted
+                                      Success = success
+                                      DurationMs = toolDurationMs }
+
+                                let resultInfo =
+                                    { Round = round
+                                      Name = call.Name
+                                      Success = success
+                                      Result = if success then result else ""
+                                      Error = error }
+
+                                toolResults.Add resultInfo
+
+                                reportEvent
+                                    {| event = "tool.result"
+                                       sessionId = session.Id
+                                       requestId = requestId
+                                       turnIndex = turnIndex
+                                       round = round
+                                       toolName = call.Name
+                                       success = success
+                                       durationMs = toolDurationMs
+                                       resultLength = if success then result.Length else 0
+                                       error = error |}
+
+                                do! emit (VoiceAgentToolResult(session.Id, requestId, turnIndex, resultInfo))
+                                toolMessages.Add(GemmaChatMessage.model modelContent)
+
+                                toolMessages.Add(
+                                    GemmaChatMessage.tool
+                                        call.Name
+                                        (if success then
+                                             result
+                                         else
+                                             error |> Option.defaultValue "Tool failed.")
+                                )
+                            }
+
+                        let preRoutedTool =
+                            if options.Gemma.EnableDeterministicToolRouting then
+                                ReasoningPolicy.tryPreRoute transcript
+                            else
+                                None
+
+                        match preRoutedTool with
+                        | Some route when reasoningDecision.MaxToolRounds > 0 ->
+                            let rawText = $"<|tool_call>call:{route.Name}{{}}<tool_call|>"
+
+                            reportEvent
+                                {| event = "tool.pre_routed"
+                                   sessionId = session.Id
+                                   requestId = requestId
+                                   turnIndex = turnIndex
+                                   toolName = route.Name
+                                   reason = route.Reason |}
+
+                            do!
+                                executeToolCall
+                                    { Name = route.Name
+                                      Arguments = route.Arguments
+                                      RawText = rawText }
+                                    (fallbackFiller route.Name)
+                                    "deterministic"
+                                    route.Reason
+                                    rawText
+                                    true
+                        | _ -> ()
 
                         while not doneReasoning do
                             cancellationToken.ThrowIfCancellationRequested()
@@ -729,18 +947,54 @@ type GemmaVoiceAgentRuntime
                                             session
                                             transcript
                                             (toolMessages.ToArray())
+                                            reasoningDecision.EnableThinking
+                                            reasoningGuidance
                                             includeStructuredFiller
                                       Tools = reasoningToolDeclarations includeStructuredFiller
                                       Audio16k = None
                                       AddGenerationPrompt = true
-                                      MaxNewTokens = reasoningMaxNewTokens
+                                      MaxNewTokens = reasoningDecision.MaxNewTokens
                                       Temperature = 0.0
                                       TopP = 1.0
                                       TopK = 0 },
                                     cancellationToken
                                 )
 
-                            match GemmaResponse.parse reasoning.Text with
+                            let parsedReasoning = GemmaResponse.parse reasoning.Text
+
+                            let thoughtChars =
+                                match parsedReasoning with
+                                | Ok parsed -> parsed.Thought |> Option.map _.Length |> Option.defaultValue 0
+                                | Error _ -> 0
+
+                            let modelRound = reasoningRounds.Count + 1
+
+                            reasoningRounds.Add
+                                { ModelRound = modelRound
+                                  ToolRound = round
+                                  InputTokens = reasoning.InputTokenCount
+                                  OutputTokens = reasoning.OutputTokenIds.Length
+                                  ThoughtChars = thoughtChars
+                                  ParseSucceeded = Result.isOk parsedReasoning
+                                  StopReason = reasoning.StopReason
+                                  TimingsMs = reasoning.TimingsMs }
+
+                            reportEvent
+                                {| event = "reasoning.round.completed"
+                                   sessionId = session.Id
+                                   requestId = requestId
+                                   turnIndex = turnIndex
+                                   depth = reasoningDepth
+                                   modelRound = modelRound
+                                   toolRound = round
+                                   inputTokens = reasoning.InputTokenCount
+                                   outputTokens = reasoning.OutputTokenIds.Length
+                                   thoughtChars = thoughtChars
+                                   parseSucceeded = Result.isOk parsedReasoning
+                                   stopReason = reasoning.StopReason
+                                   timingsMs = reasoning.TimingsMs |}
+
+                            match parsedReasoning with
                             | Error error ->
                                 reportRejectedResponse "reasoning" error reasoning.Text
                                 finalText <- "I could not produce a reliable final answer."
@@ -749,9 +1003,7 @@ type GemmaVoiceAgentRuntime
                                 reportParsedResponse "reasoning" parsed
 
                                 match processor.TryParseToolCall parsed.Content with
-                                | Some rawCall when round < toolMaxRounds ->
-                                    round <- round + 1
-
+                                | Some rawCall when round < reasoningDecision.MaxToolRounds ->
                                     let call, structuredFiller, fillerSource, fillerReason =
                                         if includeStructuredFiller then
                                             selectStructuredFiller rawCall
@@ -764,112 +1016,14 @@ type GemmaVoiceAgentRuntime
                                             "suppressed",
                                             "subsequent_round"
 
-                                    let callInfo =
-                                        { Round = round
-                                          Name = call.Name
-                                          Arguments = call.Arguments
-                                          RawText = call.RawText }
-
-                                    toolCalls.Add callInfo
-
-                                    reportEvent
-                                        {| event = "tool.call"
-                                           sessionId = session.Id
-                                           requestId = requestId
-                                           turnIndex = turnIndex
-                                           round = round
-                                           toolName = call.Name
-                                           arguments = call.Arguments |}
-
-                                    do! emit (VoiceAgentToolCall(session.Id, requestId, turnIndex, callInfo))
-
-                                    let toolTask = toolCatalog.Invoke call.Name call.Arguments cancellationToken
-
-                                    if fillerWasSynthesized then
-                                        reportEvent
-                                            {| event = "filler.suppressed"
-                                               sessionId = session.Id
-                                               requestId = requestId
-                                               turnIndex = turnIndex
-                                               round = round
-                                               toolName = call.Name
-                                               reason = "already_synthesized" |}
-                                    else
-                                        let! fillerText =
-                                            if options.Gemma.UseStructuredToolFiller then
-                                                Task.FromResult structuredFiller
-                                            else
-                                                generateFillerText session transcript call cancellationToken
-
-                                        let fillerText =
-                                            sanitizeSpeechText fillerText
-                                            |> fun value ->
-                                                if String.IsNullOrWhiteSpace value then
-                                                    fallbackFiller call.Name
-                                                else
-                                                    value
-
-                                        reportEvent
-                                            {| event = "filler.selected"
-                                               sessionId = session.Id
-                                               requestId = requestId
-                                               turnIndex = turnIndex
-                                               round = round
-                                               toolName = call.Name
-                                               source = fillerSource
-                                               reason = fillerReason
-                                               text = fillerText |}
-
-                                        do! emit (VoiceAgentFillerText(session.Id, requestId, turnIndex, fillerText))
-
-                                        let! filler =
-                                            synthesize
-                                                session
-                                                requestId
-                                                turnIndex
-                                                turnDir
-                                                "filler"
-                                                "filler_1.wav"
-                                                fillerText
-                                                emit
-                                                cancellationToken
-
-                                        filler |> Option.iter fillerResults.Add
-                                        fillerWasSynthesized <- true
-
-                                    let! success, result, error = toolTask
-
-                                    let resultInfo =
-                                        { Round = round
-                                          Name = call.Name
-                                          Success = success
-                                          Result = if success then result else ""
-                                          Error = error }
-
-                                    toolResults.Add resultInfo
-
-                                    reportEvent
-                                        {| event = "tool.result"
-                                           sessionId = session.Id
-                                           requestId = requestId
-                                           turnIndex = turnIndex
-                                           round = round
-                                           toolName = call.Name
-                                           success = success
-                                           resultLength = if success then result.Length else 0
-                                           error = error |}
-
-                                    do! emit (VoiceAgentToolResult(session.Id, requestId, turnIndex, resultInfo))
-                                    toolMessages.Add(GemmaChatMessage.model reasoning.Text)
-
-                                    toolMessages.Add(
-                                        GemmaChatMessage.tool
-                                            call.Name
-                                            (if success then
-                                                 result
-                                             else
-                                                 error |> Option.defaultValue "Tool failed.")
-                                    )
+                                    do!
+                                        executeToolCall
+                                            call
+                                            structuredFiller
+                                            fillerSource
+                                            fillerReason
+                                            reasoning.Text
+                                            false
                                 | Some call ->
                                     finalText <- stripToolCall parsed.Content
 
@@ -922,8 +1076,16 @@ type GemmaVoiceAgentRuntime
                                mode = session.Mode
                                transcript = transcript
                                finalText = finalText
+                               reasoningPolicy =
+                                {| depth = reasoningDepth
+                                   enableThinking = reasoningDecision.EnableThinking
+                                   maxNewTokens = reasoningDecision.MaxNewTokens
+                                   maxToolRounds = reasoningDecision.MaxToolRounds
+                                   reason = reasoningDecision.Reason |}
+                               reasoningRounds = reasoningRounds.ToArray()
                                toolCalls = toolCalls.ToArray()
                                toolResults = toolResults.ToArray()
+                               toolExecutions = toolExecutions.ToArray()
                                fillerTts = fillerResults.ToArray()
                                finalTts = finalTts
                                audioUrl = audioUrl

@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Include="Options.fs" />
+    <Compile Include="ReasoningPolicy.fs" />
     <Compile Include="Audio.fs" />
     <Compile Include="GemmaTypes.fs" />
     <Compile Include="OnnxAudioFeatureExtractor.fs" />

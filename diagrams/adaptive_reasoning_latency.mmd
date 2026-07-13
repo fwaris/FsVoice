@@ -1,0 +1,31 @@
+flowchart LR
+    A["ASR transcript"] --> P{"Adaptive policy"}
+    A --> R{"Unambiguous tool request?"}
+
+    P -->|"Trivial/direct"| F["FAST\n96 tokens\nThinking off"]
+    P -->|"Ordinary"| B["BALANCED\n384 tokens\nBrief reasoning prompt"]
+    P -->|"Multi-step/analytical"| D["DEEP\n512 tokens\nFull reasoning"]
+
+    R -->|"Yes: time, status, inventory, explicit source question"| T["Start tool immediately"]
+    T --> C["Tool and filler TTS run concurrently"]
+    C --> O["One Gemma round formulates answer"]
+
+    R -->|"No"| M["Gemma selects tool or answers"]
+    M -->|"Tool call"| C2["Tool and filler TTS run concurrently"]
+    C2 --> M2["Gemma formulates answer from result"]
+    M -->|"Answer"| S["Final TTS"]
+    M2 --> S
+    O --> S
+
+    F -. "budget" .-> M
+    B -. "budget" .-> M
+    D -. "budget" .-> M
+
+    S --> X["details.json\npolicy + tokens + thought chars\nmodel timings + tool timings"]
+
+    classDef fast fill:#d7f5df,stroke:#26834a,color:#111;
+    classDef balanced fill:#fff1bd,stroke:#9a7500,color:#111;
+    classDef deep fill:#e4dcff,stroke:#6941c6,color:#111;
+    class F fast;
+    class B balanced;
+    class D deep;
