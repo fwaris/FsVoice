@@ -31,6 +31,19 @@ module KnowledgeSources =
           colbertIndices: (KnowledgeSource * FsColbert.ColbertIndex) list
           encoder: FsColbert.OnnxColbertEncoder option }
 
+    type ExternalIndexBundleInfo =
+        { bundleDirectory: string
+          manifestPath: string
+          bundleId: string
+          bundleVersion: string
+          modelId: string
+          sourceCount: int }
+
+    type ExternalIndexBundle =
+        { info: ExternalIndexBundleInfo
+          sources: KnowledgeSource list
+          indices: (KnowledgeSource * FsColbert.ColbertIndex) list }
+
     type IndexPreviewVectorSummary =
         { tokenCount: int
           embeddingDim: int
@@ -2499,6 +2512,141 @@ Passages:
                 let encoder = FsColbert.OnnxColbertEncoder.Load files
                 cachedEncoder <- Some encoder
                 return encoder
+        }
+
+    let private requiredManifestString (root: JsonElement) (name: string) =
+        let mutable value = Unchecked.defaultof<JsonElement>
+
+        if root.TryGetProperty(name, &value) && value.ValueKind = JsonValueKind.String then
+            match
+                value.GetString()
+                |> Option.ofObj
+                |> Option.filter (String.IsNullOrWhiteSpace >> not)
+            with
+            | Some text -> Ok text
+            | None -> Error $"External FsColbert manifest property '{name}' must be a non-empty string."
+        else
+            Error $"External FsColbert manifest property '{name}' is required."
+
+    let private externalKnowledgeSourceKind kind =
+        match
+            kind
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+            |> Option.map _.Trim().ToLowerInvariant()
+        with
+        | None
+        | Some "pdf" -> Ok Pdf
+        | Some "markdown"
+        | Some "md"
+        | Some "website"
+        | Some "web"
+        | Some "html" -> Ok Markdown
+        | Some "json"
+        | Some "docling-json" -> Ok Json
+        | Some value -> Error $"External FsColbert source_kind '{value}' is not supported."
+
+    let private externalKnowledgeSource (entry: FsColbert.LoadedIndexBundleEntry) =
+        externalKnowledgeSourceKind entry.source.sourceKind
+        |> Result.bind (fun kind ->
+            let location =
+                entry.source.sourceLocation
+                |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                |> Option.defaultValue entry.source.sourceDisplayName
+
+            if String.IsNullOrWhiteSpace location then
+                Error $"External FsColbert source '{entry.source.sourceId}' has no location or display name."
+            else
+                Ok
+                    { kind = kind
+                      location = location
+                      enabled = true })
+
+    let validateExternalIndexBundle bundleDirectory : Result<ExternalIndexBundle, string list> =
+        try
+            if String.IsNullOrWhiteSpace bundleDirectory then
+                Error [ "OpenSourceVoice:Index:BundleDirectory must be configured." ]
+            else
+                let bundleDirectory = Path.GetFullPath bundleDirectory
+                let manifestPath = Path.Combine(bundleDirectory, "index-bundle.json")
+
+                if not (Directory.Exists bundleDirectory) then
+                    Error [ $"External FsColbert bundle directory was not found: {bundleDirectory}" ]
+                elif not (File.Exists manifestPath) then
+                    Error [ $"External FsColbert bundle manifest was not found: {manifestPath}" ]
+                else
+                    match
+                        FsColbert.IndexBundle.loadCompatible
+                            FsColbert.IndexBundleCompatibility.fsKameDefaults
+                            manifestPath
+                    with
+                    | Error errors -> Error errors
+                    | Ok bundle when List.isEmpty bundle.indexes ->
+                        Error [ $"External FsColbert bundle contains no sources: {manifestPath}" ]
+                    | Ok bundle ->
+                        use manifest = JsonDocument.Parse(File.ReadAllText manifestPath)
+
+                        let bundleInfo =
+                            requiredManifestString manifest.RootElement "bundle_id"
+                            |> Result.bind (fun bundleId ->
+                                requiredManifestString manifest.RootElement "bundle_version"
+                                |> Result.bind (fun bundleVersion ->
+                                    requiredManifestString manifest.RootElement "model_id"
+                                    |> Result.map (fun modelId ->
+                                        { bundleDirectory = bundleDirectory
+                                          manifestPath = manifestPath
+                                          bundleId = bundleId
+                                          bundleVersion = bundleVersion
+                                          modelId = modelId
+                                          sourceCount = bundle.indexes.Length })))
+
+                        let rec bindEntries boundSources boundIndices entries =
+                            match entries with
+                            | [] -> Ok(List.rev boundSources, List.rev boundIndices)
+                            | entry :: remaining ->
+                                match externalKnowledgeSource entry with
+                                | Error error -> Error error
+                                | Ok source ->
+                                    let index = bindIndexToSource source entry.index
+                                    bindEntries (source :: boundSources) ((source, index) :: boundIndices) remaining
+
+                        match bundleInfo, bindEntries [] [] bundle.indexes with
+                        | Error error, _ -> Error [ error ]
+                        | _, Error error -> Error [ error ]
+                        | Ok info, Ok(sources, indices) ->
+                            Ok
+                                { info = info
+                                  sources = sources
+                                  indices = indices }
+        with ex ->
+            Error [ $"Unable to load external FsColbert bundle: {ex.Message}" ]
+
+    let loadExternalIndexBundle storageRoot report bundleDirectory =
+        async {
+            match validateExternalIndexBundle bundleDirectory with
+            | Error errors -> return Error errors
+            | Ok bundle ->
+                try
+                    report
+                        $"Loading external FsColbert bundle '{bundle.info.bundleId}' with {bundle.info.sourceCount} source(s)."
+
+                    let! encoder = loadEncoder storageRoot
+
+                    let chunks =
+                        bundle.indices
+                        |> List.collect (fun (source, index) -> chunksFromIndex [ source ] index)
+
+                    report $"Loaded {chunks.Length} chunk(s) from external FsColbert bundle '{bundle.info.bundleId}'."
+
+                    return
+                        Ok(
+                            { sources = bundle.sources
+                              chunks = chunks
+                              colbertIndices = bundle.indices
+                              encoder = Some encoder },
+                            bundle.info
+                        )
+                with ex ->
+                    return Error [ $"Unable to prepare external FsColbert bundle: {ex.Message}" ]
         }
 
     let private buildIndexFromChunks

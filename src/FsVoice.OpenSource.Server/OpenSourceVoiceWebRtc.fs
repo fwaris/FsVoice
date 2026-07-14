@@ -15,51 +15,23 @@ open SIPSorcery.Sys
 open SIPSorceryMedia.Abstractions
 open FsVoice.OpenSource
 
-type SdpPayload =
-    { Sdp: string
-      Type: string }
-
-type private TurnBuffer(maxSamples24k: int) =
-    let syncRoot = obj()
-    let samples = ResizeArray<float32>()
-    let mutable active = false
-
-    member _.Start() =
-        lock syncRoot (fun () ->
-            samples.Clear()
-            active <- true)
-
-    member _.Cancel() =
-        lock syncRoot (fun () ->
-            samples.Clear()
-            active <- false)
-
-    member _.Append(chunk: float32 array) =
-        lock syncRoot (fun () ->
-            if active then
-                let remaining = maxSamples24k - samples.Count
-                if remaining > 0 then
-                    let count = min remaining chunk.Length
-                    for index in 0 .. count - 1 do
-                        samples.Add chunk[index])
-
-    member _.End() =
-        lock syncRoot (fun () ->
-            active <- false
-            let copy = samples.ToArray()
-            samples.Clear()
-            copy)
+type SdpPayload = { Sdp: string; Type: string }
 
 type OpenSourceVoiceWebRtcSession
     (
         agent: IVoiceAgentRuntime,
+        vad: IVadRuntime,
+        options: OpenSourceVoiceOptions,
         session: VoiceAgentSessionInfo,
         webRtcOptions: WebRtcRuntimeOptions,
         logger: ILogger<OpenSourceVoiceWebRtcSession>
     ) =
-    let jsonOptions = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true)
+    let jsonOptions =
+        JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true)
+
     let audioFormat = AudioCommonlyUsedFormats.OpusWebRTC
     let audioEncoder = new AudioEncoder(false, true)
+
     let createPeerConnection () =
         let config =
             RTCConfiguration(
@@ -99,12 +71,15 @@ type OpenSourceVoiceWebRtcSession
                         (nameof webRtcOptions.IcePortStart)
                         "OpenSourceVoice:WebRtc:IcePortStart must be an even UDP port."
 
-                let range = PortRange(webRtcOptions.IcePortStart, webRtcOptions.IcePortEnd, false, Nullable<int>())
+                let range =
+                    PortRange(webRtcOptions.IcePortStart, webRtcOptions.IcePortEnd, false, Nullable<int>())
+
                 logger.LogInformation(
                     "Open-source WebRTC using UDP ICE port range {IcePortStart}-{IcePortEnd}.",
                     webRtcOptions.IcePortStart,
                     webRtcOptions.IcePortEnd
                 )
+
                 Some range
 
         match portRange with
@@ -112,12 +87,13 @@ type OpenSourceVoiceWebRtcSession
         | None -> new RTCPeerConnection(config)
 
     let pc = createPeerConnection ()
-    let incoming = TurnBuffer(agent.MaxTurnAudioSamples24k)
-    let syncRoot = obj()
-    let iceComplete = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+    let syncRoot = obj ()
+
+    let iceComplete =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
     let mutable dataChannel: RTCDataChannel = null
     let mutable negotiatedAudioFormat = audioFormat
-    let mutable activeTurnCancellation: CancellationTokenSource option = None
     let mutable disposed = false
 
     let nullableString =
@@ -127,15 +103,13 @@ type OpenSourceVoiceWebRtcSession
 
     let sendJson (payload: obj) =
         lock syncRoot (fun () ->
-            if not disposed && dataChannel <> null && dataChannel.readyState = RTCDataChannelState.``open`` then
+            if
+                not disposed
+                && dataChannel <> null
+                && dataChannel.readyState = RTCDataChannelState.``open``
+            then
                 let json = JsonSerializer.Serialize(payload, jsonOptions)
                 dataChannel.send json)
-
-    let cancelActiveTurn () =
-        match activeTurnCancellation with
-        | Some cts ->
-            try cts.Cancel() with _ -> ()
-        | None -> ()
 
     let codecSampleRate (format: AudioFormat) =
         if format.RtpClockRate > 0 then format.RtpClockRate
@@ -150,9 +124,11 @@ type OpenSourceVoiceWebRtcSession
             mono
         else
             let interleaved = Array.zeroCreate<int16> (mono.Length * channels)
+
             for sampleIndex in 0 .. mono.Length - 1 do
                 for channelIndex in 0 .. channels - 1 do
                     interleaved[sampleIndex * channels + channelIndex] <- mono[sampleIndex]
+
             interleaved
 
     let interleavedToMono (channels: int) (pcm: int16 array) =
@@ -160,10 +136,13 @@ type OpenSourceVoiceWebRtcSession
             pcm
         else
             let sampleCount = pcm.Length / channels
+
             Array.init sampleCount (fun sampleIndex ->
                 let mutable total = 0
+
                 for channelIndex in 0 .. channels - 1 do
                     total <- total + int pcm[sampleIndex * channels + channelIndex]
+
                 int16 (total / channels))
 
     let sendAudioSamplesAsync (sampleRate: int) (samples: float32 array) (cancellationToken: CancellationToken) =
@@ -180,6 +159,7 @@ type OpenSourceVoiceWebRtcSession
 
                 let frameSamplesPerChannel = max 1 (targetRate / 50)
                 let mutable offset = 0
+
                 while offset < pcmMono.Length do
                     cancellationToken.ThrowIfCancellationRequested()
                     let length = min frameSamplesPerChannel (pcmMono.Length - offset)
@@ -187,8 +167,10 @@ type OpenSourceVoiceWebRtcSession
                     Array.Copy(pcmMono, offset, frameMono, 0, length)
                     let frame = monoToInterleaved channels frameMono
                     let encoded = audioEncoder.EncodeAudio(frame, format)
+
                     let duration =
                         uint32 (int64 frameSamplesPerChannel * int64 format.RtpClockRate / int64 targetRate)
+
                     pc.SendAudio(duration, encoded)
                     offset <- offset + length
                     do! Task.Delay(20, cancellationToken)
@@ -197,29 +179,143 @@ type OpenSourceVoiceWebRtcSession
     let eventPayload (event: VoiceAgentStreamingEvent) =
         match event with
         | VoiceAgentTranscription(id, requestId, turnIndex, transcript) ->
-            Some(box {| ``type`` = "agent.transcription"; id = id; requestId = requestId; turnIndex = turnIndex; transcript = transcript |})
+            Some(
+                box
+                    {| ``type`` = "agent.transcription"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       transcript = transcript |}
+            )
         | VoiceAgentToolCall(id, requestId, turnIndex, call) ->
-            Some(box {| ``type`` = "agent.tool_call"; id = id; requestId = requestId; turnIndex = turnIndex; round = call.Round; name = call.Name; arguments = call.Arguments; rawText = call.RawText |})
+            Some(
+                box
+                    {| ``type`` = "agent.tool_call"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       round = call.Round
+                       name = call.Name
+                       arguments = call.Arguments
+                       rawText = call.RawText |}
+            )
         | VoiceAgentToolResult(id, requestId, turnIndex, result) ->
-            Some(box {| ``type`` = "agent.tool_result"; id = id; requestId = requestId; turnIndex = turnIndex; round = result.Round; name = result.Name; success = result.Success; result = result.Result; error = nullableString result.Error |})
+            Some(
+                box
+                    {| ``type`` = "agent.tool_result"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       round = result.Round
+                       name = result.Name
+                       success = result.Success
+                       result = result.Result
+                       error = nullableString result.Error |}
+            )
         | VoiceAgentFillerText(id, requestId, turnIndex, text) ->
-            Some(box {| ``type`` = "agent.filler_text"; id = id; requestId = requestId; turnIndex = turnIndex; text = text |})
+            Some(
+                box
+                    {| ``type`` = "agent.filler_text"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       text = text |}
+            )
         | VoiceAgentFinalText(id, requestId, turnIndex, text) ->
-            Some(box {| ``type`` = "agent.final_text"; id = id; requestId = requestId; turnIndex = turnIndex; text = text |})
+            Some(
+                box
+                    {| ``type`` = "agent.final_text"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       text = text |}
+            )
+        | ResponseToFirstAnswerAudio(id, requestId, turnIndex, durationMs) ->
+            Some(
+                box
+                    {| ``type`` = "metrics.response_to_first_answer_audio"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       durationMs = durationMs |}
+            )
         | TtsSynthesisStarted(id, requestId, turnIndex, phase, text) ->
-            Some(box {| ``type`` = $"tts.{phase}.started"; id = id; requestId = requestId; turnIndex = turnIndex; phase = phase; text = text |})
+            Some(
+                box
+                    {| ``type`` = $"tts.{phase}.started"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       phase = phase
+                       text = text |}
+            )
         | TtsAudioChunk(id, requestId, turnIndex, phase, sampleRate, samples) ->
-            Some(box {| ``type`` = $"tts.{phase}.chunk"; id = id; requestId = requestId; turnIndex = turnIndex; phase = phase; sampleRate = sampleRate; samples = samples.Length |})
+            Some(
+                box
+                    {| ``type`` = $"tts.{phase}.chunk"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       phase = phase
+                       sampleRate = sampleRate
+                       samples = samples.Length |}
+            )
         | TtsSynthesisDone(id, requestId, turnIndex, result) ->
-            Some(box {| ``type`` = $"tts.{result.Phase}.done"; id = id; requestId = requestId; turnIndex = turnIndex; phase = result.Phase; text = result.Text; outputPath = nullableString result.OutputPath; sampleRate = result.SampleRate; samples = result.Samples; durationMs = result.DurationMs; inferenceTimeMs = result.InferenceTimeMs; message = result.Message |})
+            Some(
+                box
+                    {| ``type`` = $"tts.{result.Phase}.done"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       phase = result.Phase
+                       text = result.Text
+                       outputPath = nullableString result.OutputPath
+                       sampleRate = result.SampleRate
+                       samples = result.Samples
+                       durationMs = result.DurationMs
+                       inferenceTimeMs = result.InferenceTimeMs
+                       message = result.Message |}
+            )
         | TtsSynthesisCanceled(id, requestId, turnIndex, phase) ->
-            Some(box {| ``type`` = $"tts.{phase}.canceled"; id = id; requestId = requestId; turnIndex = turnIndex; phase = phase |})
+            Some(
+                box
+                    {| ``type`` = $"tts.{phase}.canceled"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       phase = phase |}
+            )
         | TtsUnavailable(id, requestId, turnIndex, phase, message) ->
-            Some(box {| ``type`` = "tts.unavailable"; id = id; requestId = requestId; turnIndex = turnIndex; phase = phase; message = message |})
+            Some(
+                box
+                    {| ``type`` = "tts.unavailable"
+                       id = id
+                       requestId = requestId
+                       turnIndex = turnIndex
+                       phase = phase
+                       message = message |}
+            )
         | VoiceAgentDone result ->
-            Some(box {| ``type`` = "agent.done"; id = result.Id; requestId = result.RequestId; turnIndex = result.TurnIndex; transcript = result.Transcript; finalText = result.FinalText; audioUrl = nullableString result.AudioUrl; detailsUrl = result.DetailsUrl; toolCalls = result.ToolCalls; toolResults = result.ToolResults |})
+            Some(
+                box
+                    {| ``type`` = "agent.done"
+                       id = result.Id
+                       requestId = result.RequestId
+                       turnIndex = result.TurnIndex
+                       transcript = result.Transcript
+                       finalText = result.FinalText
+                       audioUrl = nullableString result.AudioUrl
+                       detailsUrl = result.DetailsUrl
+                       toolCalls = result.ToolCalls
+                       toolResults = result.ToolResults |}
+            )
         | VoiceAgentCanceled(id, requestId) ->
-            Some(box {| ``type`` = "generation.canceled"; id = id; requestId = nullableString requestId |})
+            Some(
+                box
+                    {| ``type`` = "generation.canceled"
+                       id = id
+                       requestId = nullableString requestId |}
+            )
 
     let emitFromAgent cancellationToken event =
         task {
@@ -234,71 +330,95 @@ type OpenSourceVoiceWebRtcSession
         }
         :> Task
 
-    let runBufferedTurn (samples24k: float32 array) =
-        task {
-            if samples24k.Length = 0 then
-                sendJson(box {| ``type`` = "error"; message = "No audio was captured for this turn." |})
-            else
-                cancelActiveTurn()
-                let turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None)
-                activeTurnCancellation <- Some turnCancellation
-                try
-                    try
-                        let! _ =
-                            agent.RunTurnAsync(
-                                { SessionId = session.Id
-                                  UserAudio24k = samples24k
-                                  RequestId = None },
-                                emitFromAgent turnCancellation.Token,
-                                turnCancellation.Token)
-                        ()
-                    with
-                    | :? OperationCanceledException ->
-                        sendJson(box {| ``type`` = "generation.canceled"; id = session.Id |})
-                    | ex ->
-                        logger.LogError(ex, "Open-source voice turn failed for session {SessionId}.", session.Id)
-                        sendJson(box {| ``type`` = "error"; message = ex.Message |})
-                finally
-                    match activeTurnCancellation with
-                    | Some current when obj.ReferenceEquals(current, turnCancellation) ->
-                        activeTurnCancellation <- None
-                    | _ -> ()
-                    turnCancellation.Dispose()
-        }
-        :> Task
+    let emitVadEvent event =
+        match event with
+        | SpeechStarted ->
+            sendJson (
+                box
+                    {| ``type`` = "vad.speech_started"
+                       id = session.Id |}
+            )
+        | SpeechStopped(_, durationMs, reason) ->
+            sendJson (
+                box
+                    {| ``type`` = "vad.speech_stopped"
+                       id = session.Id
+                       durationMs = durationMs
+                       reason =
+                        match reason with
+                        | Silence -> "silence"
+                        | MaxDuration -> "max_duration" |}
+            )
+
+    let reportTurnError (ex: exn) =
+        logger.LogError(ex, "Open-source voice turn failed for session {SessionId}.", session.Id)
+
+        sendJson (
+            box
+                {| ``type`` = "error"
+                   message = ex.Message |}
+        )
+
+    let coordinator =
+        new OpenSourceVoiceTurnCoordinator(
+            agent,
+            vad,
+            options,
+            session,
+            emitVadEvent,
+            emitFromAgent,
+            reportTurnError,
+            logger
+        )
 
     let handleControlMessage (message: string) =
         try
             use doc = JsonDocument.Parse message
+
             let eventType =
                 match doc.RootElement.TryGetProperty("type") with
                 | true, value -> value.GetString()
                 | _ -> null
 
             match eventType with
-            | "turn.start" ->
-                cancelActiveTurn()
-                incoming.Start()
-                sendJson(box {| ``type`` = "turn.accepted"; id = session.Id |})
             | "turn.cancel" ->
-                cancelActiveTurn()
-                incoming.Cancel()
-                sendJson(box {| ``type`` = "generation.canceled"; id = session.Id |})
+                coordinator.Cancel()
+
+                sendJson (
+                    box
+                        {| ``type`` = "generation.canceled"
+                           id = session.Id |}
+                )
+            | "turn.start"
             | "turn.end" ->
-                let samples = incoming.End()
-                Task.Run(fun () -> runBufferedTurn samples) |> ignore
+                sendJson (
+                    box
+                        {| ``type`` = "error"
+                           message =
+                            $"Control event '{eventType}' is no longer supported; stream microphone audio continuously for server VAD." |}
+                )
             | _ ->
-                sendJson(box {| ``type`` = "error"; message = $"Unknown control event '{eventType}'." |})
+                sendJson (
+                    box
+                        {| ``type`` = "error"
+                           message = $"Unknown control event '{eventType}'." |}
+                )
         with ex ->
-            sendJson(box {| ``type`` = "error"; message = ex.Message |})
+            sendJson (
+                box
+                    {| ``type`` = "error"
+                       message = ex.Message |}
+            )
 
     let configureDataChannel (channel: RTCDataChannel) =
         dataChannel <- channel
 
-        channel.add_onopen(
+        channel.add_onopen (
             Action(fun () ->
                 let status = agent.Status()
-                sendJson(
+                let vadStatus = vad.Status()
+
+                sendJson (
                     box
                         {| ``type`` = "session.ready"
                            id = session.Id
@@ -311,24 +431,35 @@ type OpenSourceVoiceWebRtcSession
                            ttsReady = status.Tts.Ready
                            ttsRuntime = status.Tts.Runtime
                            ttsVoiceCloning = status.Tts.SupportsVoiceCloning
-                           ttsMessage = status.Tts.Message |})))
+                           ttsMessage = status.Tts.Message
+                           vadReady = vadStatus.Ready
+                           turnDetection = "server_vad"
+                           bargeInEnabled = vadStatus.AllowBargeIn |}
+                ))
+        )
 
-        channel.add_onmessage(
+        channel.add_onmessage (
             OnDataChannelMessageDelegate(fun _ _ bytes ->
                 try
                     let message = System.Text.Encoding.UTF8.GetString bytes
                     handleControlMessage message
                 with ex ->
-                    sendJson(box {| ``type`` = "error"; message = ex.Message |})))
+                    sendJson (
+                        box
+                            {| ``type`` = "error"
+                               message = ex.Message |}
+                    ))
+        )
 
     do
-        pc.addTrack(new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv))
+        pc.addTrack (new MediaStreamTrack(audioFormat, MediaStreamStatusEnum.SendRecv))
 
-        pc.add_OnAudioFormatsNegotiated(
+        pc.add_OnAudioFormatsNegotiated (
             Action<_>(fun formats ->
                 match formats |> Seq.tryHead with
                 | Some format ->
                     negotiatedAudioFormat <- format
+
                     logger.LogInformation(
                         "Open-source voice WebRTC audio negotiated {Codec}; clock={ClockRate}; rtpClock={RtpClockRate}; channels={ChannelCount}.",
                         format.FormatName,
@@ -336,30 +467,35 @@ type OpenSourceVoiceWebRtcSession
                         format.RtpClockRate,
                         format.ChannelCount
                     )
-                | None -> ()))
+                | None -> ())
+        )
 
-        pc.add_OnAudioFrameReceived(
+        pc.add_OnAudioFrameReceived (
             Action<EncodedAudioFrame>(fun frame ->
                 try
                     let format = frame.AudioFormat
                     let pcm16 = audioEncoder.DecodeAudio(frame.EncodedAudio, format)
                     let sourceRate = codecSampleRate format
                     let channels = codecChannelCount format
+
                     let samples24k =
                         pcm16
                         |> interleavedToMono channels
                         |> AudioPcm.pcm16ToFloat32
                         |> AudioPcm.resampleLinear sourceRate 24000
-                    incoming.Append samples24k
+
+                    coordinator.Append24k samples24k
                 with ex ->
-                    logger.LogWarning(ex, "Could not decode inbound WebRTC audio for session {SessionId}.", session.Id)))
+                    logger.LogWarning(ex, "Could not decode inbound WebRTC audio for session {SessionId}.", session.Id))
+        )
 
-        pc.add_ondatachannel(Action<RTCDataChannel>(configureDataChannel))
+        pc.add_ondatachannel (Action<RTCDataChannel>(configureDataChannel))
 
-        pc.add_onicegatheringstatechange(
+        pc.add_onicegatheringstatechange (
             Action<_>(fun state ->
                 if state = RTCIceGatheringState.complete then
-                    iceComplete.TrySetResult() |> ignore))
+                    iceComplete.TrySetResult() |> ignore)
+        )
 
     member _.AcceptOfferAsync(offer: SdpPayload, cancellationToken: CancellationToken) =
         task {
@@ -368,29 +504,27 @@ type OpenSourceVoiceWebRtcSession
 
             let remoteType =
                 match (if isNull offer.Type then "" else offer.Type).Trim().ToLowerInvariant() with
-                | "" | "offer" -> RTCSdpType.offer
+                | ""
+                | "offer" -> RTCSdpType.offer
                 | other -> invalidArg "offer" $"Unsupported SDP type '{other}'. Expected offer."
 
             let result =
-                pc.setRemoteDescription(
-                    RTCSessionDescriptionInit(
-                        sdp = offer.Sdp,
-                        ``type`` = remoteType
-                    )
-                )
+                pc.setRemoteDescription (RTCSessionDescriptionInit(sdp = offer.Sdp, ``type`` = remoteType))
 
             if result <> SetDescriptionResultEnum.OK then
                 invalidOp $"Could not apply browser WebRTC offer SDP: {result}."
 
-            let answer = pc.createAnswer(null)
+            let answer = pc.createAnswer (null)
             do! pc.setLocalDescription answer
 
             let timeout = Task.Delay(1500, cancellationToken)
             let! _ = Task.WhenAny(iceComplete.Task, timeout)
 
             let answerSdp =
-                if isNull pc.localDescription then answer.sdp.ToString()
-                else pc.localDescription.sdp.ToString()
+                if isNull pc.localDescription then
+                    answer.sdp.ToString()
+                else
+                    pc.localDescription.sdp.ToString()
 
             return { Sdp = answerSdp; Type = "answer" }
         }
@@ -399,24 +533,29 @@ type OpenSourceVoiceWebRtcSession
         lock syncRoot (fun () ->
             if not disposed then
                 disposed <- true
-                cancelActiveTurn()
-                incoming.Cancel()
+                (coordinator :> IDisposable).Dispose()
+
                 if dataChannel <> null then
-                    dataChannel.close()
+                    dataChannel.close ()
                     dataChannel <- null
+
                 pc.Close("open-source voice session disposed")
                 pc.Dispose())
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
 
-type OpenSourceVoiceWebRtcSessionStore(agent: IVoiceAgentRuntime, options: OpenSourceVoiceOptions, loggerFactory: ILoggerFactory) =
-    let sessions = ConcurrentDictionary<string, OpenSourceVoiceWebRtcSession>(StringComparer.Ordinal)
+type OpenSourceVoiceWebRtcSessionStore
+    (agent: IVoiceAgentRuntime, vad: IVadRuntime, options: OpenSourceVoiceOptions, loggerFactory: ILoggerFactory) =
+    let sessions =
+        ConcurrentDictionary<string, OpenSourceVoiceWebRtcSession>(StringComparer.Ordinal)
 
     member _.CreateOrReplace(session: VoiceAgentSessionInfo) =
         let next =
             new OpenSourceVoiceWebRtcSession(
                 agent,
+                vad,
+                options,
                 session,
                 options.WebRtc,
                 loggerFactory.CreateLogger<OpenSourceVoiceWebRtcSession>()
@@ -444,4 +583,5 @@ type OpenSourceVoiceWebRtcSessionStore(agent: IVoiceAgentRuntime, options: OpenS
         member _.Dispose() =
             for KeyValue(_, session) in sessions do
                 (session :> IDisposable).Dispose()
+
             sessions.Clear()

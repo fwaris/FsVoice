@@ -53,6 +53,71 @@ module AudioPcm =
 
             output
 
+    /// Stateful linear resampling for live audio. The final source sample is
+    /// retained until the following chunk so interpolation remains continuous
+    /// across arbitrary transport packet boundaries.
+    type StreamingLinearResampler(sourceRate: int, targetRate: int) =
+        do
+            if sourceRate <= 0 then
+                invalidArg (nameof sourceRate) "The source sample rate must be positive."
+
+            if targetRate <= 0 then
+                invalidArg (nameof targetRate) "The target sample rate must be positive."
+
+        let sourcePerOutput = float sourceRate / float targetRate
+        let mutable sourceSamplesSeen = 0L
+        let mutable nextOutputPosition = 0.0
+        let mutable previousSample = 0.0f
+        let mutable hasPreviousSample = false
+
+        member _.SourceRate = sourceRate
+        member _.TargetRate = targetRate
+
+        member _.Reset() =
+            sourceSamplesSeen <- 0L
+            nextOutputPosition <- 0.0
+            previousSample <- 0.0f
+            hasPreviousSample <- false
+
+        member _.Append(samples: float32 array) =
+            if samples.Length = 0 then
+                Array.empty
+            elif sourceRate = targetRate then
+                sourceSamplesSeen <- sourceSamplesSeen + int64 samples.Length
+                previousSample <- samples[samples.Length - 1]
+                hasPreviousSample <- true
+                Array.copy samples
+            else
+                let chunkStart = sourceSamplesSeen
+                let chunkEndExclusive = chunkStart + int64 samples.Length
+                let output = ResizeArray<float32>()
+
+                let sampleAt globalIndex =
+                    if globalIndex = chunkStart - 1L && hasPreviousSample then
+                        previousSample
+                    else
+                        samples[int (globalIndex - chunkStart)]
+
+                let mutable keepGoing = true
+
+                while keepGoing do
+                    let leftIndex = int64 (Math.Floor nextOutputPosition)
+                    let rightIndex = leftIndex + 1L
+
+                    if rightIndex >= chunkEndExclusive || leftIndex < chunkStart - 1L then
+                        keepGoing <- false
+                    else
+                        let fraction = float32 (nextOutputPosition - float leftIndex)
+                        let left = sampleAt leftIndex
+                        let right = sampleAt rightIndex
+                        output.Add(left + (right - left) * fraction)
+                        nextOutputPosition <- nextOutputPosition + sourcePerOutput
+
+                sourceSamplesSeen <- chunkEndExclusive
+                previousSample <- samples[samples.Length - 1]
+                hasPreviousSample <- true
+                output.ToArray()
+
     /// Band-limited windowed-sinc resampling for reference audio where
     /// preserving speaker characteristics matters more than minimal latency.
     let resampleBandLimited sourceRate targetRate (samples: float32 array) =

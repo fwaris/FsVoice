@@ -5,9 +5,16 @@ open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 
-type ArtifactInfo =
-    { Path: string
-      ContentType: string }
+type ArtifactInfo = { Path: string; ContentType: string }
+
+type IndexRuntimeStatus =
+    { Ready: bool
+      BundleDirectory: string
+      BundleId: string
+      BundleVersion: string
+      ModelId: string
+      SourceCount: int
+      Message: string }
 
 type SttRuntimeStatus =
     { Ready: bool
@@ -27,9 +34,33 @@ type ISttRuntime =
     abstract Status: unit -> SttRuntimeStatus
 
     abstract TranscribeAsync:
-        samples24k: float32 array *
-        outputDirectory: string *
-        cancellationToken: CancellationToken -> Task<SttTranscriptionResult>
+        samples24k: float32 array * outputDirectory: string * cancellationToken: CancellationToken ->
+            Task<SttTranscriptionResult>
+
+type VadRuntimeStatus =
+    { Ready: bool
+      Runtime: string
+      ModelPath: string
+      ModelVersion: string
+      ExecutionProvider: string
+      InputSampleRate: int
+      FrameSamples: int
+      AllowBargeIn: bool
+      Threshold: float
+      NegativeThreshold: float
+      MinSpeechDurationMs: int
+      MinSilenceDurationMs: int
+      PreRollMs: int
+      SpeechPadMs: int
+      Message: string }
+
+type IVadSession =
+    abstract Reset: unit -> unit
+    abstract SpeechProbability: samples16k: float32 array -> float32
+
+type IVadRuntime =
+    abstract Status: unit -> VadRuntimeStatus
+    abstract CreateSession: unit -> IVadSession
 
 type TtsRuntimeStatus =
     { Ready: bool
@@ -65,9 +96,8 @@ type ITtsRuntime =
     abstract Status: unit -> TtsRuntimeStatus
 
     abstract SynthesizeAsync:
-        request: TtsSynthesisRequest *
-        emitChunk: (float32 array -> Task) *
-        cancellationToken: CancellationToken -> Task<TtsSynthesisResult>
+        request: TtsSynthesisRequest * emitChunk: (float32 array -> Task) * cancellationToken: CancellationToken ->
+            Task<TtsSynthesisResult>
 
 type AgentToolCallInfo =
     { Round: int
@@ -82,9 +112,7 @@ type AgentToolResultInfo =
       Result: string
       Error: string option }
 
-type VoiceAgentSessionRequest =
-    { SystemPrompt: string
-      Mode: string }
+type VoiceAgentSessionRequest = { SystemPrompt: string; Mode: string }
 
 type VoiceAgentSessionInfo =
     { Id: string
@@ -117,8 +145,15 @@ type VoiceAgentStreamingEvent =
     | VoiceAgentToolResult of sessionId: string * requestId: string * turnIndex: int * result: AgentToolResultInfo
     | VoiceAgentFillerText of sessionId: string * requestId: string * turnIndex: int * text: string
     | VoiceAgentFinalText of sessionId: string * requestId: string * turnIndex: int * text: string
+    | ResponseToFirstAnswerAudio of sessionId: string * requestId: string * turnIndex: int * durationMs: float
     | TtsSynthesisStarted of sessionId: string * requestId: string * turnIndex: int * phase: string * text: string
-    | TtsAudioChunk of sessionId: string * requestId: string * turnIndex: int * phase: string * sampleRate: int * samples: float32 array
+    | TtsAudioChunk of
+        sessionId: string *
+        requestId: string *
+        turnIndex: int *
+        phase: string *
+        sampleRate: int *
+        samples: float32 array
     | TtsSynthesisDone of sessionId: string * requestId: string * turnIndex: int * result: TtsSynthesisResult
     | TtsSynthesisCanceled of sessionId: string * requestId: string * turnIndex: int * phase: string
     | TtsUnavailable of sessionId: string * requestId: string * turnIndex: int * phase: string * message: string
@@ -136,6 +171,7 @@ type VoiceAgentRuntimeStatus =
       Gemma: GemmaRuntimeStatus
       Stt: SttRuntimeStatus
       Tts: TtsRuntimeStatus
+      Index: IndexRuntimeStatus
       Message: string }
 
 type IVoiceAgentRuntime =
@@ -145,9 +181,7 @@ type IVoiceAgentRuntime =
     abstract TryGetSession: id: string -> VoiceAgentSessionInfo option
 
     abstract RunTurnAsync:
-        request: VoiceAgentTurnRequest *
-        emit: (VoiceAgentStreamingEvent -> Task) *
-        cancellationToken: CancellationToken -> Task<VoiceAgentTurnResult>
+        request: VoiceAgentTurnRequest * emit: (VoiceAgentStreamingEvent -> Task) * cancellationToken: CancellationToken ->
+            Task<VoiceAgentTurnResult>
 
     abstract TryGetTurnArtifact: sessionId: string * turnIndex: int * fileName: string -> ArtifactInfo option
-

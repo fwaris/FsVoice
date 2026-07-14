@@ -4,13 +4,10 @@ open System
 open System.IO
 
 type GemmaRuntimeOptions() =
-    member val ModelDir = "models/gemma-4-e2b-it-onnx-mobius/Q4_K_M/cuda" with get, set
-    member val Variant = "Q4_K_M/cuda" with get, set
-    member val Runtime = "raw-onnx" with get, set
-    member val ExecutionProvider = "cuda" with get, set
-    member val AudioEncoderExecutionProvider = "" with get, set
-    member val MaxAudioSeconds = 30.0 with get, set
-    member val AsrMaxNewTokens = 128 with get, set
+    member val LlamaCppEndpoint = "http://127.0.0.1:8081" with get, set
+    member val LlamaCppModel = "gemma-4-E2B_q4_0-it.gguf" with get, set
+    member val LlamaCppRequestTimeoutSeconds = 180 with get, set
+    member val LlamaCppHealthTimeoutSeconds = 3 with get, set
     member val ReasoningMaxNewTokens = 512 with get, set
     member val AdaptiveReasoning = true with get, set
     member val FastReasoningMaxNewTokens = 96 with get, set
@@ -19,10 +16,31 @@ type GemmaRuntimeOptions() =
     member val FastToolMaxRounds = 1 with get, set
     member val BalancedToolMaxRounds = 2 with get, set
     member val EnableDeterministicToolRouting = true with get, set
+    member val EnableRagFirst = false with get, set
+    member val RagFirstMaxResults = 8 with get, set
     member val UseStructuredToolFiller = true with get, set
     member val EnableThinking = true with get, set
     member val LogThoughtText = false with get, set
-    member val MaxHistoryTurns = 8 with get, set
+
+type SttRuntimeOptions() =
+    member val Runtime = "parakeet-tdt-onnx" with get, set
+    member val ModelDir = "models/parakeet-tdt-0.6b-v3-onnx" with get, set
+    member val ExecutionProvider = "cuda" with get, set
+    member val Precision = "fp32" with get, set
+    member val MaxAudioSeconds = 30.0 with get, set
+    member val NumThreads = 4 with get, set
+    member val MaxTokensPerStep = 10 with get, set
+
+type VadRuntimeOptions() =
+    member val ModelPath = "models/silero-vad-onnx/silero_vad.onnx" with get, set
+    member val AllowBargeIn = true with get, set
+    member val Threshold = 0.50 with get, set
+    member val NegativeThreshold = 0.35 with get, set
+    member val MinSpeechDurationMs = 250 with get, set
+    member val MinSilenceDurationMs = 700 with get, set
+    member val PreRollMs = 300 with get, set
+    member val SpeechPadMs = 100 with get, set
+    member val NumThreads = 1 with get, set
 
 type TtsRuntimeOptions() =
     member val ModelDir = "models/pocket-tts-onnx-english-2026-04" with get, set
@@ -48,13 +66,23 @@ type WebRtcRuntimeOptions() =
     member val IncludeAllInterfaceAddresses = false with get, set
     member val GatherTimeoutMs = 1500 with get, set
 
+type IndexRuntimeOptions() =
+    member val BundleDirectory = "indexes" with get, set
+
+type AssetRuntimeOptions() =
+    member val StatusFile = "" with get, set
+
 type OpenSourceVoiceOptions() =
     member val WorkDir = "served_runs" with get, set
-    member val MaxHistoryTurns = 8 with get, set
+    member val MaxHistoryTurns = 10 with get, set
     member val MaxTurnAudioSeconds = 30.0 with get, set
     member val Gemma = GemmaRuntimeOptions() with get, set
+    member val Stt = SttRuntimeOptions() with get, set
+    member val Vad = VadRuntimeOptions() with get, set
     member val Tts = TtsRuntimeOptions() with get, set
     member val WebRtc = WebRtcRuntimeOptions() with get, set
+    member val Index = IndexRuntimeOptions() with get, set
+    member val Assets = AssetRuntimeOptions() with get, set
 
 module RuntimePaths =
     let resolveAgainst (basePath: string) (path: string) =

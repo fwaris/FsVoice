@@ -1,7 +1,20 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$AssetsRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$IndexBundleDirectory,
     [string]$Url = "http://localhost:5067",
+    [string]$LlamaCppEndpoint = "http://127.0.0.1:8081",
+    [string]$LlamaCppModel = "gemma-4-E2B_q4_0-it.gguf",
+    [ValidateRange(8192, 131072)]
+    [int]$MinimumLlamaCppContextSize = 16384,
+    [string]$ParakeetModelDir = "",
+    [string]$VadModelPath = "",
+    [bool]$AllowBargeIn = $true,
+    [ValidateSet("fp32", "int8")]
+    [string]$ParakeetPrecision = "fp32",
+    [ValidateSet("cpu", "cuda")]
+    [string]$ParakeetExecutionProvider = "cuda",
     [int]$TtsNumThreads = 2,
     [ValidateRange(0, 64)]
     [int]$TtsNumSteps = 0,
@@ -13,6 +26,8 @@ param(
     [ValidateRange(0, 2147483647)]
     [int]$PocketTtsSeed = 12345,
     [string]$VoiceSamplePath = "",
+    [ValidateRange(0, 100)]
+    [int]$MaxHistoryTurns = 10,
     [bool]$EnableThinking = $true,
     [bool]$LogThoughtText = $false,
     [string]$CudaBin = "",
@@ -50,23 +65,32 @@ foreach ($runtimePath in @(
     (Join-Path $PSScriptRoot "onnxruntime.dll"),
     (Join-Path $PSScriptRoot "onnxruntime_providers_cuda.dll"),
     (Join-Path $PSScriptRoot "onnxruntime_providers_shared.dll"),
-    (Join-Path $PSScriptRoot "onnxruntime-genai.dll"),
-    (Join-Path $PSScriptRoot "onnxruntime-genai-cuda.dll"),
-    (Join-Path $PSScriptRoot "FsColbertIndexes\index-bundle.json"),
     (Join-Path $PSScriptRoot "FsColbert\Models\mxbai-edge-colbert\model_int8.onnx")
 )) {
     Assert-PathExists $runtimePath "Runtime dependency"
 }
 
 $assetsRootFull = (Resolve-Path -LiteralPath $AssetsRoot).Path
+$indexBundleDirectoryFull = (Resolve-Path -LiteralPath $IndexBundleDirectory).Path
+Assert-PathExists (Join-Path $indexBundleDirectoryFull "index-bundle.json") "External FsColbert bundle manifest"
 $modelsRoot =
-    if (Test-Path -LiteralPath (Join-Path $assetsRootFull "gemma-4-e2b-it-onnx-mobius") -PathType Container) {
+    if (
+        (Test-Path -LiteralPath (Join-Path $assetsRootFull "parakeet-tdt-0.6b-v3-onnx") -PathType Container) -or
+        (Test-Path -LiteralPath (Join-Path $assetsRootFull "pocket-tts-onnx-english-2026-04") -PathType Container)
+    ) {
         $assetsRootFull
     } else {
         Join-Path $assetsRootFull "models"
     }
 
-$gemmaConfig = Join-Path $modelsRoot "gemma-4-e2b-it-onnx-mobius\Q4_K_M\cuda\genai_config.json"
+$parakeetDir =
+    if ([string]::IsNullOrWhiteSpace($ParakeetModelDir)) {
+        Join-Path $modelsRoot "parakeet-tdt-0.6b-v3-onnx"
+    } elseif ([IO.Path]::IsPathRooted($ParakeetModelDir)) {
+        [IO.Path]::GetFullPath($ParakeetModelDir)
+    } else {
+        [IO.Path]::GetFullPath((Join-Path $assetsRootFull $ParakeetModelDir))
+    }
 $pocketTtsDir =
     if ([string]::IsNullOrWhiteSpace($PocketTtsModelDir)) {
         Join-Path $modelsRoot "pocket-tts-onnx-english-2026-04"
@@ -76,7 +100,18 @@ $pocketTtsDir =
         [IO.Path]::GetFullPath((Join-Path $assetsRootFull $PocketTtsModelDir))
     }
 
-$requiredAssets = @($gemmaConfig)
+$parakeetEncoder = if ($ParakeetPrecision -eq "int8") { "encoder-model.int8.onnx" } else { "encoder-model.onnx" }
+$parakeetDecoder = if ($ParakeetPrecision -eq "int8") { "decoder_joint-model.int8.onnx" } else { "decoder_joint-model.onnx" }
+$requiredAssets = @(
+    (Join-Path $parakeetDir "config.json"),
+    (Join-Path $parakeetDir "nemo128.onnx"),
+    (Join-Path $parakeetDir $parakeetEncoder),
+    (Join-Path $parakeetDir $parakeetDecoder),
+    (Join-Path $parakeetDir "vocab.txt")
+)
+if ($ParakeetPrecision -eq "fp32") {
+    $requiredAssets += (Join-Path $parakeetDir "encoder-model.onnx.data")
+}
 $precisionSuffix = if ($PocketTtsPrecision -eq "int8") { "_int8" } else { "" }
 $requiredAssets += @(
     (Join-Path $pocketTtsDir "bundle.json"),
@@ -91,6 +126,9 @@ $requiredAssets += @(
 
 foreach ($required in $requiredAssets) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        if ($required.StartsWith($parakeetDir, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Parakeet ONNX $ParakeetPrecision asset was not found: $required. Run .\download-parakeet-onnx-assets.ps1 -AssetsRoot '$assetsRootFull' -Precision $ParakeetPrecision before running the smoke test."
+        }
         if ($required.StartsWith($pocketTtsDir, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Pocket TTS April ONNX $PocketTtsPrecision asset was not found: $required. Run .\download-pocket-tts-onnx-v2-assets.ps1 -AssetsRoot '$assetsRootFull' -Precision $PocketTtsPrecision before running the smoke test."
         }
@@ -104,13 +142,22 @@ $outLog = Join-Path $logDir "open_source_voice.out.log"
 $errLog = Join-Path $logDir "open_source_voice.err.log"
 $enableThinkingLiteral = if ($EnableThinking) { 'true' } else { 'false' }
 $logThoughtTextLiteral = if ($LogThoughtText) { 'true' } else { 'false' }
+$allowBargeInLiteral = if ($AllowBargeIn) { 'true' } else { 'false' }
 
 $startArgs = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", $runScript,
     "-AssetsRoot", $AssetsRoot,
+    "-IndexBundleDirectory", $indexBundleDirectoryFull,
     "-Urls", "http://0.0.0.0:5067",
+    "-LlamaCppEndpoint", $LlamaCppEndpoint,
+    "-LlamaCppModel", $LlamaCppModel,
+    "-MinimumLlamaCppContextSize", "$MinimumLlamaCppContextSize",
+    "-MaxHistoryTurns", "$MaxHistoryTurns",
+    "-ParakeetPrecision", $ParakeetPrecision,
+    "-ParakeetExecutionProvider", $ParakeetExecutionProvider,
+    "-AllowBargeIn", $allowBargeInLiteral,
     "-TtsNumThreads", "$TtsNumThreads",
     "-TtsNumSteps", "$TtsNumSteps",
     "-PocketTtsPrecision", $PocketTtsPrecision,
@@ -119,6 +166,12 @@ $startArgs = @(
     "-EnableThinking", $enableThinkingLiteral,
     "-LogThoughtText", $logThoughtTextLiteral
 )
+if (-not [string]::IsNullOrWhiteSpace($ParakeetModelDir)) {
+    $startArgs += @("-ParakeetModelDir", $ParakeetModelDir)
+}
+if (-not [string]::IsNullOrWhiteSpace($VadModelPath)) {
+    $startArgs += @("-VadModelPath", $VadModelPath)
+}
 if (-not [string]::IsNullOrWhiteSpace($PocketTtsModelDir)) {
     $startArgs += @("-PocketTtsModelDir", $PocketTtsModelDir)
 }
@@ -173,7 +226,12 @@ try {
 
     Write-Host "Status: $($status.message)"
     Write-Host "Gemma ready: $($status.gemma.ready)"
+    Write-Host "STT ready: $($status.stt.ready)"
+    Write-Host "VAD ready: $($status.vad.ready)"
+    Write-Host "Barge-in enabled: $($status.vad.allowBargeIn)"
     Write-Host "TTS ready: $($status.tts.ready)"
+    Write-Host "Index ready: $($status.index.ready)"
+    Write-Host "Index bundle: $($status.index.bundleId) $($status.index.bundleVersion)"
 
     if ($RequireReady -and -not $status.ready) {
         throw "Service status is not ready. Message: $($status.message)"

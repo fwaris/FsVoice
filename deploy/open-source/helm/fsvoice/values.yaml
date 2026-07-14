@@ -1,0 +1,67 @@
+replicaCount: 1
+
+image:
+  repository: fsvoice-open-source
+  tag: cuda13
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 5067
+
+resources:
+  limits:
+    nvidia.com/gpu: 1
+  requests:
+    cpu: "4"
+    memory: 12Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+work:
+  hostPath: /var/lib/fsvoice/work
+
+assets:
+  # local | azureBlob | s3
+  mode: local
+  releaseId: ""
+  manifestKey: ""
+  manifestSha256: ""
+  cache:
+    hostPath: /var/lib/fsvoice/assets
+    retainReleases: 2
+    parallelDownloads: 4
+    maxRetries: 5
+    # rootPreflight creates/chowns this Pod's directory, then executes as UID 1654.
+    # preprovisioned requires the node path to be writable by UID/GID 1654.
+    permissionMode: rootPreflight
+  azure:
+    accountUrl: ""
+    container: ""
+    # Inject through a protected pipeline values file; never commit a real token.
+    sasToken: ""
+  s3:
+    bucket: ""
+    region: ""
+    accessKeyId: ""
+    secretAccessKey: ""
+    sessionToken: ""
+  local:
+    modelsPath: /var/lib/fsvoice/models
+    voicesPath: /var/lib/fsvoice/voices
+    indexesPath: /var/lib/fsvoice/indexes
+
+runtime:
+  maxHistoryTurns: 10
+  allowBargeIn: true
+  parakeetPrecision: fp32
+  pocketTtsPrecision: int8
+  llama:
+    contextSize: 16384
+    gpuLayers: 999
+    parallel: 1
+    startupTimeoutSeconds: 900
+
+podSecurityContext: {}

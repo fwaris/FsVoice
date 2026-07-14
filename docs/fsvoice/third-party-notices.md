@@ -11,6 +11,15 @@ Notable bundled notice:
 
 Speak2Docs source code is licensed under MIT. Third-party packages retain their respective licenses.
 
+## Silero VAD
+
+The FsVoice open-source server can download and use the Silero VAD v6.2.1 ONNX
+model from `snakers4/silero-vad`. Silero VAD is licensed under the MIT License.
+The model and its license remain in the external shared models directory and are
+not committed to this repository or embedded in FsVoice packages.
+
+Source: https://github.com/snakers4/silero-vad/tree/v6.2.1
+
 ## Built-in sample document
 
 Speak2Docs includes a built-in sample index for "AI on the Pulse: Real-Time Health Anomaly Detection with Wearable and Ambient Intelligence" by Davide Gabrielli, Bardh Prenkaj, Paola Velardi, and Stefano Faralli, arXiv:2508.03436, submitted August 5, 2025. The paper is licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/

@@ -76,7 +76,10 @@ function Get-RemotePath([string]$FileName) {
 $assetsRootFull = [IO.Path]::GetFullPath($AssetsRoot)
 New-Item -ItemType Directory -Force -Path $assetsRootFull | Out-Null
 $modelsRoot =
-    if (Test-Path -LiteralPath (Join-Path $assetsRootFull "gemma-4-e2b-it-onnx-mobius") -PathType Container) {
+    if (
+        (Test-Path -LiteralPath (Join-Path $assetsRootFull "parakeet-tdt-0.6b-v3-onnx") -PathType Container) -or
+        (Test-Path -LiteralPath (Join-Path $assetsRootFull "pocket-tts-onnx-english-2026-04") -PathType Container)
+    ) {
         $assetsRootFull
     } else {
         $modelsPath = Join-Path $assetsRootFull "models"

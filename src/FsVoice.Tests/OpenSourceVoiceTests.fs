@@ -1,7 +1,10 @@
 module FsVoice.OpenSource.Tests
 
 open System
+open System.Collections.Generic
 open System.IO
+open System.Net
+open System.Net.Http
 open System.Net.Http.Json
 open System.Net.WebSockets
 open System.Text
@@ -17,14 +20,79 @@ open FsVoice.Ctx
 open FsVoice.OpenSource
 open FsVoice.OpenSource.Server
 
+type private FakeLlamaCppHandler() =
+    inherit HttpMessageHandler()
+
+    let requests = ResizeArray<string * string>()
+
+    member _.Requests = requests.ToArray()
+
+    override _.SendAsync(request, _cancellationToken) =
+        let body =
+            if isNull request.Content then
+                ""
+            else
+                request.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+
+        requests.Add((request.RequestUri.AbsolutePath, body))
+
+        let content =
+            if request.RequestUri.AbsolutePath = "/health" then
+                """{"status":"ok"}"""
+            else
+                """{"content":"A concise answer.","tokens":[10,11,12],"tokens_predicted":3,"tokens_evaluated":17,"stop_type":"eos","timings":{"prompt_ms":4.5,"predicted_ms":8.0,"predicted_per_second":375.0}}"""
+
+        let response = new HttpResponseMessage(HttpStatusCode.OK)
+        response.Content <- new StringContent(content, Encoding.UTF8, "application/json")
+        Task.FromResult response
+
+type private FakeSttRuntime(?transcript: string) =
+    let transcript = defaultArg transcript "What time is it?"
+
+    interface ISttRuntime with
+        member _.Status() =
+            { Ready = true
+              Runtime = "fake-stt"
+              InputSampleRate = 24000
+              OutputLanguage = "en"
+              Message = "Fake STT is ready." }
+
+        member _.TranscribeAsync(samples24k, _outputDirectory, _cancellationToken) =
+            { Transcript = transcript
+              InputSampleRate = 24000
+              InputSamples = samples24k.Length
+              DurationMs = 1.0
+              Message = "Fake STT completed." }
+            |> Task.FromResult
+
+type private SequencedFakeSttRuntime() =
+    let mutable turnIndex = 0
+
+    interface ISttRuntime with
+        member _.Status() =
+            { Ready = true
+              Runtime = "fake-stt"
+              InputSampleRate = 24000
+              OutputLanguage = "en"
+              Message = "Fake STT is ready." }
+
+        member _.TranscribeAsync(samples24k, _outputDirectory, _cancellationToken) =
+            let currentTurn = Interlocked.Increment(&turnIndex)
+
+            { Transcript = $"Question {currentTurn}"
+              InputSampleRate = 24000
+              InputSamples = samples24k.Length
+              DurationMs = 1.0
+              Message = "Fake STT completed." }
+            |> Task.FromResult
+
 type private FakeGemmaRuntime
     (
         ?fillerText: string,
         ?toolCallsBeforeAnswer: int,
         ?finalText: string,
         ?wrapThoughts: bool,
-        ?requests: ResizeArray<GemmaGenerationRequest>,
-        ?transcript: string
+        ?requests: ResizeArray<GemmaGenerationRequest>
     ) =
     let mutable toolCallsEmitted = 0
     let fillerText = defaultArg fillerText "Let me check the current time."
@@ -34,7 +102,6 @@ type private FakeGemmaRuntime
         defaultArg finalText "The current time is available from the tool result."
 
     let wrapThoughts = defaultArg wrapThoughts false
-    let transcript = defaultArg transcript "What time is it?"
 
     let response content =
         if wrapThoughts then
@@ -65,9 +132,7 @@ type private FakeGemmaRuntime
             requests |> Option.iter (fun values -> values.Add request)
 
             let text =
-                if request.Audio16k.IsSome then
-                    response transcript
-                elif
+                if
                     request.Tools.Length = 0
                     && request.Messages
                        |> Array.exists (fun message ->
@@ -129,7 +194,7 @@ type private FakeTtsRuntime(?requests: ResizeArray<TtsSynthesisRequest>) =
                       Message = "Fake TTS completed." }
             }
 
-type private FakeSearchContextProvider() =
+type private FakeSearchContextProvider(?requests: ResizeArray<QaContextRequest>) =
     let source =
         { kind = Pdf
           location = "fake.pdf"
@@ -142,6 +207,8 @@ type private FakeSearchContextProvider() =
         member _.LoadAsync _ = Task.FromResult([])
 
         member _.RetrieveAsync(request, _) =
+            requests |> Option.iter _.Add(request)
+
             [ { source = source
                 index = 3
                 sectionPath = []
@@ -159,7 +226,7 @@ type private FakeSearchContextProvider() =
 let private runtimeOptions workDir =
     let options = OpenSourceVoiceOptions()
     options.WorkDir <- workDir
-    options.MaxHistoryTurns <- 8
+    options.MaxHistoryTurns <- 10
     options.Gemma.AdaptiveReasoning <- false
     options.Gemma.EnableDeterministicToolRouting <- false
     options
@@ -206,6 +273,7 @@ let ``Deterministic routing avoids the model tool-selection round`` () =
             new GemmaVoiceAgentRuntime(
                 options,
                 FakeGemmaRuntime(toolCallsBeforeAnswer = 0, requests = gemmaRequests),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime()
             )
 
@@ -261,11 +329,8 @@ let ``Balanced reasoning applies the tested concise prompt and budget`` () =
         use runtime =
             new GemmaVoiceAgentRuntime(
                 options,
-                FakeGemmaRuntime(
-                    toolCallsBeforeAnswer = 0,
-                    requests = gemmaRequests,
-                    transcript = "Summarize the release notes"
-                ),
+                FakeGemmaRuntime(toolCallsBeforeAnswer = 0, requests = gemmaRequests),
+                sttRuntime = FakeSttRuntime("Summarize the release notes"),
                 ttsRuntime = FakeTtsRuntime()
             )
 
@@ -357,6 +422,51 @@ let ``Gemma response parser rejects unsafe response framing`` response =
     Assert.True(GemmaResponse.parse response |> Result.isError)
 
 [<Fact>]
+let ``llama cpp Gemma runtime preserves native prompt framing and timings`` () =
+    task {
+        let options = GemmaRuntimeOptions()
+        options.LlamaCppEndpoint <- "http://llama.test:8080"
+        options.LlamaCppModel <- "gemma-test.gguf"
+
+        use handler = new FakeLlamaCppHandler()
+        use client = new HttpClient(handler)
+        use runtime = new GemmaLlamaCppRunner(options, client)
+        let gemma = runtime :> IGemmaRuntime
+        Assert.True(gemma.Status().Ready)
+
+        let! result =
+            gemma.GenerateAsync(
+                { Messages =
+                    [| GemmaChatMessage.system "You are concise."
+                       GemmaChatMessage.user "Answer the question." |]
+                  Tools =
+                    [| { Name = "lookup"
+                         Description = "Look up a value."
+                         Parameters = Array.empty } |]
+                  AddGenerationPrompt = true
+                  MaxNewTokens = 32
+                  Temperature = 0.0
+                  TopP = 1.0
+                  TopK = 0 },
+                CancellationToken.None
+            )
+
+        Assert.Equal("A concise answer.", result.Text)
+        Assert.Equal<int>([| 10; 11; 12 |], result.OutputTokenIds)
+        Assert.Equal(17, result.InputTokenCount)
+        Assert.Equal("eos", result.StopReason)
+        Assert.Equal(8.0, result.TimingsMs["decodeMs"])
+
+        let _, completionBody = handler.Requests |> Array.find (fst >> (=) "/completion")
+
+        use payload = JsonDocument.Parse completionBody
+        let prompt = payload.RootElement.GetProperty("prompt").GetString()
+        Assert.False(prompt.StartsWith("<bos>", StringComparison.Ordinal))
+        Assert.Contains("<|tool>declaration:lookup", prompt)
+        Assert.EndsWith("<|turn>model\n", prompt)
+    }
+
+[<Fact>]
 let ``Open-source runtime supports two turns and a tool call`` () =
     task {
         let workDir =
@@ -368,6 +478,7 @@ let ``Open-source runtime supports two turns and a tool call`` () =
             new GemmaVoiceAgentRuntime(
                 runtimeOptions workDir,
                 FakeGemmaRuntime(),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime(),
                 report = logs.Add
             )
@@ -412,6 +523,14 @@ let ``Open-source runtime supports two turns and a tool call`` () =
         Assert.DoesNotContain(first.ToolCalls, fun call -> call.Arguments.ContainsKey "spoken_filler")
         Assert.True(first.AudioUrl.IsSome)
         Assert.True(agent.TryGetTurnArtifact(session.Id, first.TurnIndex, "audio.wav").IsSome)
+        Assert.True(first.Details.GetProperty("responseToFirstAnswerAudioMs").GetDouble() >= 0.0)
+
+        Assert.Contains(
+            events,
+            function
+            | ResponseToFirstAnswerAudio(_, _, _, durationMs) -> durationMs >= 0.0
+            | _ -> false
+        )
 
         Assert.Contains(
             events,
@@ -439,6 +558,68 @@ let ``Open-source runtime supports two turns and a tool call`` () =
     }
 
 [<Fact>]
+let ``Open-source runtime keeps a rolling ten-turn Gemma context`` () =
+    task {
+        let workDir =
+            Path.Combine(Path.GetTempPath(), "fsvoice-open-source-tests", Guid.NewGuid().ToString("N"))
+
+        let gemmaRequests = ResizeArray<GemmaGenerationRequest>()
+        let options = runtimeOptions workDir
+        options.MaxHistoryTurns <- 10
+
+        use runtime =
+            new GemmaVoiceAgentRuntime(
+                options,
+                FakeGemmaRuntime(toolCallsBeforeAnswer = 0, finalText = "Answer", requests = gemmaRequests),
+                sttRuntime = SequencedFakeSttRuntime(),
+                ttsRuntime = FakeTtsRuntime()
+            )
+
+        let agent = runtime :> IVoiceAgentRuntime
+
+        let session =
+            agent.CreateSession(
+                { SystemPrompt = "You are concise."
+                  Mode = "gemma-pocket-tts" }
+            )
+
+        for turnIndex in 1..12 do
+            let! result =
+                agent.RunTurnAsync(
+                    { SessionId = session.Id
+                      UserAudio24k = Array.create 2400 0.02f
+                      RequestId = Some $"rolling-{turnIndex}" },
+                    (fun _ -> Task.CompletedTask),
+                    CancellationToken.None
+                )
+
+            Assert.Equal(turnIndex, result.TurnIndex)
+
+        let reasoningRequests =
+            gemmaRequests
+            |> Seq.filter (fun request -> request.Tools.Length > 0)
+            |> Seq.toArray
+
+        Assert.Equal(12, reasoningRequests.Length)
+
+        let lastMessages = reasoningRequests[11].Messages
+
+        let userMessages =
+            lastMessages
+            |> Array.filter (fun message -> message.Role = GemmaChatRole.User)
+            |> Array.map _.Content
+
+        let modelMessages =
+            lastMessages |> Array.filter (fun message -> message.Role = GemmaChatRole.Model)
+
+        Assert.Equal(11, userMessages.Length)
+        Assert.Equal(10, modelMessages.Length)
+        Assert.Equal("Question 2", userMessages[0])
+        Assert.Equal("Question 12", userMessages[10])
+        Assert.DoesNotContain("Question 1", userMessages)
+    }
+
+[<Fact>]
 let ``Structured tool filler rejects tool syntax before events and TTS`` () =
     task {
         let workDir =
@@ -450,6 +631,7 @@ let ``Structured tool filler rejects tool syntax before events and TTS`` () =
             new GemmaVoiceAgentRuntime(
                 runtimeOptions workDir,
                 FakeGemmaRuntime(fillerText = "Searching now call:selected_source_search"),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime(),
                 report = logs.Add
             )
@@ -507,6 +689,7 @@ let ``Open-source runtime synthesizes one filler across multiple tool rounds`` (
             new GemmaVoiceAgentRuntime(
                 runtimeOptions workDir,
                 FakeGemmaRuntime(toolCallsBeforeAnswer = 2, requests = gemmaRequests),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime(),
                 report = logs.Add
             )
@@ -575,6 +758,7 @@ let ``Open-source runtime hides thoughts across ASR filler tools and final speec
             new GemmaVoiceAgentRuntime(
                 options,
                 FakeGemmaRuntime(toolCallsBeforeAnswer = 2, wrapThoughts = true, requests = gemmaRequests),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime(ttsRequests)
             )
 
@@ -657,6 +841,7 @@ let ``Gemma thought text logging is opt in`` () =
                     new GemmaVoiceAgentRuntime(
                         options,
                         FakeGemmaRuntime(wrapThoughts = true),
+                        sttRuntime = FakeSttRuntime(),
                         ttsRuntime = FakeTtsRuntime(),
                         report = logs.Add
                     )
@@ -703,6 +888,7 @@ let ``Open-source runtime cleans filler and final text before TTS`` () =
                     fillerText = "\"Let me check & wait.\"",
                     finalText = "**Result:** [50%](https://example.test) & rising+\""
                 ),
+                sttRuntime = FakeSttRuntime(),
                 ttsRuntime = FakeTtsRuntime(ttsRequests)
             )
 
@@ -764,6 +950,71 @@ let ``Open-source source search reports query and result count`` () =
     }
 
 [<Fact>]
+let ``RAG-first supplies source context to the initial reasoning request`` () =
+    task {
+        let workDir =
+            Path.Combine(Path.GetTempPath(), "fsvoice-open-source-tests", Guid.NewGuid().ToString("N"))
+
+        let gemmaRequests = ResizeArray<GemmaGenerationRequest>()
+        let retrievalRequests = ResizeArray<QaContextRequest>()
+        let logs = ResizeArray<string>()
+        let options = runtimeOptions workDir
+        options.Gemma.EnableRagFirst <- true
+        options.Gemma.RagFirstMaxResults <- 5
+        options.Gemma.EnableDeterministicToolRouting <- true
+
+        use runtime =
+            new GemmaVoiceAgentRuntime(
+                options,
+                FakeGemmaRuntime(toolCallsBeforeAnswer = 0, requests = gemmaRequests),
+                sttRuntime = FakeSttRuntime("According to the study, what was the primary outcome?"),
+                ttsRuntime = FakeTtsRuntime(),
+                contextProviders = [ FakeSearchContextProvider(retrievalRequests) :> IQaContextProvider ],
+                report = logs.Add
+            )
+
+        let agent = runtime :> IVoiceAgentRuntime
+
+        let session =
+            agent.CreateSession(
+                { SystemPrompt = "You are concise."
+                  Mode = "gemma-pocket-tts" }
+            )
+
+        let! result =
+            agent.RunTurnAsync(
+                { SessionId = session.Id
+                  UserAudio24k = Array.create 2400 0.02f
+                  RequestId = Some "rag-first" },
+                (fun _ -> Task.CompletedTask),
+                CancellationToken.None
+            )
+
+        let reasoningRequest =
+            gemmaRequests |> Seq.find (fun request -> request.Tools.Length > 0)
+
+        let currentUserMessage =
+            reasoningRequest.Messages
+            |> Array.filter (fun message -> message.Role = GemmaChatRole.User)
+            |> Array.last
+
+        Assert.Single(retrievalRequests) |> ignore
+        Assert.Equal("According to the study, what was the primary outcome?", retrievalRequests[0].query)
+        Assert.Equal(5, retrievalRequests[0].maxResults)
+        Assert.Contains("Pre-retrieved source context", currentUserMessage.Content)
+        Assert.Contains("Result for According to the study, what was the primary outcome?", currentUserMessage.Content)
+        Assert.Empty(result.ToolCalls)
+        Assert.Contains(logs, fun log -> log.Contains("\"event\":\"rag.prefetch.completed\""))
+
+        Assert.Contains(
+            logs,
+            fun log ->
+                log.Contains("\"event\":\"tool.pre_routed.suppressed\"")
+                && log.Contains("\"reason\":\"rag_first_context_available\"")
+        )
+    }
+
+[<Fact>]
 let ``Pocket TTS v2 reference preprocessing trims only edge silence and keeps padding`` () =
     let sampleRate = 1000
 
@@ -794,20 +1045,6 @@ let ``Pocket TTS v2 reference preprocessing resamples to 24 kHz without changing
 
     let peak = resampled |> Array.map abs |> Array.max
     Assert.InRange(peak, 0.95f, 1.0f)
-
-[<Fact>]
-let ``Gemma ONNX audio preprocessing produces finite log-mel features`` () =
-    let samples =
-        Array.init 16000 (fun index -> Math.Sin(2.0 * Math.PI * 220.0 * float index / 16000.0) |> float32)
-
-    let features = GemmaProcessor().ExtractAudioFeatures samples
-    let values = features.InputFeatures.Buffer.Span.ToArray()
-
-    Assert.Equal<int>([| 1; 100; 128 |], features.InputFeatures.Dimensions.ToArray())
-    Assert.Equal(100, features.FrameCount)
-    Assert.Equal(99, features.ValidFrameCount)
-    Assert.DoesNotContain(values, fun value -> Single.IsNaN value || Single.IsInfinity value)
-    Assert.Contains(values, fun value -> abs value > 0.001f)
 
 [<Fact>]
 let ``Pocket TTS factory selects the direct ONNX runtime without loading models`` () =
@@ -925,9 +1162,10 @@ let ``Pocket TTS v2 status resolves a complete nested bundle without loading ONN
         then
             Directory.Delete(root, true)
 
-type private FakeAgentRuntime() =
+type private FakeAgentRuntime(?isReady: bool) =
     let mutable turnIndex = 0
     let mutable lastInputSamples = 0
+    let isReady = defaultArg isReady true
 
     let session =
         { Id = "fake"
@@ -940,11 +1178,11 @@ type private FakeAgentRuntime() =
     member _.LastInputSamples = lastInputSamples
 
     interface IVoiceAgentRuntime with
-        member _.MaxTurnAudioSamples24k = 24000
+        member _.MaxTurnAudioSamples24k = 720000
 
         member _.Status() =
             let gemma =
-                { Ready = true
+                { Ready = isReady
                   ModelDir = "fake"
                   Variant = "fake"
                   ExecutionProvider = "cpu"
@@ -971,17 +1209,25 @@ type private FakeAgentRuntime() =
                   MissingFiles = Array.empty
                   Message = "ok" }
 
-            { Ready = true
+            { Ready = isReady
               ServiceName = "FsVoiceOpenSource"
               Mode = "gemma-pocket-tts"
               WorkDir = "fake"
-              MaxHistoryTurns = 8
+              MaxHistoryTurns = 10
               MaxTurnAudioSeconds = 30
-              MaxTurnAudioSamples24k = 24000
+              MaxTurnAudioSamples24k = 720000
               Gemma = gemma
               Stt = stt
               Tts = tts
-              Message = "ready" }
+              Index =
+                { Ready = true
+                  BundleDirectory = "fake"
+                  BundleId = "fake-index"
+                  BundleVersion = "1.0.0"
+                  ModelId = "fake-model"
+                  SourceCount = 1
+                  Message = "ok" }
+              Message = if isReady then "ready" else "not ready" }
 
         member _.CreateSession _ = session
 
@@ -1016,6 +1262,292 @@ type private FakeAgentRuntime() =
 
         member _.TryGetTurnArtifact(_, _, _) = None
 
+type private EnergyVadSession() =
+    interface IVadSession with
+        member _.Reset() = ()
+
+        member _.SpeechProbability(samples16k) =
+            let meanSquare = samples16k |> Array.averageBy (fun sample -> sample * sample)
+            if meanSquare >= 0.0001f then 0.9f else 0.0f
+
+type private FakeVadRuntime(?isReady: bool) =
+    let isReady = defaultArg isReady true
+
+    interface IVadRuntime with
+        member _.Status() =
+            { Ready = isReady
+              Runtime = "fake-vad"
+              ModelPath = "fake-vad.onnx"
+              ModelVersion = "test"
+              ExecutionProvider = "cpu"
+              InputSampleRate = 16000
+              FrameSamples = 512
+              AllowBargeIn = true
+              Threshold = 0.5
+              NegativeThreshold = 0.35
+              MinSpeechDurationMs = 250
+              MinSilenceDurationMs = 700
+              PreRollMs = 300
+              SpeechPadMs = 100
+              Message = if isReady then "ready" else "not ready" }
+
+        member _.CreateSession() = EnergyVadSession() :> IVadSession
+
+type private CancelableAgentRuntime() =
+    let inner = FakeAgentRuntime() :> IVoiceAgentRuntime
+
+    let started =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    let canceled =
+        TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    let mutable runCount = 0
+
+    member _.RunCount = Volatile.Read(&runCount)
+    member _.Started = started.Task
+    member _.Canceled = canceled.Task
+
+    interface IVoiceAgentRuntime with
+        member _.MaxTurnAudioSamples24k = inner.MaxTurnAudioSamples24k
+        member _.Status() = inner.Status()
+        member _.CreateSession request = inner.CreateSession request
+        member _.TryGetSession id = inner.TryGetSession id
+
+        member _.TryGetTurnArtifact(sessionId, turnIndex, fileName) =
+            inner.TryGetTurnArtifact(sessionId, turnIndex, fileName)
+
+        member _.RunTurnAsync(_, _, cancellationToken) =
+            task {
+                Interlocked.Increment(&runCount) |> ignore
+                started.TrySetResult() |> ignore
+
+                try
+                    do! Task.Delay(Timeout.Infinite, cancellationToken)
+                    return invalidOp "The controlled test turn should be canceled."
+                finally
+                    if cancellationToken.IsCancellationRequested then
+                        canceled.TrySetResult() |> ignore
+            }
+
+type private ScriptedVadSession(probabilities: float32 list) =
+    let values = Queue<float32>(probabilities)
+
+    interface IVadSession with
+        member _.Reset() = ()
+
+        member _.SpeechProbability(_) =
+            if values.Count > 0 then values.Dequeue() else 0.0f
+
+[<Fact>]
+let ``Streaming resampler preserves interpolation across chunk boundaries`` () =
+    let input = Array.init 1000 float32
+    let expected = AudioPcm.resampleLinear 48000 24000 input
+    let resampler = AudioPcm.StreamingLinearResampler(48000, 24000)
+
+    let actual =
+        [ input[0..126]; input[127..333]; input[334..700]; input[701..] ]
+        |> List.collect (resampler.Append >> Array.toList)
+        |> List.toArray
+
+    Assert.Equal<float32>(expected, actual)
+
+[<Fact>]
+let ``VAD endpoint confirms speech and trims endpointing silence`` () =
+    let options = VadRuntimeOptions()
+    options.MinSpeechDurationMs <- 64
+    options.MinSilenceDurationMs <- 64
+    options.PreRollMs <- 32
+    options.SpeechPadMs <- 32
+    let vad = ScriptedVadSession([ 0.9f; 0.9f; 0.0f; 0.0f ]) :> IVadSession
+    let endpoint = VoiceActivityEndpoint(vad, options, 24000)
+
+    let events =
+        [| Array.create 768 0.1f
+           Array.create 768 0.1f
+           Array.zeroCreate 768
+           Array.zeroCreate 768 |]
+        |> Array.collect endpoint.Append
+
+    Assert.Contains(SpeechStarted, events)
+
+    match
+        events
+        |> Array.tryPick (function
+            | SpeechStopped(samples, durationMs, Silence) -> Some(samples, durationMs)
+            | _ -> None)
+    with
+    | None -> failwith "Expected a silence endpoint."
+    | Some(samples, durationMs) ->
+        Assert.Equal(2304, samples.Length)
+        Assert.Equal(96.0, durationMs, 3)
+
+[<Fact>]
+let ``VAD endpoint rejects speech shorter than the configured minimum`` () =
+    let options = VadRuntimeOptions()
+    options.MinSpeechDurationMs <- 96
+    options.MinSilenceDurationMs <- 32
+    let vad = ScriptedVadSession([ 0.9f; 0.0f; 0.0f ]) :> IVadSession
+    let endpoint = VoiceActivityEndpoint(vad, options, 24000)
+
+    let events =
+        [| Array.create 768 0.1f; Array.zeroCreate 768; Array.zeroCreate 768 |]
+        |> Array.collect endpoint.Append
+
+    Assert.Empty events
+
+[<Fact>]
+let ``VAD endpoint enforces the maximum turn duration`` () =
+    let options = VadRuntimeOptions()
+    options.MinSpeechDurationMs <- 32
+    options.PreRollMs <- 0
+    let vad = ScriptedVadSession([ 0.9f; 0.9f ]) :> IVadSession
+    let endpoint = VoiceActivityEndpoint(vad, options, 1536)
+
+    let events =
+        [| Array.create 768 0.1f; Array.create 768 0.1f |]
+        |> Array.collect endpoint.Append
+
+    Assert.Contains(SpeechStarted, events)
+
+    match
+        events
+        |> Array.tryPick (function
+            | SpeechStopped(samples, _, MaxDuration) -> Some samples
+            | _ -> None)
+    with
+    | None -> failwith "Expected a maximum-duration endpoint."
+    | Some samples -> Assert.Equal(1536, samples.Length)
+
+[<Fact>]
+let ``Silero VAD runtime reports a missing external model clearly`` () =
+    let options = VadRuntimeOptions()
+    options.ModelPath <- Path.Combine("missing", Guid.NewGuid().ToString("N"), "silero_vad.onnx")
+
+    let error =
+        Assert.Throws<InvalidOperationException>(fun () ->
+            use _runtime = new SileroVadRuntime(options, Path.GetTempPath())
+            ())
+
+    Assert.Contains("download-silero-vad-onnx-assets.ps1", error.Message)
+
+[<Fact>]
+let ``Silero VAD runtime rejects an incompatible ONNX model`` () =
+    let root =
+        Path.Combine(Path.GetTempPath(), $"fsvoice-vad-corrupt-{Guid.NewGuid():N}")
+
+    Directory.CreateDirectory root |> ignore
+    let modelPath = Path.Combine(root, "silero_vad.onnx")
+    File.WriteAllBytes(modelPath, [| 1uy; 2uy; 3uy |])
+
+    try
+        let options = VadRuntimeOptions()
+        options.ModelPath <- modelPath
+
+        let error =
+            Assert.Throws<InvalidOperationException>(fun () ->
+                use _runtime = new SileroVadRuntime(options, root)
+                ())
+
+        Assert.Contains("could not be loaded", error.Message)
+    finally
+        Directory.Delete(root, true)
+
+[<Fact>]
+let ``Silero VAD official model passes startup inference when supplied`` () =
+    match Environment.GetEnvironmentVariable("FSVOICE_TEST_SILERO_MODEL") with
+    | null
+    | "" -> ()
+    | modelPath ->
+        let options = VadRuntimeOptions()
+        options.ModelPath <- modelPath
+        use runtime = new SileroVadRuntime(options, Directory.GetCurrentDirectory())
+        let vad = runtime :> IVadRuntime
+        let probability = vad.CreateSession().SpeechProbability(Array.zeroCreate 512)
+        Assert.True(vad.Status().Ready)
+        Assert.InRange(probability, 0.0f, 1.0f)
+
+[<Fact>]
+let ``VAD barge-in cancels an active response after confirmed speech`` () =
+    task {
+        let options = OpenSourceVoiceOptions()
+        options.Vad.AllowBargeIn <- true
+        options.Vad.MinSpeechDurationMs <- 32
+        options.Vad.MinSilenceDurationMs <- 32
+        options.Vad.PreRollMs <- 0
+        options.Vad.SpeechPadMs <- 0
+        let agent = CancelableAgentRuntime()
+
+        let session =
+            (agent :> IVoiceAgentRuntime).CreateSession { SystemPrompt = "test"; Mode = "test" }
+
+        let vad = FakeVadRuntime() :> IVadRuntime
+        use loggerFactory = LoggerFactory.Create(fun _ -> ())
+        let events = ResizeArray<VadEndpointEvent>()
+
+        use coordinator =
+            new OpenSourceVoiceTurnCoordinator(
+                agent,
+                vad,
+                options,
+                session,
+                events.Add,
+                (fun _ _ -> Task.CompletedTask),
+                raise,
+                loggerFactory.CreateLogger("vad-test")
+            )
+
+        coordinator.Append24k(Array.create 768 0.1f)
+        coordinator.Append24k(Array.zeroCreate 768)
+        do! agent.Started.WaitAsync(TimeSpan.FromSeconds 2.0)
+        coordinator.Append24k(Array.create 768 0.1f)
+        do! agent.Canceled.WaitAsync(TimeSpan.FromSeconds 2.0)
+        Assert.Equal(1, agent.RunCount)
+        Assert.Equal(2, events |> Seq.filter ((=) SpeechStarted) |> Seq.length)
+    }
+
+[<Fact>]
+let ``VAD half duplex ignores microphone audio while the agent is responding`` () =
+    task {
+        let options = OpenSourceVoiceOptions()
+        options.Vad.AllowBargeIn <- false
+        options.Vad.MinSpeechDurationMs <- 32
+        options.Vad.MinSilenceDurationMs <- 32
+        options.Vad.PreRollMs <- 0
+        options.Vad.SpeechPadMs <- 0
+        let agent = CancelableAgentRuntime()
+
+        let session =
+            (agent :> IVoiceAgentRuntime).CreateSession { SystemPrompt = "test"; Mode = "test" }
+
+        let vad = FakeVadRuntime() :> IVadRuntime
+        use loggerFactory = LoggerFactory.Create(fun _ -> ())
+        let events = ResizeArray<VadEndpointEvent>()
+
+        use coordinator =
+            new OpenSourceVoiceTurnCoordinator(
+                agent,
+                vad,
+                options,
+                session,
+                events.Add,
+                (fun _ _ -> Task.CompletedTask),
+                raise,
+                loggerFactory.CreateLogger("vad-test")
+            )
+
+        coordinator.Append24k(Array.create 768 0.1f)
+        coordinator.Append24k(Array.zeroCreate 768)
+        do! agent.Started.WaitAsync(TimeSpan.FromSeconds 2.0)
+        coordinator.Append24k(Array.create 768 0.1f)
+        coordinator.Append24k(Array.zeroCreate 768)
+        do! Task.Delay 100
+        Assert.Equal(1, agent.RunCount)
+        Assert.Single(events |> Seq.filter ((=) SpeechStarted)) |> ignore
+        coordinator.Cancel()
+        do! agent.Canceled.WaitAsync(TimeSpan.FromSeconds 2.0)
+    }
+
 [<Fact>]
 let ``Open-source web app exposes status and session route`` () =
     task {
@@ -1024,15 +1556,16 @@ let ``Open-source web app exposes status and session route`` () =
         builder.Services.AddLogging() |> ignore
         let fakeAgent = FakeAgentRuntime()
         let agent = fakeAgent :> IVoiceAgentRuntime
+        let vad = FakeVadRuntime() :> IVadRuntime
         let loggerFactory = LoggerFactory.Create(fun _ -> ())
         let options = OpenSourceVoiceOptions()
 
         use store =
-            new OpenSourceVoiceWebRtcSessionStore(agent, options, loggerFactory) :> IDisposable
+            new OpenSourceVoiceWebRtcSessionStore(agent, vad, options, loggerFactory) :> IDisposable
 
         let app = builder.Build()
 
-        OpenSourceVoiceWebApp.map app agent (store :?> OpenSourceVoiceWebRtcSessionStore)
+        OpenSourceVoiceWebApp.map app agent vad options (store :?> OpenSourceVoiceWebRtcSessionStore)
         |> ignore
 
         do! app.StartAsync()
@@ -1040,6 +1573,18 @@ let ``Open-source web app exposes status and session route`` () =
 
         let! status = client.GetFromJsonAsync<JsonElement>("/api/status")
         Assert.True(status.GetProperty("ready").GetBoolean())
+        Assert.True(status.GetProperty("vad").GetProperty("ready").GetBoolean())
+        Assert.Equal("fake-index", status.GetProperty("index").GetProperty("bundleId").GetString())
+
+        let! readyResponse = client.GetAsync("/healthz/ready")
+        readyResponse.EnsureSuccessStatusCode() |> ignore
+
+        let! page = client.GetStringAsync("/")
+        Assert.Contains("Response → first answer audio", page)
+        Assert.Contains("firstAnswerAudioMetric", page)
+        Assert.Contains("id=\"mic\"", page)
+        Assert.DoesNotContain("Start Turn", page)
+        Assert.DoesNotContain("End Turn", page)
 
         let! response =
             client.PostAsJsonAsync(
@@ -1054,6 +1599,62 @@ let ``Open-source web app exposes status and session route`` () =
     }
 
 [<Fact>]
+let ``Open-source readiness returns service unavailable while a runtime is degraded`` () =
+    task {
+        let builder = WebApplication.CreateBuilder()
+        builder.WebHost.UseTestServer() |> ignore
+        builder.Services.AddLogging() |> ignore
+        let agent = FakeAgentRuntime(false) :> IVoiceAgentRuntime
+        let vad = FakeVadRuntime() :> IVadRuntime
+        let loggerFactory = LoggerFactory.Create(fun _ -> ())
+        let options = OpenSourceVoiceOptions()
+
+        use store =
+            new OpenSourceVoiceWebRtcSessionStore(agent, vad, options, loggerFactory) :> IDisposable
+
+        let app = builder.Build()
+
+        OpenSourceVoiceWebApp.map app agent vad options (store :?> OpenSourceVoiceWebRtcSessionStore)
+        |> ignore
+
+        do! app.StartAsync()
+        let client = app.GetTestClient()
+        let! response = client.GetAsync("/healthz/ready")
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode)
+        let! payload = response.Content.ReadFromJsonAsync<JsonElement>()
+        Assert.False(payload.GetProperty("ready").GetBoolean())
+        Assert.False(payload.GetProperty("gemmaReady").GetBoolean())
+        Assert.True(payload.GetProperty("vadReady").GetBoolean())
+        Assert.True(payload.GetProperty("indexReady").GetBoolean())
+    }
+
+[<Fact>]
+let ``Open-source readiness includes degraded VAD state`` () =
+    task {
+        let builder = WebApplication.CreateBuilder()
+        builder.WebHost.UseTestServer() |> ignore
+        builder.Services.AddLogging() |> ignore
+        let agent = FakeAgentRuntime() :> IVoiceAgentRuntime
+        let vad = FakeVadRuntime(false) :> IVadRuntime
+        let options = OpenSourceVoiceOptions()
+        use loggerFactory = LoggerFactory.Create(fun _ -> ())
+
+        use store =
+            new OpenSourceVoiceWebRtcSessionStore(agent, vad, options, loggerFactory)
+
+        let app = builder.Build()
+        OpenSourceVoiceWebApp.map app agent vad options store |> ignore
+        do! app.StartAsync()
+        let client = app.GetTestClient()
+        let! response = client.GetAsync("/healthz/ready")
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode)
+        let! payload = response.Content.ReadFromJsonAsync<JsonElement>()
+        Assert.False(payload.GetProperty("ready").GetBoolean())
+        Assert.False(payload.GetProperty("vadReady").GetBoolean())
+        Assert.True(payload.GetProperty("gemmaReady").GetBoolean())
+    }
+
+[<Fact>]
 let ``Open-source WebSocket fallback carries microphone PCM and agent events`` () =
     task {
         let builder = WebApplication.CreateBuilder()
@@ -1061,15 +1662,16 @@ let ``Open-source WebSocket fallback carries microphone PCM and agent events`` (
         builder.Services.AddLogging() |> ignore
         let fakeAgent = FakeAgentRuntime()
         let agent = fakeAgent :> IVoiceAgentRuntime
+        let vad = FakeVadRuntime() :> IVadRuntime
         let loggerFactory = LoggerFactory.Create(fun _ -> ())
         let options = OpenSourceVoiceOptions()
 
         use store =
-            new OpenSourceVoiceWebRtcSessionStore(agent, options, loggerFactory) :> IDisposable
+            new OpenSourceVoiceWebRtcSessionStore(agent, vad, options, loggerFactory) :> IDisposable
 
         let app = builder.Build()
 
-        OpenSourceVoiceWebApp.map app agent (store :?> OpenSourceVoiceWebRtcSessionStore)
+        OpenSourceVoiceWebApp.map app agent vad options (store :?> OpenSourceVoiceWebRtcSessionStore)
         |> ignore
 
         do! app.StartAsync()
@@ -1092,22 +1694,27 @@ let ``Open-source WebSocket fallback carries microphone PCM and agent events`` (
 
         let! readyType, readyBytes = receiveMessage ()
         Assert.Equal(WebSocketMessageType.Text, readyType)
-        Assert.Contains("session.ready", Encoding.UTF8.GetString readyBytes)
+        let readyJson = Encoding.UTF8.GetString readyBytes
+        Assert.Contains("session.ready", readyJson)
+        Assert.Contains("server_vad", readyJson)
 
         do! sendText "{\"type\":\"audio.config\",\"sampleRate\":48000}"
-        do! sendText "{\"type\":\"turn.start\"}"
-        let! _, acceptedBytes = receiveMessage ()
-        Assert.Contains("turn.accepted", Encoding.UTF8.GetString acceptedBytes)
 
-        let samples = Array.init 4800 (fun index -> if index % 2 = 0 then 0.05f else -0.05f)
+        let samples =
+            Array.concat
+                [ Array.zeroCreate<float32> 14400
+                  Array.init 16800 (fun index -> if index % 2 = 0 then 0.05f else -0.05f)
+                  Array.zeroCreate<float32> 38400 ]
+
         let pcmBytes = Array.zeroCreate<byte> (samples.Length * sizeof<float32>)
         Buffer.BlockCopy(samples, 0, pcmBytes, 0, pcmBytes.Length)
         do! socket.SendAsync(ArraySegment<byte>(pcmBytes), WebSocketMessageType.Binary, true, CancellationToken.None)
-        do! sendText "{\"type\":\"turn.end\"}"
 
         use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
         let mutable doneReceived = false
         let mutable audioReceived = false
+        let mutable speechStarted = false
+        let mutable speechStopped = false
 
         while not doneReceived do
             let buffer = Array.zeroCreate<byte> 16384
@@ -1118,9 +1725,14 @@ let ``Open-source WebSocket fallback carries microphone PCM and agent events`` (
                     result.Count >= 12
                     && buffer[0..3] = [| byte 'F'; byte 'S'; byte 'A'; byte '1' |]
             elif result.MessageType = WebSocketMessageType.Text then
-                doneReceived <- Encoding.UTF8.GetString(buffer, 0, result.Count).Contains("agent.done")
+                let text = Encoding.UTF8.GetString(buffer, 0, result.Count)
+                speechStarted <- speechStarted || text.Contains("vad.speech_started")
+                speechStopped <- speechStopped || text.Contains("vad.speech_stopped")
+                doneReceived <- text.Contains("agent.done")
 
         Assert.True(audioReceived)
-        Assert.Equal(2400, fakeAgent.LastInputSamples)
+        Assert.True(speechStarted)
+        Assert.True(speechStopped)
+        Assert.InRange(fakeAgent.LastInputSamples, 15000, 20000)
         do! socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None)
     }

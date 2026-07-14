@@ -1,6 +1,5 @@
 namespace FsVoice.OpenSource
 
-open Microsoft.ML.OnnxRuntime.Tensors
 open System.Threading
 open System.Threading.Tasks
 
@@ -52,24 +51,9 @@ type GemmaToolCall =
       Arguments: Map<string, string>
       RawText: string }
 
-type GemmaAudioFeatures =
-    { InputFeatures: DenseTensor<float32>
-      InputFeaturesMask: DenseTensor<bool>
-      AudioTokenCount: int
-      FrameCount: int
-      ValidFrameCount: int
-      SampleCount: int }
-
-type GemmaPreparedInputs =
-    { Prompt: string
-      InputIds: DenseTensor<int64>
-      AttentionMask: DenseTensor<int64>
-      AudioFeatures: GemmaAudioFeatures option }
-
 type GemmaGenerationRequest =
     { Messages: GemmaChatMessage array
       Tools: GemmaToolDeclaration array
-      Audio16k: float32 array option
       AddGenerationPrompt: bool
       MaxNewTokens: int
       Temperature: float

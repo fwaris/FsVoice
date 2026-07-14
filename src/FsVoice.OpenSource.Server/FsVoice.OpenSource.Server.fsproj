@@ -5,9 +5,11 @@
     <RootNamespace>FsVoice.OpenSource.Server</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <OutputType>Exe</OutputType>
+    <OnnxRuntimeFlavor Condition="'$(OnnxRuntimeFlavor)' == ''">Cpu</OnnxRuntimeFlavor>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="OpenSourceVoiceVad.fs" />
     <Compile Include="OpenSourceVoiceWebRtc.fs" />
     <Compile Include="OpenSourceVoiceWebSocket.fs" />
     <Compile Include="OpenSourceVoiceWebApp.fs" />
@@ -16,9 +18,12 @@
 
   <ItemGroup>
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Remove="served_runs\**\*" />
+    <None Remove="served_runs\**\*" />
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Assets\FsVoice.Assets.fsproj" />
     <ProjectReference Include="..\FsVoice.OpenSource.Runtime\FsVoice.OpenSource.Runtime.fsproj" />
     <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
@@ -28,5 +33,16 @@
     <PackageReference Include="FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8" />
     <PackageReference Include="SIPSorcery" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cuda'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" ExcludeAssets="all" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
+  </ItemGroup>
+
+  <Target Name="ValidateOnnxRuntimeFlavor" BeforeTargets="CollectPackageReferences">
+    <Error
+      Condition="'$(OnnxRuntimeFlavor)' != 'Cpu' and '$(OnnxRuntimeFlavor)' != 'Cuda'"
+      Text="OnnxRuntimeFlavor must be Cpu or Cuda (received '$(OnnxRuntimeFlavor)')." />
+  </Target>
 
 </Project>

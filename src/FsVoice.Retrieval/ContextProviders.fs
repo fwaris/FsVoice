@@ -132,6 +132,83 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
 
             ValueTask()
 
+type ExternalFsColbertContextProviderOptions =
+    { storageRoot: string
+      bundleDirectory: string
+      plugInProfile: QaPlugInProfile
+      logExpansions: bool
+      logChunks: bool
+      useLexicalFilter: bool
+      report: string -> unit }
+
+module ExternalFsColbertContextProviderOptions =
+    let create storageRoot bundleDirectory =
+        { storageRoot = storageRoot
+          bundleDirectory = bundleDirectory
+          plugInProfile = QaPlugInProfile.generic
+          logExpansions = false
+          logChunks = false
+          useLexicalFilter = true
+          report = ignore }
+
+type ExternalFsColbertContextProvider(options: ExternalFsColbertContextProviderOptions) =
+    let mutable retrieval = KnowledgeSources.emptyIndex
+    let mutable bundleInfo: KnowledgeSources.ExternalIndexBundleInfo option = None
+
+    member _.Retrieval = retrieval
+    member _.BundleInfo = bundleInfo
+
+    interface ISemanticIndexResourceProvider with
+        member _.SemanticIndexResource = retrieval.encoder |> Option.map box
+
+    interface IQaContextProvider with
+        member _.ProviderId = "fsvoice.fscolbert.external"
+
+        member _.DisplayName = "External FsColbert bundle"
+
+        member _.Sources = retrieval.sources
+
+        member _.LoadAsync cancellationToken =
+            task {
+                let! result =
+                    KnowledgeSources.loadExternalIndexBundle options.storageRoot options.report options.bundleDirectory
+                    |> fun work -> Async.StartAsTask(work, cancellationToken = cancellationToken)
+
+                KnowledgeSources.disposeIndex retrieval
+
+                match result with
+                | Error errors ->
+                    retrieval <- KnowledgeSources.emptyIndex
+                    bundleInfo <- None
+                    return errors
+                | Ok(loaded, info) ->
+                    retrieval <- loaded
+                    bundleInfo <- Some info
+                    return []
+            }
+
+        member _.RetrieveAsync(request, cancellationToken) =
+            KnowledgeSources.rankWithProfile
+                options.plugInProfile
+                None
+                options.logExpansions
+                options.logChunks
+                options.useLexicalFilter
+                options.report
+                request.query
+                request.maxResults
+                retrieval
+            |> fun work -> Async.StartAsTask(work, cancellationToken = cancellationToken)
+
+        member _.InventoryAsync _ =
+            KnowledgeSources.renderInventory retrieval.sources |> Task.FromResult
+
+        member _.DisposeAsync() =
+            KnowledgeSources.disposeIndex retrieval
+            retrieval <- KnowledgeSources.emptyIndex
+            bundleInfo <- None
+            ValueTask()
+
 type FsColbertSourceIndexServiceOptions =
     { storageRoot: string
       queryExpansionClient: IChatClient option

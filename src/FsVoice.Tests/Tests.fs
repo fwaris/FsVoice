@@ -4224,6 +4224,137 @@ let ``bundle manifest loads prebuilt index and keeps keyword tfidf ranking`` () 
         Assert.Equal(0, candidates[0] |> fst)
 
 [<Fact>]
+let ``external bundle validation loads multiple sources through relative index paths`` () =
+    let bundleDirectory = Path.Combine(tempStorageRoot (), "external-bundle")
+    let indexDirectory = Path.Combine(bundleDirectory, "indexes")
+    Directory.CreateDirectory indexDirectory |> ignore
+
+    let pdfSource =
+        { kind = Pdf
+          location = "https://www.faa.gov/example/drone-guide.pdf"
+          enabled = true }
+
+    let webSource =
+        { kind = Markdown
+          location = "https://www.faa.gov/uas/getting_started"
+          enabled = true }
+
+    fakeColbertIndex [ fakeIndexedPassage pdfSource 0 "Drone guide details." [] ]
+    |> FsColbert.IndexPersistence.save (Path.Combine(indexDirectory, "drone-guide.fsci"))
+
+    fakeColbertIndex [ fakeIndexedPassage webSource 0 "Getting started details." [] ]
+    |> FsColbert.IndexPersistence.save (Path.Combine(indexDirectory, "getting-started.fsci"))
+
+    let bundleSources: FsColbert.IndexBundleSource list =
+        [ { sourceId = "drone-guide"
+            sourceDisplayName = "Drone Guide"
+            sourceLocation = Some pdfSource.location
+            sourceKind = Some "pdf"
+            indexFile = "indexes/drone-guide.fsci" }
+          { sourceId = "getting-started"
+            sourceDisplayName = "Getting Started"
+            sourceLocation = Some webSource.location
+            sourceKind = Some "website"
+            indexFile = "indexes/getting-started.fsci" } ]
+
+    FsColbert.IndexBundle.create
+        "faa-drone-docs"
+        "2026.07.13"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        bundleSources
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(bundleDirectory, "index-bundle.json"))
+
+    match KnowledgeSources.validateExternalIndexBundle bundleDirectory with
+    | Error errors -> failwith (String.concat Environment.NewLine errors)
+    | Ok bundle ->
+        Assert.Equal("faa-drone-docs", bundle.info.bundleId)
+        Assert.Equal("2026.07.13", bundle.info.bundleVersion)
+        Assert.Equal(2, bundle.info.sourceCount)
+        Assert.Equal(2, bundle.sources.Length)
+        Assert.Equal(2, bundle.indices.Length)
+        Assert.Contains(bundle.sources, fun source -> source.kind = Pdf && source.location = pdfSource.location)
+        Assert.Contains(bundle.sources, fun source -> source.kind = Markdown && source.location = webSource.location)
+
+[<Fact>]
+let ``external bundle validation rejects a missing directory and manifest`` () =
+    let missingDirectory = Path.Combine(tempStorageRoot (), "missing")
+
+    match KnowledgeSources.validateExternalIndexBundle missingDirectory with
+    | Ok _ -> failwith "Expected a missing directory error."
+    | Error errors -> Assert.Contains(errors, fun error -> error.Contains("directory was not found"))
+
+    Directory.CreateDirectory missingDirectory |> ignore
+
+    match KnowledgeSources.validateExternalIndexBundle missingDirectory with
+    | Ok _ -> failwith "Expected a missing manifest error."
+    | Error errors -> Assert.Contains(errors, fun error -> error.Contains("manifest was not found"))
+
+[<Fact>]
+let ``external bundle validation rejects corrupt and empty manifests`` () =
+    let bundleDirectory = Path.Combine(tempStorageRoot (), "external-bundle")
+    Directory.CreateDirectory bundleDirectory |> ignore
+    let manifestPath = Path.Combine(bundleDirectory, "index-bundle.json")
+    File.WriteAllText(manifestPath, "{not-json")
+
+    match KnowledgeSources.validateExternalIndexBundle bundleDirectory with
+    | Ok _ -> failwith "Expected a corrupt manifest error."
+    | Error errors -> Assert.NotEmpty errors
+
+    FsColbert.IndexBundle.create
+        "empty"
+        "1.0.0"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        []
+    |> FsColbert.IndexBundle.writeManifest manifestPath
+
+    match KnowledgeSources.validateExternalIndexBundle bundleDirectory with
+    | Ok _ -> failwith "Expected an empty bundle error."
+    | Error errors -> Assert.Contains(errors, fun error -> error.Contains("source", StringComparison.OrdinalIgnoreCase))
+
+[<Fact>]
+let ``external bundle validation rejects incompatible models and missing index files`` () =
+    let bundleDirectory = Path.Combine(tempStorageRoot (), "external-bundle")
+    Directory.CreateDirectory bundleDirectory |> ignore
+    let manifestPath = Path.Combine(bundleDirectory, "index-bundle.json")
+
+    let source: FsColbert.IndexBundleSource =
+        { sourceId = "missing"
+          sourceDisplayName = "Missing"
+          sourceLocation = Some "https://www.faa.gov/missing.pdf"
+          sourceKind = Some "pdf"
+          indexFile = "indexes/missing.fsci" }
+
+    FsColbert.IndexBundle.create
+        "incompatible"
+        "1.0.0"
+        "wrong/model"
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ source ]
+    |> FsColbert.IndexBundle.writeManifest manifestPath
+
+    match KnowledgeSources.validateExternalIndexBundle bundleDirectory with
+    | Ok _ -> failwith "Expected an incompatible model error."
+    | Error errors -> Assert.Contains(errors, fun error -> error.Contains("model_id"))
+
+    FsColbert.IndexBundle.create
+        "missing-index"
+        "1.0.0"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ source ]
+    |> FsColbert.IndexBundle.writeManifest manifestPath
+
+    match KnowledgeSources.validateExternalIndexBundle bundleDirectory with
+    | Ok _ -> failwith "Expected a missing index file error."
+    | Error errors -> Assert.Contains(errors, fun error -> error.Contains("missing.fsci"))
+
+[<Fact>]
 let ``bundle manifest mismatch reports compatibility reason`` () =
     let storageRoot = tempStorageRoot ()
     let sourcePath = Path.Combine(storageRoot, "docling.json")

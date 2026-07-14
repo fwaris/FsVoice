@@ -1,0 +1,60 @@
+services:
+  fsvoice:
+    image: ${FSVOICE_IMAGE:-fsvoice-open-source:cuda13}
+    platform: linux/amd64
+    build:
+      context: ../..
+      dockerfile: deploy/open-source/Dockerfile
+      args:
+        LLAMA_CPP_VERSION: ${LLAMA_CPP_VERSION:-b9987}
+        LLAMA_CUDA_ARCHITECTURES: ${LLAMA_CUDA_ARCHITECTURES:-80-real;80-virtual}
+    gpus: all
+    restart: unless-stopped
+    stop_grace_period: 2m
+    shm_size: 2gb
+    ports:
+      - "${FSVOICE_HTTP_PORT:-5067}:5067"
+      - "50670-50679:50670-50679/udp"
+    volumes:
+      - type: bind
+        source: ${FSVOICE_ASSET_CACHE_DIR}
+        target: /data/asset-cache
+      - type: bind
+        source: ${FSVOICE_WORK_DIR}
+        target: /data/work
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:5067
+      FSVOICE_ASSET_MODE: ${FSVOICE_ASSET_MODE:-azureBlob}
+      FSVOICE_ASSET_RELEASE_ID: ${FSVOICE_ASSET_RELEASE_ID}
+      FSVOICE_ASSET_MANIFEST_KEY: ${FSVOICE_ASSET_MANIFEST_KEY}
+      FSVOICE_ASSET_MANIFEST_SHA256: ${FSVOICE_ASSET_MANIFEST_SHA256}
+      FSVOICE_ASSET_RETAIN_RELEASES: ${FSVOICE_ASSET_RETAIN_RELEASES:-2}
+      FSVOICE_ASSET_PARALLEL_DOWNLOADS: ${FSVOICE_ASSET_PARALLEL_DOWNLOADS:-4}
+      FSVOICE_ASSET_MAX_RETRIES: ${FSVOICE_ASSET_MAX_RETRIES:-5}
+      FSVOICE_AZURE_ACCOUNT_URL: ${FSVOICE_AZURE_ACCOUNT_URL:-}
+      FSVOICE_AZURE_CONTAINER: ${FSVOICE_AZURE_CONTAINER:-}
+      FSVOICE_AZURE_SAS_TOKEN: ${FSVOICE_AZURE_SAS_TOKEN:-}
+      FSVOICE_S3_BUCKET: ${FSVOICE_S3_BUCKET:-}
+      FSVOICE_S3_REGION: ${FSVOICE_S3_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      OpenSourceVoice__WorkDir: /data/work
+      OpenSourceVoice__MaxHistoryTurns: ${FSVOICE_MAX_HISTORY_TURNS:-10}
+      OpenSourceVoice__Vad__AllowBargeIn: ${FSVOICE_ALLOW_BARGE_IN:-true}
+      OpenSourceVoice__Stt__ExecutionProvider: cuda
+      OpenSourceVoice__Stt__Precision: ${FSVOICE_PARAKEET_PRECISION:-fp32}
+      OpenSourceVoice__Tts__ExecutionProvider: cpu
+      OpenSourceVoice__Tts__Precision: ${FSVOICE_POCKET_TTS_PRECISION:-int8}
+      LLAMA_CPP_CONTEXT_SIZE: ${LLAMA_CPP_CONTEXT_SIZE:-16384}
+      LLAMA_CPP_GPU_LAYERS: ${LLAMA_CPP_GPU_LAYERS:-999}
+      LLAMA_CPP_PARALLEL: ${LLAMA_CPP_PARALLEL:-1}
+      LLAMA_CPP_THREADS: ${LLAMA_CPP_THREADS:-}
+      LLAMA_CPP_EXTRA_ARGS: ${LLAMA_CPP_EXTRA_ARGS:-}
+      LLAMA_CPP_STARTUP_TIMEOUT_SECONDS: ${LLAMA_CPP_STARTUP_TIMEOUT_SECONDS:-900}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:5067/healthz/ready"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60m
+      retries: 3

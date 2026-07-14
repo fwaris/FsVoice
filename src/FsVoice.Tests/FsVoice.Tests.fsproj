@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AssetTests.fs" />
     <Compile Include="OpenSourceVoiceTests.fs" />
     <Compile Include="Tests.fs" />
   </ItemGroup>
@@ -21,6 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Assets\FsVoice.Assets.fsproj" />
     <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
