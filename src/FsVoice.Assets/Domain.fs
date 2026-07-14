@@ -54,9 +54,7 @@ type AssetBootstrapStatus =
       DurationMs: float
       Message: string }
 
-type AssetObjectInfo =
-    { Size: int64
-      Sha256: string option }
+type AssetObjectInfo = { Size: int64; Sha256: string option }
 
 [<RequireQualifiedAccess>]
 type AssetUploadResult =
@@ -68,8 +66,7 @@ type IAssetStore =
 
     abstract ProviderName: string
 
-    abstract GetObjectInfoAsync:
-        key: string * cancellationToken: CancellationToken -> Task<AssetObjectInfo option>
+    abstract GetObjectInfoAsync: key: string * cancellationToken: CancellationToken -> Task<AssetObjectInfo option>
 
     abstract DownloadAsync:
         key: string * offset: int64 * destination: Stream * cancellationToken: CancellationToken -> Task

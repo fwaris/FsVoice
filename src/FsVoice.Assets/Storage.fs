@@ -61,8 +61,7 @@ type AzureBlobAssetStore(options: AzureBlobStoreOptions) =
                     let! response = (blob key).GetPropertiesAsync(cancellationToken = cancellationToken)
 
                     let sha256 =
-                        response.Value.Metadata
-                        :> seq<KeyValuePair<string, string>>
+                        response.Value.Metadata :> seq<KeyValuePair<string, string>>
                         |> StorageMetadata.tryValue "sha256"
 
                     return
@@ -119,14 +118,25 @@ type S3AssetStore(options: S3StoreOptions) =
             config.RegionEndpoint <- RegionEndpoint.GetBySystemName options.Region
 
     let credentials =
-        if String.IsNullOrWhiteSpace options.AccessKeyId && String.IsNullOrWhiteSpace options.SecretAccessKey then
+        if
+            String.IsNullOrWhiteSpace options.AccessKeyId
+            && String.IsNullOrWhiteSpace options.SecretAccessKey
+        then
             None
-        elif String.IsNullOrWhiteSpace options.AccessKeyId || String.IsNullOrWhiteSpace options.SecretAccessKey then
-            invalidArg (nameof options) "Both S3 accessKeyId and secretAccessKey are required when static credentials are used."
+        elif
+            String.IsNullOrWhiteSpace options.AccessKeyId
+            || String.IsNullOrWhiteSpace options.SecretAccessKey
+        then
+            invalidArg
+                (nameof options)
+                "Both S3 accessKeyId and secretAccessKey are required when static credentials are used."
         elif String.IsNullOrWhiteSpace options.SessionToken then
             Some(BasicAWSCredentials(options.AccessKeyId, options.SecretAccessKey) :> AWSCredentials)
         else
-            Some(SessionAWSCredentials(options.AccessKeyId, options.SecretAccessKey, options.SessionToken) :> AWSCredentials)
+            Some(
+                SessionAWSCredentials(options.AccessKeyId, options.SecretAccessKey, options.SessionToken)
+                :> AWSCredentials
+            )
 
     let client =
         match credentials with
@@ -170,9 +180,14 @@ type S3AssetStore(options: S3StoreOptions) =
 
         member _.PutObjectIfAbsentAsync(key, sourcePath, sha256, cancellationToken) =
             task {
-                let request = PutObjectRequest(BucketName = bucket, Key = key, FilePath = sourcePath)
+                let request =
+                    PutObjectRequest(BucketName = bucket, Key = key, FilePath = sourcePath)
+
                 request.Metadata["sha256"] <- sha256
-                request.Metadata["size"] <- FileInfo(sourcePath).Length.ToString(Globalization.CultureInfo.InvariantCulture)
+
+                request.Metadata["size"] <-
+                    FileInfo(sourcePath).Length.ToString(Globalization.CultureInfo.InvariantCulture)
+
                 request.IfNoneMatch <- "*"
 
                 try
@@ -185,8 +200,11 @@ type S3AssetStore(options: S3StoreOptions) =
         member _.Dispose() = client.Dispose()
 
 module AssetStore =
-    let azureBlob options = new AzureBlobAssetStore(options) :> IAssetStore
-    let s3 options = new S3AssetStore(options) :> IAssetStore
+    let azureBlob options =
+        new AzureBlobAssetStore(options) :> IAssetStore
+
+    let s3 options =
+        new S3AssetStore(options) :> IAssetStore
 
     let readBytesAsync (store: IAssetStore) key cancellationToken =
         task {

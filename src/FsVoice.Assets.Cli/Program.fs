@@ -17,7 +17,10 @@ module private Arguments =
             if not (name.StartsWith("--", StringComparison.Ordinal)) then
                 invalidArg (nameof args) $"Unexpected argument: {name}"
 
-            if index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal) then
+            if
+                index + 1 >= args.Length
+                || args[index + 1].StartsWith("--", StringComparison.Ordinal)
+            then
                 values[name.Substring(2)] <- "true"
                 index <- index + 1
             else
@@ -50,8 +53,13 @@ module private Arguments =
         | _ -> invalidArg name $"--{name} must be true or false."
 
 module Program =
-    let private env (name: string) = Environment.GetEnvironmentVariable name |> Option.ofObj |> Option.defaultValue ""
-    let private report (message: string) = Console.WriteLine($"asset-bootstrap: {message}")
+    let private env (name: string) =
+        Environment.GetEnvironmentVariable name
+        |> Option.ofObj
+        |> Option.defaultValue ""
+
+    let private report (message: string) =
+        Console.WriteLine($"asset-bootstrap: {message}")
 
     let private sourceMode (value: string) =
         match value.Trim().ToLowerInvariant() with
@@ -125,8 +133,7 @@ module Program =
         { GemmaModel = Arguments.optional values "gemma-binding" "models/gemma-4-E2B_q4_0-it.gguf"
           SttModelDirectory = Arguments.optional values "stt-binding" "models/parakeet-tdt-0.6b-v3-onnx"
           VadModel = Arguments.optional values "vad-binding" "models/silero-vad-onnx/silero_vad.onnx"
-          TtsModelDirectory =
-            Arguments.optional values "tts-binding" "models/pocket-tts-onnx-english-2026-04"
+          TtsModelDirectory = Arguments.optional values "tts-binding" "models/pocket-tts-onnx-english-2026-04"
           VoiceSample = Arguments.optional values "voice-binding" "voices/default_voice.wav"
           IndexBundleDirectory = Arguments.optional values "index-binding" "indexes" }
 
@@ -144,8 +151,7 @@ module Program =
                 { Store = store
                   SourceRoot = Arguments.required values "source-root"
                   ReleaseId = releaseId
-                  ManifestKey =
-                    Arguments.optional values "manifest-key" $"releases/{releaseId}/manifest.json"
+                  ManifestKey = Arguments.optional values "manifest-key" $"releases/{releaseId}/manifest.json"
                   Bindings = bindings values
                   ValuesOutputPath = Arguments.required values "values-output"
                   ParallelUploads = Arguments.integer values "parallel-uploads" 4
@@ -172,10 +178,10 @@ module Program =
 
     let private usage () =
         Console.Error.WriteLine(
-            "Usage: FsVoice.Assets.Cli prepare|verify|publish [options]\n" +
-            "  prepare --mode local|azureBlob|s3 ...\n" +
-            "  verify --manifest <path> [--root <release-root>]\n" +
-            "  publish --provider azureBlob|s3 --source-root <path> --release-id <id> --values-output <path> ..."
+            "Usage: FsVoice.Assets.Cli prepare|verify|publish [options]\n"
+            + "  prepare --mode local|azureBlob|s3 ...\n"
+            + "  verify --manifest <path> [--root <release-root>]\n"
+            + "  publish --provider azureBlob|s3 --source-root <path> --release-id <id> --values-output <path> ..."
         )
 
     [<EntryPoint>]

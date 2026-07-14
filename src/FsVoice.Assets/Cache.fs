@@ -21,12 +21,13 @@ module private NativeHardLink =
             if OperatingSystem.IsWindows() then
                 CreateHardLinkW(destination, source, 0n)
             else
-                linkUnix(source, destination) = 0
+                linkUnix (source, destination) = 0
         with _ ->
             false
 
 module AssetCache =
-    let objectKey (sha256: string) = $"objects/sha256/{sha256.Substring(0, 2)}/{sha256}"
+    let objectKey (sha256: string) =
+        $"objects/sha256/{sha256.Substring(0, 2)}/{sha256}"
 
     let private objectPath (cacheRoot: string) (sha256: string) =
         Path.Combine(cacheRoot, "objects", "sha256", sha256.Substring(0, 2), sha256)
@@ -131,13 +132,20 @@ module AssetCache =
 
             match remoteBytes with
             | Some bytes ->
-                let manifest, actualSha = parseAndValidateManifest options.ReleaseId expectedSha bytes
+                let manifest, actualSha =
+                    parseAndValidateManifest options.ReleaseId expectedSha bytes
+
                 AssetManifest.writeAtomicBytes cachedPath bytes
                 return manifest, actualSha, false
             | None when File.Exists cachedPath ->
                 let bytes = File.ReadAllBytes cachedPath
-                let manifest, actualSha = parseAndValidateManifest options.ReleaseId expectedSha bytes
-                options.Report $"Cloud storage is unavailable; using verified cached manifest for release {options.ReleaseId}."
+
+                let manifest, actualSha =
+                    parseAndValidateManifest options.ReleaseId expectedSha bytes
+
+                options.Report
+                    $"Cloud storage is unavailable; using verified cached manifest for release {options.ReleaseId}."
+
                 return manifest, actualSha, remoteError
             | None ->
                 return
@@ -145,7 +153,8 @@ module AssetCache =
                         $"Unable to download asset manifest '{options.ManifestKey}' from {options.Store.ProviderName}, and no verified cached copy exists for release {options.ReleaseId}."
         }
 
-    let private markerContent (entry: AssetFileEntry) = $"{entry.Size}:{entry.Sha256.ToLowerInvariant()}"
+    let private markerContent (entry: AssetFileEntry) =
+        $"{entry.Size}:{entry.Sha256.ToLowerInvariant()}"
 
     let private verifyCachedObjectAsync cacheRoot (entry: AssetFileEntry) cancellationToken =
         task {
@@ -154,8 +163,6 @@ module AssetCache =
 
             if not (File.Exists path) || FileInfo(path).Length <> entry.Size then
                 return false
-            elif File.Exists markerPath && File.ReadAllText(markerPath) = markerContent entry then
-                return true
             else
                 let! actualHash = AssetManifest.sha256FileAsync path cancellationToken
 
@@ -215,7 +222,10 @@ module AssetCache =
 
                 try
                     let offset =
-                        if File.Exists partialPath then FileInfo(partialPath).Length else 0L
+                        if File.Exists partialPath then
+                            FileInfo(partialPath).Length
+                        else
+                            0L
 
                     let resumeOffset = if offset >= 0L && offset < entry.Size then offset else 0L
 
@@ -266,8 +276,7 @@ module AssetCache =
                     attempt <- attempt + 1
 
             if not completed then
-                invalidOp
-                    $"Asset download failed after {options.MaxRetries} attempts for {entry.Path}: {lastFailure}"
+                invalidOp $"Asset download failed after {options.MaxRetries} attempts for {entry.Path}: {lastFailure}"
 
             return downloadedBytes
         }
@@ -280,7 +289,9 @@ module AssetCache =
         if Directory.Exists finalRoot then
             Directory.Delete(finalRoot, true)
 
-        let stagingRoot = Path.Combine(releasesRoot, $".staging-{manifest.ReleaseId}-{Guid.NewGuid():N}")
+        let stagingRoot =
+            Path.Combine(releasesRoot, $".staging-{manifest.ReleaseId}-{Guid.NewGuid():N}")
+
         Directory.CreateDirectory stagingRoot |> ignore
 
         try
@@ -292,7 +303,10 @@ module AssetCache =
                 if not (NativeHardLink.tryCreate source destination) then
                     File.Copy(source, destination, false)
 
-            AssetManifest.writeAtomicBytes (Path.Combine(stagingRoot, ".asset-manifest.json")) (AssetManifest.serialize manifest)
+            AssetManifest.writeAtomicBytes
+                (Path.Combine(stagingRoot, ".asset-manifest.json"))
+                (AssetManifest.serialize manifest)
+
             Directory.Move(stagingRoot, finalRoot)
             finalRoot
         with _ ->
@@ -317,7 +331,8 @@ module AssetCache =
         if Directory.Exists releasesRoot then
             let releaseDirectories =
                 Directory.GetDirectories releasesRoot
-                |> Array.filter (fun path -> not ((Path.GetFileName path).StartsWith(".staging-", StringComparison.Ordinal)))
+                |> Array.filter (fun path ->
+                    not ((Path.GetFileName path).StartsWith(".staging-", StringComparison.Ordinal)))
                 |> Array.sortByDescending (fun path -> Directory.GetLastWriteTimeUtc path)
 
             let activePath = releasePath cacheRoot activeRelease
@@ -373,7 +388,9 @@ module AssetCache =
             Directory.CreateDirectory cacheRoot |> ignore
             let started = Stopwatch.StartNew()
             use! cacheLock = acquireLockAsync cacheRoot cancellationToken
-            let! manifest, manifestSha, offlineManifest = loadManifestAsync { options with CacheRoot = cacheRoot } cancellationToken
+
+            let! manifest, manifestSha, offlineManifest =
+                loadManifestAsync { options with CacheRoot = cacheRoot } cancellationToken
 
             let! cachedFlags =
                 manifest.Files
@@ -399,7 +416,13 @@ module AssetCache =
             let releaseRoot = materializeRelease cacheRoot manifest
             Directory.SetLastWriteTimeUtc(releaseRoot, DateTime.UtcNow)
             AssetManifest.writeAtomicText (Path.Combine(cacheRoot, "current-release")) manifest.ReleaseId
-            AssetRuntimeEnvironment.write releaseRoot manifest.Bindings options.StatusPath options.RuntimeEnvironmentPath
+
+            AssetRuntimeEnvironment.write
+                releaseRoot
+                manifest.Bindings
+                options.StatusPath
+                options.RuntimeEnvironmentPath
+
             garbageCollect cacheRoot manifest.ReleaseId options.RetainReleases options.Report
             started.Stop()
 

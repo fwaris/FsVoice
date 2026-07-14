@@ -511,11 +511,7 @@ module OpenSourceVoiceWebApp =
         not (String.IsNullOrWhiteSpace value)
         && value |> Seq.forall (fun ch -> Char.IsLetterOrDigit ch || ch = '_' || ch = '-')
 
-    let private statusPayload
-        (agent: IVoiceAgentRuntime)
-        (vad: IVadRuntime)
-        (assets: AssetBootstrapStatus)
-        =
+    let private statusPayload (agent: IVoiceAgentRuntime) (vad: IVadRuntime) (assets: AssetBootstrapStatus) =
         let status = agent.Status()
         let vadStatus = vad.Status()
 

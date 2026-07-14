@@ -10,7 +10,9 @@ open FsVoice.Assets
 open Xunit
 
 type private MemoryAssetStore(initialObjects: (string * byte array * string) list) =
-    let objects = ConcurrentDictionary<string, byte array * string>(StringComparer.Ordinal)
+    let objects =
+        ConcurrentDictionary<string, byte array * string>(StringComparer.Ordinal)
+
     let downloadOffsets = ConcurrentQueue<int64>()
     let mutable available = true
 
@@ -76,7 +78,9 @@ type private MemoryAssetStore(initialObjects: (string * byte array * string) lis
 
 module private AssetTestHelpers =
     let tempDirectory name =
-        let path = Path.Combine(Path.GetTempPath(), "fsvoice-assets-tests", name + "-" + Guid.NewGuid().ToString("N"))
+        let path =
+            Path.Combine(Path.GetTempPath(), "fsvoice-assets-tests", name + "-" + Guid.NewGuid().ToString("N"))
+
         Directory.CreateDirectory path |> ignore
         path
 
@@ -101,7 +105,10 @@ module private AssetTestHelpers =
         writeRelative root "models/silero/silero_vad.onnx" "vad" |> ignore
         writeRelative root "models/pocket/bundle.json" "{}" |> ignore
         writeRelative root "voices/default.wav" "voice" |> ignore
-        writeRelative root "indexes/index-bundle.json" "{\"model_id\":\"test-colbert\",\"sources\":[]}" |> ignore
+
+        writeRelative root "indexes/index-bundle.json" "{\"model_id\":\"test-colbert\",\"sources\":[]}"
+        |> ignore
+
         writeRelative root "indexes/indexes/test.fsci" "index" |> ignore
         root
 
@@ -127,6 +134,7 @@ module private AssetTestHelpers =
 
     let storeForManifest manifest =
         let sourceRoot = createSourceRoot ()
+
         let objects =
             manifest.Files
             |> Array.map (fun entry ->
@@ -136,6 +144,7 @@ module private AssetTestHelpers =
 
         let manifestBytes = AssetManifest.serialize manifest
         let manifestSha = AssetManifest.sha256Bytes manifestBytes
+
         let store =
             new MemoryAssetStore(
                 ("releases/" + manifest.ReleaseId + "/manifest.json", manifestBytes, manifestSha)
@@ -160,8 +169,20 @@ let ``Asset manifest rejects traversal and missing index manifest`` () =
                  Sha256 = String.replicate 64 "a" } |] }
 
     let errors = AssetManifest.validate manifest
-    Assert.Contains(errors, function | ManifestValidationError.InvalidRelativePath "../escape.gguf" -> true | _ -> false)
-    Assert.Contains(errors, function | ManifestValidationError.MissingBindingTarget _ -> true | _ -> false)
+
+    Assert.Contains(
+        errors,
+        function
+        | ManifestValidationError.InvalidRelativePath "../escape.gguf" -> true
+        | _ -> false
+    )
+
+    Assert.Contains(
+        errors,
+        function
+        | ManifestValidationError.MissingBindingTarget _ -> true
+        | _ -> false
+    )
 
 [<Fact>]
 let ``Asset cache prepares a cold release then uses its exact cached manifest offline`` () =
@@ -185,14 +206,45 @@ let ``Asset cache prepares a cold release then uses its exact cached manifest of
           MaxRetries = 2
           Report = ignore }
 
-    let cold = AssetCache.prepareAsync options CancellationToken.None |> _.GetAwaiter().GetResult()
+    let first = manifest.Files |> Array.head
+
+    let partialPath =
+        Path.Combine(root, "objects", "sha256", first.Sha256.Substring(0, 2), first.Sha256 + ".partial")
+
+    Directory.CreateDirectory(Path.GetDirectoryName partialPath) |> ignore
+
+    let sourceBytes =
+        File.ReadAllBytes(AssetManifest.resolveRelativePath source first.Path)
+
+    File.WriteAllBytes(partialPath, sourceBytes[0..1])
+
+    let cold =
+        AssetCache.prepareAsync options CancellationToken.None
+        |> _.GetAwaiter().GetResult()
+
     Assert.True(cold.Status.Ready)
     Assert.True(cold.Status.DownloadedBytes > 0L)
     Assert.True(File.Exists environmentPath)
     Assert.Contains("LLAMA_CPP_MODEL", File.ReadAllText environmentPath)
+    Assert.Contains(2L, store.DownloadOffsets)
+
+    let objectPath =
+        Path.Combine(root, "objects", "sha256", first.Sha256.Substring(0, 2), first.Sha256)
+
+    File.WriteAllText(objectPath, "corrupt", Encoding.UTF8)
+
+    let repaired =
+        AssetCache.prepareAsync options CancellationToken.None
+        |> _.GetAwaiter().GetResult()
+
+    Assert.True(repaired.Status.DownloadedBytes > 0L)
 
     store.Available <- false
-    let warm = AssetCache.prepareAsync options CancellationToken.None |> _.GetAwaiter().GetResult()
+
+    let warm =
+        AssetCache.prepareAsync options CancellationToken.None
+        |> _.GetAwaiter().GetResult()
+
     Assert.True(warm.Status.Ready)
     Assert.True(warm.Status.CacheHit)
     Assert.True(warm.Status.OfflineManifestUsed)
@@ -202,7 +254,9 @@ let ``Asset cache prepares a cold release then uses its exact cached manifest of
 let ``Asset publisher uploads content-addressed objects and refuses a duplicate release manifest`` () =
     let source = AssetTestHelpers.createSourceRoot ()
     use store = new MemoryAssetStore([])
-    let output = Path.Combine(AssetTestHelpers.tempDirectory "publish", "values.generated.yaml")
+
+    let output =
+        Path.Combine(AssetTestHelpers.tempDirectory "publish", "values.generated.yaml")
 
     let options =
         { Store = store :> IAssetStore
@@ -214,7 +268,10 @@ let ``Asset publisher uploads content-addressed objects and refuses a duplicate 
           ParallelUploads = 2
           Report = ignore }
 
-    let first = AssetPublishing.publishAsync options CancellationToken.None |> _.GetAwaiter().GetResult()
+    let first =
+        AssetPublishing.publishAsync options CancellationToken.None
+        |> _.GetAwaiter().GetResult()
+
     Assert.True(first.UploadedObjects > 0)
     Assert.True(store.Contains "releases/release-publish/manifest.json")
     Assert.Contains("manifestSha256", File.ReadAllText output)

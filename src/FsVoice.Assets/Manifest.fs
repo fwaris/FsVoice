@@ -28,7 +28,8 @@ type ManifestValidationError =
     | FileHashMismatch of string * string * string
 
 module ManifestValidationError =
-    let format = function
+    let format =
+        function
         | ManifestValidationError.UnsupportedSchemaVersion version ->
             $"Unsupported asset manifest schema version {version}; expected version 1."
         | ManifestValidationError.InvalidReleaseId value -> $"Invalid asset release ID '{value}'."
@@ -38,8 +39,7 @@ module ManifestValidationError =
         | ManifestValidationError.EmptyFileList -> "Asset manifest must contain at least one file."
         | ManifestValidationError.InvalidRelativePath path -> $"Invalid manifest-relative asset path '{path}'."
         | ManifestValidationError.DuplicatePath path -> $"Duplicate asset path '{path}'."
-        | ManifestValidationError.InvalidFileSize(path, size) ->
-            $"Asset '{path}' has invalid byte length {size}."
+        | ManifestValidationError.InvalidFileSize(path, size) -> $"Asset '{path}' has invalid byte length {size}."
         | ManifestValidationError.InvalidSha256 path -> $"Asset '{path}' has an invalid SHA-256."
         | ManifestValidationError.MissingBindingTarget(name, path) ->
             $"Runtime binding '{name}' does not resolve to a manifest file or directory: {path}"
@@ -56,8 +56,11 @@ module AssetManifest =
     [<Literal>]
     let ContractVersion = 1
 
-    let private releaseIdPattern = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", RegexOptions.CultureInvariant)
-    let private sha256Pattern = Regex("^[a-fA-F0-9]{64}$", RegexOptions.CultureInvariant)
+    let private releaseIdPattern =
+        Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", RegexOptions.CultureInvariant)
+
+    let private sha256Pattern =
+        Regex("^[a-fA-F0-9]{64}$", RegexOptions.CultureInvariant)
 
     let jsonOptions =
         JsonSerializerOptions(
@@ -67,22 +70,39 @@ module AssetManifest =
         )
 
     let sha256Bytes (bytes: byte array) =
-        SHA256.HashData bytes |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
+        SHA256.HashData bytes
+        |> Convert.ToHexString
+        |> fun value -> value.ToLowerInvariant()
 
     let sha256FileAsync (path: string) (cancellationToken: CancellationToken) =
         task {
             use stream =
-                new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous)
+                new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    1024 * 1024,
+                    FileOptions.Asynchronous
+                )
 
             let! hash = SHA256.HashDataAsync(stream, cancellationToken)
             return Convert.ToHexString(hash).ToLowerInvariant()
         }
 
-    let serialize (manifest: AssetReleaseManifest) = JsonSerializer.SerializeToUtf8Bytes(manifest, jsonOptions)
+    let serialize (manifest: AssetReleaseManifest) =
+        JsonSerializer.SerializeToUtf8Bytes(manifest, jsonOptions)
 
     let deserialize (bytes: byte array) =
         try
-            let manifest = JsonSerializer.Deserialize<AssetReleaseManifest>(bytes, jsonOptions)
+            let payload =
+                if bytes.Length >= 3 && bytes[0] = 0xEFuy && bytes[1] = 0xBBuy && bytes[2] = 0xBFuy then
+                    bytes[3..]
+                else
+                    bytes
+
+            let manifest =
+                JsonSerializer.Deserialize<AssetReleaseManifest>(payload, jsonOptions)
 
             if isNull (box manifest) then
                 Error "Asset manifest JSON deserialized to null."
@@ -91,7 +111,8 @@ module AssetManifest =
         with ex ->
             Error $"Asset manifest JSON is invalid: {ex.Message}"
 
-    let private pathSegments (path: string) = path.Split('/', StringSplitOptions.None)
+    let private pathSegments (path: string) =
+        path.Split('/', StringSplitOptions.None)
 
     let isSafeRelativePath (path: string) =
         not (String.IsNullOrWhiteSpace path)
@@ -100,8 +121,7 @@ module AssetManifest =
         && not (path.Contains ':')
         && not (path |> Seq.exists Char.IsControl)
         && pathSegments path
-           |> Array.forall (fun segment ->
-               not (String.IsNullOrWhiteSpace segment) && segment <> "." && segment <> "..")
+           |> Array.forall (fun segment -> not (String.IsNullOrWhiteSpace segment) && segment <> "." && segment <> "..")
 
     let resolveRelativePath (root: string) (path: string) =
         if not (isSafeRelativePath path) then
@@ -110,7 +130,10 @@ module AssetManifest =
         let rootFull = Path.GetFullPath root
         let relative = path.Replace('/', Path.DirectorySeparatorChar)
         let resolved = Path.GetFullPath(Path.Combine(rootFull, relative))
-        let prefix = rootFull.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + string Path.DirectorySeparatorChar
+
+        let prefix =
+            rootFull.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + string Path.DirectorySeparatorChar
 
         if not (resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then
             invalidArg (nameof path) $"Asset path escapes its root: {path}"
@@ -131,7 +154,10 @@ module AssetManifest =
         if manifest.SchemaVersion <> SchemaVersion then
             errors.Add(ManifestValidationError.UnsupportedSchemaVersion manifest.SchemaVersion)
 
-        if String.IsNullOrWhiteSpace manifest.ReleaseId || not (releaseIdPattern.IsMatch manifest.ReleaseId) then
+        if
+            String.IsNullOrWhiteSpace manifest.ReleaseId
+            || not (releaseIdPattern.IsMatch manifest.ReleaseId)
+        then
             errors.Add(ManifestValidationError.InvalidReleaseId manifest.ReleaseId)
 
         if manifest.CreatedUtc = DateTimeOffset.MinValue then
@@ -150,7 +176,11 @@ module AssetManifest =
             if String.IsNullOrWhiteSpace manifest.Compatibility.FsColbertModelId then
                 errors.Add(ManifestValidationError.InvalidCompatibility "FsColbert model ID is required")
 
-        let files = if isNull manifest.Files then Array.empty else manifest.Files
+        let files =
+            if isNull manifest.Files then
+                Array.empty
+            else
+                manifest.Files
 
         if Array.isEmpty files then
             errors.Add ManifestValidationError.EmptyFileList
@@ -159,7 +189,9 @@ module AssetManifest =
 
         for file in files do
             if isNull (box file) || not (isSafeRelativePath file.Path) then
-                errors.Add(ManifestValidationError.InvalidRelativePath(if isNull (box file) then "<null>" else file.Path))
+                errors.Add(
+                    ManifestValidationError.InvalidRelativePath(if isNull (box file) then "<null>" else file.Path)
+                )
             else
                 if not (seen.Add file.Path) then
                     errors.Add(ManifestValidationError.DuplicatePath file.Path)
@@ -182,25 +214,24 @@ module AssetManifest =
                     let found =
                         if isDirectory then
                             let prefix = path.TrimEnd('/') + "/"
-                            filePaths |> Array.exists (fun candidate -> candidate.StartsWith(prefix, StringComparison.Ordinal))
+
+                            filePaths
+                            |> Array.exists (fun candidate -> candidate.StartsWith(prefix, StringComparison.Ordinal))
                         else
                             filePaths |> Array.contains path
 
                     if not found then
                         errors.Add(ManifestValidationError.MissingBindingTarget(name, path))
 
-            let indexManifest = manifest.Bindings.IndexBundleDirectory.TrimEnd('/') + "/index-bundle.json"
+            let indexManifest =
+                manifest.Bindings.IndexBundleDirectory.TrimEnd('/') + "/index-bundle.json"
 
             if not (filePaths |> Array.contains indexManifest) then
                 errors.Add(ManifestValidationError.MissingBindingTarget("indexBundleManifest", indexManifest))
 
         errors |> Seq.toList
 
-    let verifyTreeAsync
-        (root: string)
-        (manifest: AssetReleaseManifest)
-        (cancellationToken: CancellationToken)
-        =
+    let verifyTreeAsync (root: string) (manifest: AssetReleaseManifest) (cancellationToken: CancellationToken) =
         task {
             let errors = ResizeArray<ManifestValidationError>(validate manifest)
 
@@ -220,9 +251,7 @@ module AssetManifest =
                             let! actualHash = sha256FileAsync path cancellationToken
 
                             if not (String.Equals(actualHash, file.Sha256, StringComparison.OrdinalIgnoreCase)) then
-                                errors.Add(
-                                    ManifestValidationError.FileHashMismatch(file.Path, file.Sha256, actualHash)
-                                )
+                                errors.Add(ManifestValidationError.FileHashMismatch(file.Path, file.Sha256, actualHash))
 
             return errors |> Seq.toList
         }
@@ -261,16 +290,12 @@ module AssetManifest =
                 None
 
 module AssetRuntimeEnvironment =
-    let private shellQuote (value: string) = "'" + value.Replace("'", "'\"'\"'") + "'"
+    let private shellQuote (value: string) =
+        "'" + value.Replace("'", "'\"'\"'") + "'"
 
     let private environmentLine name value = name + "=" + shellQuote value
 
-    let write
-        (releaseRoot: string)
-        (bindings: AssetRuntimeBindings)
-        (statusPath: string)
-        (environmentPath: string)
-        =
+    let write (releaseRoot: string) (bindings: AssetRuntimeBindings) (statusPath: string) (environmentPath: string) =
         let resolve = AssetManifest.resolveRelativePath releaseRoot
         let gemma = resolve bindings.GemmaModel
         let stt = resolve bindings.SttModelDirectory
@@ -291,9 +316,7 @@ module AssetRuntimeEnvironment =
         |> String.concat Environment.NewLine
         |> fun content -> AssetManifest.writeAtomicText environmentPath (content + Environment.NewLine)
 
-    let writeAbsolute
-        (options: LocalAssetPrepareOptions)
-        =
+    let writeAbsolute (options: LocalAssetPrepareOptions) =
         [ environmentLine "LLAMA_CPP_MODEL" (Path.GetFullPath options.GemmaModel)
           environmentLine "OpenSourceVoice__Gemma__LlamaCppModel" (Path.GetFileName options.GemmaModel)
           environmentLine "OpenSourceVoice__Stt__ModelDir" (Path.GetFullPath options.SttModelDirectory)

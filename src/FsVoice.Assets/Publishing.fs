@@ -61,7 +61,9 @@ module AssetPublishing =
 
     let private fsColbertModelId sourceRoot (bindings: AssetRuntimeBindings) =
         let manifestPath =
-            AssetManifest.resolveRelativePath sourceRoot (bindings.IndexBundleDirectory.TrimEnd('/') + "/index-bundle.json")
+            AssetManifest.resolveRelativePath
+                sourceRoot
+                (bindings.IndexBundleDirectory.TrimEnd('/') + "/index-bundle.json")
 
         ensureRegularFile manifestPath "FsColbert index-bundle.json"
         use document = JsonDocument.Parse(File.ReadAllText manifestPath)
@@ -189,18 +191,19 @@ module AssetPublishing =
 
             let manifestBytes = AssetManifest.serialize manifest
             let manifestSha = AssetManifest.sha256Bytes manifestBytes
-            let valuesDirectory = Path.GetDirectoryName(Path.GetFullPath options.ValuesOutputPath)
+
+            let valuesDirectory =
+                Path.GetDirectoryName(Path.GetFullPath options.ValuesOutputPath)
+
             Directory.CreateDirectory valuesDirectory |> ignore
-            let manifestPath = Path.Combine(valuesDirectory, options.ReleaseId + ".manifest.json")
+
+            let manifestPath =
+                Path.Combine(valuesDirectory, options.ReleaseId + ".manifest.json")
+
             AssetManifest.writeAtomicBytes manifestPath manifestBytes
 
             let! manifestUpload =
-                options.Store.PutObjectIfAbsentAsync(
-                    options.ManifestKey,
-                    manifestPath,
-                    manifestSha,
-                    cancellationToken
-                )
+                options.Store.PutObjectIfAbsentAsync(options.ManifestKey, manifestPath, manifestSha, cancellationToken)
 
             match manifestUpload with
             | AssetUploadResult.AlreadyExists ->
