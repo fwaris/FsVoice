@@ -90,6 +90,16 @@ audio, and the response-to-first-answer-audio metric.
 The container does not expose llama.cpp on a host port. FsVoice talks to the
 bundled server at `http://127.0.0.1:8081`.
 
+## Cloud-backed asset cache
+
+For automated Azure Blob or S3 deployments, use
+`deploy/open-source/compose.remote.yml` with
+`deploy/open-source/.env.remote.example`. The container downloads a pinned
+immutable asset release before starting llama.cpp, validates every SHA-256, and
+caches verified content in `FSVOICE_ASSET_CACHE_DIR`. See
+[`open-source-assets.md`](open-source-assets.md) for publishing and Helm
+deployment instructions.
+
 ## Replace the index bundle
 
 Prepare the new bundle in a different versioned host directory. Change

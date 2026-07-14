@@ -64,7 +64,7 @@ module AssetPublishing =
             AssetManifest.resolveRelativePath sourceRoot (bindings.IndexBundleDirectory.TrimEnd('/') + "/index-bundle.json")
 
         ensureRegularFile manifestPath "FsColbert index-bundle.json"
-        use document = JsonDocument.Parse(File.ReadAllBytes manifestPath)
+        use document = JsonDocument.Parse(File.ReadAllText manifestPath)
 
         let tryString (name: string) =
             match document.RootElement.TryGetProperty name with
@@ -129,8 +129,9 @@ module AssetPublishing =
             match existing with
             | Some info when
                 info.Size = entry.Size
-                && (info.Sha256.IsNone
-                    || String.Equals(info.Sha256.Value, entry.Sha256, StringComparison.OrdinalIgnoreCase))
+                && (info.Sha256
+                    |> Option.exists (fun value ->
+                        String.Equals(value, entry.Sha256, StringComparison.OrdinalIgnoreCase)))
                 ->
                 options.Report $"Reusing {entry.Path} ({entry.Sha256})."
                 return false, 0L

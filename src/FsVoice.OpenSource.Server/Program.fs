@@ -7,7 +7,6 @@ open Microsoft.AspNetCore.Builder
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.Logging
-open FsVoice.Assets
 open FsVoice.Ctx
 open FsVoice.OpenSource
 open FsVoice.Retrieval
@@ -60,7 +59,7 @@ module Program =
         [ contextProvider ], status
 
     let private assetStatus (options: OpenSourceVoiceOptions) =
-        AssetManifest.tryReadStatus options.Assets.StatusFile
+        OpenSourceVoiceWebApp.tryReadAssetStatus options.Assets.StatusFile
         |> Option.defaultValue OpenSourceVoiceWebApp.localAssetStatus
 
     [<EntryPoint>]

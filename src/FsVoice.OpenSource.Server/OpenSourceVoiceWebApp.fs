@@ -9,8 +9,21 @@ open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Configuration
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
-open FsVoice.Assets
 open FsVoice.OpenSource
+
+[<CLIMutable>]
+type AssetBootstrapStatus =
+    { Ready: bool
+      Mode: string
+      Provider: string
+      ReleaseId: string
+      ManifestSha256: string
+      CacheRoot: string
+      CacheHit: bool
+      OfflineManifestUsed: bool
+      DownloadedBytes: int64
+      DurationMs: float
+      Message: string }
 
 module OpenSourceVoiceWebApp =
     let private jsonOptions =
@@ -33,6 +46,16 @@ module OpenSourceVoiceWebApp =
           DownloadedBytes = 0L
           DurationMs = 0.0
           Message = "Pre-provisioned local assets are in use." }
+
+    let tryReadAssetStatus (path: string) =
+        if String.IsNullOrWhiteSpace path || not (File.Exists path) then
+            None
+        else
+            try
+                JsonSerializer.Deserialize<AssetBootstrapStatus>(File.ReadAllBytes path, jsonOptions)
+                |> Option.ofObj
+            with _ ->
+                None
 
     let private indexHtml =
         """

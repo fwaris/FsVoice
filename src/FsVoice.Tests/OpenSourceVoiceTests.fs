@@ -1574,6 +1574,7 @@ let ``Open-source web app exposes status and session route`` () =
         let! status = client.GetFromJsonAsync<JsonElement>("/api/status")
         Assert.True(status.GetProperty("ready").GetBoolean())
         Assert.True(status.GetProperty("vad").GetProperty("ready").GetBoolean())
+        Assert.Equal("local", status.GetProperty("assets").GetProperty("mode").GetString())
         Assert.Equal("fake-index", status.GetProperty("index").GetProperty("bundleId").GetString())
 
         let! readyResponse = client.GetAsync("/healthz/ready")

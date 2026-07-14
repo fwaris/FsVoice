@@ -23,7 +23,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsVoice.Assets\FsVoice.Assets.fsproj" />
     <ProjectReference Include="..\FsVoice.OpenSource.Runtime\FsVoice.OpenSource.Runtime.fsproj" />
     <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>

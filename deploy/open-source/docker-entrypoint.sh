@@ -11,7 +11,8 @@ if [[ "${1:-}" != "--as-app" && "$(id -u)" == "0" ]]; then
         cache_namespace="${POD_NAME:-standalone}"
 
         if [[ "${FSVOICE_ASSET_CACHE_PERMISSION_MODE:-rootPreflight}" == "rootPreflight" ]]; then
-            install -d -m 0770 -o app -g app "${cache_base}" "${cache_base}/${cache_namespace}"
+            mkdir -p "${cache_base}"
+            install -d -m 0770 -o app -g app "${cache_base}/${cache_namespace}"
         fi
 
         export FSVOICE_ASSET_CACHE_ROOT="${cache_base}/${cache_namespace}"

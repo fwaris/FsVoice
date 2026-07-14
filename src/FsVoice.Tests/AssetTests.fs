@@ -1,4 +1,4 @@
-module FsVoice.Tests.AssetTests
+module FsVoiceAssetTests
 
 open System
 open System.Collections.Concurrent
@@ -201,7 +201,7 @@ let ``Asset cache prepares a cold release then uses its exact cached manifest of
 [<Fact>]
 let ``Asset publisher uploads content-addressed objects and refuses a duplicate release manifest`` () =
     let source = AssetTestHelpers.createSourceRoot ()
-    use store = MemoryAssetStore([])
+    use store = new MemoryAssetStore([])
     let output = Path.Combine(AssetTestHelpers.tempDirectory "publish", "values.generated.yaml")
 
     let options =

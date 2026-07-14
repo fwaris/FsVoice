@@ -20,6 +20,12 @@ not committed to this repository or embedded in FsVoice packages.
 
 Source: https://github.com/snakers4/silero-vad/tree/v6.2.1
 
+## Cloud asset transport libraries
+
+The optional FsVoice cloud asset bootstrap uses Azure SDK for .NET packages
+(MIT License) and AWS SDK for .NET packages (Apache License 2.0). They transfer
+external runtime assets but do not embed model weights in the FsVoice image.
+
 ## Built-in sample document
 
 Speak2Docs includes a built-in sample index for "AI on the Pulse: Real-Time Health Anomaly Detection with Wearable and Ambient Intelligence" by Davide Gabrielli, Bardh Prenkaj, Paola Velardi, and Stefano Faralli, arXiv:2508.03436, submitted August 5, 2025. The paper is licensed under Creative Commons Attribution 4.0 International: https://creativecommons.org/licenses/by/4.0/
