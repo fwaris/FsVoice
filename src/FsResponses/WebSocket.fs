@@ -1,7 +1,7 @@
 namespace FsResponses
 
 open System
-open System.IO
+open System.Buffers
 open System.Net.WebSockets
 open System.Text
 open System.Text.Json
@@ -14,6 +14,7 @@ type WebSocketCreateRequest =
     { ``type``: string
       model: string
       input: IOitem list
+      context_management: ResponseContextManagement list option
       instructions: string option
       max_output_tokens: int option
       metadata: Map<string, string> option
@@ -37,6 +38,7 @@ type WebSocketCreateRequest =
         { ``type`` = "response.create"
           model = Models.gpt_5
           input = []
+          context_management = None
           instructions = None
           max_output_tokens = None
           metadata = None
@@ -46,7 +48,7 @@ type WebSocketCreateRequest =
           prompt_cache_retention = None
           reasoning = None
           service_tier = None
-          store = Some false
+          store = Some true
           temperature = None
           text = None
           tool_choice = Some ToolChoice.Auto
@@ -60,6 +62,7 @@ type WebSocketCreateRequest =
         { WebSocketCreateRequest.Default with
             model = req.model
             input = req.input
+            context_management = req.context_management
             instructions = req.instructions
             max_output_tokens = req.max_output_tokens
             metadata = req.metadata
@@ -725,6 +728,7 @@ module ResponseWebSocketConfig =
 
 type ResponseWebSocket =
     { socket: ClientWebSocket
+      sendGate: SemaphoreSlim
       config: ResponseWebSocketConfig }
 
 type WebSocketClosed =
@@ -736,6 +740,88 @@ type WebSocketRead =
     | Closed of WebSocketClosed
 
 module ResponsesWebSocket =
+    let private idleAbortDrainTimeout = TimeSpan.FromMilliseconds 500.0
+
+    type private PooledByteAccumulator =
+        { mutable buffer: byte array
+          mutable length: int }
+
+    let private returnPooledBuffer (buffer: byte array) =
+        ArrayPool<byte>.Shared.Return(buffer, clearArray = true)
+
+    let private releaseAccumulator accumulator =
+        if not (isNull accumulator.buffer) then
+            returnPooledBuffer accumulator.buffer
+            accumulator.buffer <- null
+            accumulator.length <- 0
+
+    let private ensureAccumulatorCapacity minimumCapacity accumulator =
+        if isNull accumulator.buffer then
+            accumulator.buffer <- ArrayPool<byte>.Shared.Rent minimumCapacity
+        elif accumulator.buffer.Length < minimumCapacity then
+            let doubledCapacity =
+                if accumulator.buffer.Length = 0 then
+                    minimumCapacity
+                else
+                    accumulator.buffer.Length * 2
+
+            let next = ArrayPool<byte>.Shared.Rent(max minimumCapacity doubledCapacity)
+            Buffer.BlockCopy(accumulator.buffer, 0, next, 0, accumulator.length)
+            returnPooledBuffer accumulator.buffer
+            accumulator.buffer <- next
+
+    let private appendToAccumulator accumulator (source: byte array) count =
+        if count > 0 then
+            let requiredLength = accumulator.length + count
+            ensureAccumulatorCapacity requiredLength accumulator
+            Buffer.BlockCopy(source, 0, accumulator.buffer, accumulator.length, count)
+            accumulator.length <- requiredLength
+
+    let private decodeAccumulator accumulator =
+        if isNull accumulator.buffer then
+            String.Empty
+        else
+            Encoding.UTF8.GetString(accumulator.buffer, 0, accumulator.length)
+
+    let private safeTrace trace message =
+        try
+            trace message
+        with _ ->
+            ()
+
+    let private abortSocket (socket: ClientWebSocket) =
+        try
+            match socket.State with
+            | WebSocketState.Connecting
+            | WebSocketState.Open
+            | WebSocketState.CloseReceived
+            | WebSocketState.CloseSent -> socket.Abort()
+            | WebSocketState.None
+            | WebSocketState.Closed
+            | WebSocketState.Aborted -> ()
+            | _ -> ()
+        with _ ->
+            ()
+
+    let private disposeSocket (socket: ClientWebSocket) =
+        try
+            abortSocket socket
+        finally
+            socket.Dispose()
+
+    let private readTaskStatus (task: Task<ResponseStreamEvent option>) =
+        if task.IsCanceled then
+            "canceled"
+        elif task.IsFaulted then
+            let ex = task.Exception.GetBaseException()
+            $"faulted:{ex.GetType().Name}"
+        elif task.IsCompletedSuccessfully then
+            "completed"
+        elif task.IsCompleted then
+            "completed"
+        else
+            "pending"
+
     let private applyHeaders config (socket: ClientWebSocket) =
         socket.Options.SetRequestHeader("Authorization", $"Bearer {config.apiKey}")
 
@@ -748,22 +834,45 @@ module ResponsesWebSocket =
     let connect config (cancellationToken: CancellationToken) =
         task {
             let socket = new ClientWebSocket()
-            applyHeaders config socket
-            do! socket.ConnectAsync(config.endpoint, cancellationToken)
-            return { socket = socket; config = config }
+
+            try
+                applyHeaders config socket
+                do! socket.ConnectAsync(config.endpoint, cancellationToken)
+
+                return
+                    { socket = socket
+                      sendGate = new SemaphoreSlim(1, 1)
+                      config = config }
+            with ex ->
+                disposeSocket socket
+                return raise ex
         }
 
-    let dispose connection = connection.socket.Dispose()
+    let dispose connection =
+        try
+            disposeSocket connection.socket
+        finally
+            connection.sendGate.Dispose()
 
     let close connection (cancellationToken: CancellationToken) =
         task {
-            if connection.socket.State = WebSocketState.Open then
-                do!
-                    connection.socket.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure,
-                        "closed by client",
-                        cancellationToken
-                    )
+            if
+                connection.socket.State = WebSocketState.Open
+                || connection.socket.State = WebSocketState.CloseReceived
+            then
+                try
+                    do!
+                        connection.socket.CloseAsync(
+                            WebSocketCloseStatus.NormalClosure,
+                            "closed by client",
+                            cancellationToken
+                        )
+                with ex ->
+                    if
+                        connection.socket.State = WebSocketState.Open
+                        || connection.socket.State = WebSocketState.CloseReceived
+                    then
+                        return raise ex
         }
 
     let serializeCreate request =
@@ -775,7 +884,18 @@ module ResponsesWebSocket =
         task {
             let json = serializeEvent event
             let bytes = Encoding.UTF8.GetBytes json
-            do! connection.socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, cancellationToken)
+            do! connection.sendGate.WaitAsync cancellationToken
+
+            try
+                do!
+                    connection.socket.SendAsync(
+                        ArraySegment(bytes, 0, bytes.Length),
+                        WebSocketMessageType.Text,
+                        true,
+                        cancellationToken
+                    )
+            finally
+                connection.sendGate.Release() |> ignore
         }
 
     let sendCreate connection request (cancellationToken: CancellationToken) =
@@ -783,28 +903,43 @@ module ResponsesWebSocket =
 
     let readText connection (cancellationToken: CancellationToken) =
         task {
-            let buffer = Array.zeroCreate<byte> connection.config.receiveBufferSize
-            use stream = new MemoryStream()
+            let bufferSize = max 1 connection.config.receiveBufferSize
+            let buffer = ArrayPool<byte>.Shared.Rent bufferSize
+            let accumulator = { buffer = null; length = 0 }
             let mutable finished = false
-            let mutable closed = None
+            let mutable close = None
+            let mutable text = None
 
-            while not finished do
-                let! result = connection.socket.ReceiveAsync(ArraySegment<byte> buffer, cancellationToken)
+            try
+                while not finished do
+                    let! result = connection.socket.ReceiveAsync(ArraySegment(buffer, 0, bufferSize), cancellationToken)
 
-                if result.MessageType = WebSocketMessageType.Close then
-                    closed <-
-                        Some
-                            { status = result.CloseStatus |> Option.ofNullable
-                              description = result.CloseStatusDescription |> Option.ofObj }
+                    if result.MessageType = WebSocketMessageType.Close then
+                        finished <- true
 
-                    finished <- true
-                else
-                    stream.Write(buffer, 0, result.Count)
-                    finished <- result.EndOfMessage
+                        close <-
+                            Some
+                                { status = result.CloseStatus |> Option.ofNullable
+                                  description = result.CloseStatusDescription |> Option.ofObj }
+                    elif result.MessageType <> WebSocketMessageType.Text then
+                        invalidOp
+                            $"Invalid WebSocket message type received {result.MessageType}, expected {WebSocketMessageType.Text}."
+                    else
+                        if result.EndOfMessage && accumulator.length = 0 then
+                            text <- Some(Encoding.UTF8.GetString(buffer, 0, result.Count))
+                        else
+                            appendToAccumulator accumulator buffer result.Count
 
-            match closed with
-            | Some close -> return Closed close
-            | None -> return TextMessage(Encoding.UTF8.GetString(stream.ToArray()))
+                        finished <- result.EndOfMessage
+
+                match close with
+                | Some close -> return Closed close
+                | None ->
+                    let text = text |> Option.defaultWith (fun () -> decodeAccumulator accumulator)
+                    return TextMessage text
+            finally
+                returnPooledBuffer buffer
+                releaseAccumulator accumulator
         }
 
     let readEvent connection cancellationToken =
@@ -812,32 +947,160 @@ module ResponsesWebSocket =
             let! message = readText connection cancellationToken
 
             match message with
-            | TextMessage text -> return ResponseStreamEvent.deserialize text |> Some
-            | Closed _ -> return None
+            | TextMessage text -> return Some(ResponseStreamEvent.deserialize text)
+            | Closed close ->
+                let status = close.status |> Option.map string |> Option.defaultValue "n/a"
+                let description = close.description |> Option.defaultValue "n/a"
+
+                return
+                    invalidOp
+                        $"Responses WebSocket closed before a terminal response event: status={status}; description={description}."
         }
 
-    let readUntilTerminal connection cancellationToken =
+    let readEventWithIdleTimeout eventIdleTimeout trace connection eventCount lastEvent cancellationToken =
+        task {
+            match eventIdleTimeout with
+            | Some timeout when timeout > TimeSpan.Zero ->
+                let readTask = readEvent connection cancellationToken
+
+                let observeFault (task: Task<_>) =
+                    if task.IsFaulted then
+                        let _ = task.Exception
+                        ()
+
+                readTask.ContinueWith(
+                    Action<Task<ResponseStreamEvent option>> observeFault,
+                    TaskContinuationOptions.ExecuteSynchronously
+                )
+                |> ignore
+
+                let! completed = Task.WhenAny(readTask :> Task, Task.Delay(timeout, cancellationToken))
+
+                if Object.ReferenceEquals(completed, readTask) then
+                    return! readTask
+                elif cancellationToken.IsCancellationRequested then
+                    return raise (OperationCanceledException cancellationToken)
+                else
+                    let lastEventName =
+                        if String.IsNullOrWhiteSpace lastEvent then
+                            "<none>"
+                        else
+                            lastEvent
+
+                    safeTrace
+                        trace
+                        $"receive-idle-timeout; idleTimeoutMs={timeout.TotalMilliseconds:F0}ms; events={eventCount}; lastEvent={lastEventName}; socketState={connection.socket.State}."
+
+                    abortSocket connection.socket
+
+                    let! drained = Task.WhenAny(readTask :> Task, Task.Delay(idleAbortDrainTimeout))
+
+                    let drainStatus =
+                        if Object.ReferenceEquals(drained, readTask) then
+                            readTaskStatus readTask
+                        else
+                            "pending"
+
+                    safeTrace
+                        trace
+                        $"receive-idle-abort-drain; drainTimeoutMs={idleAbortDrainTimeout.TotalMilliseconds:F0}ms; readTaskStatus={drainStatus}; socketState={connection.socket.State}."
+
+                    return
+                        raise (
+                            TimeoutException(
+                                $"Responses WebSocket receive idle timeout after {timeout.TotalMilliseconds:F0}ms; events={eventCount}; lastEvent={lastEventName}."
+                            )
+                        )
+            | _ -> return! readEvent connection cancellationToken
+        }
+
+    let readUntilTerminalWithTrace eventIdleTimeout trace connection cancellationToken =
         task {
             let events = ResizeArray<ResponseStreamEvent>()
             let mutable finished = false
+            let mutable lastEvent = "<none>"
 
             while not finished do
-                let! event = readEvent connection cancellationToken
+                let! event =
+                    readEventWithIdleTimeout eventIdleTimeout trace connection events.Count lastEvent cancellationToken
 
                 match event with
                 | Some event ->
                     events.Add event
+                    let eventName = ResponseStreamEvent.typeName event
+                    lastEvent <- eventName
+                    let isTerminal = ResponseStreamEvent.isTerminal event
+
+                    if events.Count = 1 then
+                        safeTrace
+                            trace
+                            $"receive-first-event; event={eventName}; events={events.Count}; socketState={connection.socket.State}."
+                    elif isTerminal then
+                        safeTrace
+                            trace
+                            $"receive-terminal-event; event={eventName}; events={events.Count}; socketState={connection.socket.State}."
+                    elif events.Count % 25 = 0 then
+                        safeTrace
+                            trace
+                            $"receive-progress; lastEvent={eventName}; events={events.Count}; socketState={connection.socket.State}."
+
                     finished <- ResponseStreamEvent.isTerminal event
                 | None -> finished <- true
 
             return events |> Seq.toList
         }
 
-    let createAndCollect connection request cancellationToken =
+    let readUntilTerminal connection cancellationToken =
+        readUntilTerminalWithTrace None ignore connection cancellationToken
+
+    let createAndCollectWithTrace
+        eventIdleTimeout
+        trace
+        connection
+        (request: WebSocketCreateRequest)
+        (cancellationToken: CancellationToken)
+        =
         task {
-            do! sendCreate connection request cancellationToken
-            return! readUntilTerminal connection cancellationToken
+            let sw = Diagnostics.Stopwatch.StartNew()
+            let mutable stage = "send"
+            let mutable events = List.empty<ResponseStreamEvent>
+
+            try
+                safeTrace trace $"send-start; socketState={connection.socket.State}; inputItems={request.input.Length}."
+                do! sendCreate connection request cancellationToken
+                stage <- "receive"
+
+                safeTrace
+                    trace
+                    $"send-completed; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; socketState={connection.socket.State}; inputItems={request.input.Length}."
+
+                let! readEvents = readUntilTerminalWithTrace eventIdleTimeout trace connection cancellationToken
+
+                events <- readEvents
+                stage <- "complete"
+
+                safeTrace
+                    trace
+                    $"request-completed; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; events={events.Length}; socketState={connection.socket.State}."
+
+                return events
+            with
+            | :? OperationCanceledException as ex ->
+                safeTrace
+                    trace
+                    $"request-canceled; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; stage={stage}; events={events.Length}; socketState={connection.socket.State}."
+
+                return raise ex
+            | ex ->
+                safeTrace
+                    trace
+                    $"request-failed; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; stage={stage}; events={events.Length}; socketState={connection.socket.State}; error={ex.GetType().Name}: {ex.Message}."
+
+                return raise ex
         }
+
+    let createAndCollect connection request (cancellationToken: CancellationToken) =
+        task { return! createAndCollectWithTrace None ignore connection request cancellationToken }
 
     let createWithNewConnection config request cancellationToken =
         task {

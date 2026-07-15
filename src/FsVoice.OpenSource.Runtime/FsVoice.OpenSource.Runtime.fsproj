@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FsVoice.OpenSource</RootNamespace>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <PackageId>FsVoice.OpenSource.Runtime</PackageId>
+    <Description>Local llama.cpp Gemma, Parakeet ONNX, and Pocket TTS ONNX runtime for FsVoice voice agents.</Description>
+    <OnnxRuntimeFlavor Condition="'$(OnnxRuntimeFlavor)' == ''">Cpu</OnnxRuntimeFlavor>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Options.fs" />
+    <Compile Include="ReasoningPolicy.fs" />
+    <Compile Include="Audio.fs" />
+    <Compile Include="GemmaTypes.fs" />
+    <Compile Include="GemmaProcessor.fs" />
+    <Compile Include="GemmaLlamaCppRunner.fs" />
+    <Compile Include="VoiceAgentTypes.fs" />
+    <Compile Include="SileroVadRuntime.fs" />
+    <Compile Include="VoiceActivityEndpoint.fs" />
+    <Compile Include="ParakeetSttRuntime.fs" />
+    <Compile Include="PocketTtsOnnxV2Runtime.fs" />
+    <Compile Include="Tooling.fs" />
+    <Compile Include="GemmaVoiceAgentRuntime.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
+    <ProjectReference Include="..\FsVoice.Ctx.Runtime\FsVoice.Ctx.Runtime.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cpu'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cuda'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" ExcludeAssets="all" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+  <Target Name="ValidateOnnxRuntimeFlavor" BeforeTargets="CollectPackageReferences">
+    <Error
+      Condition="'$(OnnxRuntimeFlavor)' != 'Cpu' and '$(OnnxRuntimeFlavor)' != 'Cuda'"
+      Text="OnnxRuntimeFlavor must be Cpu or Cuda (received '$(OnnxRuntimeFlavor)')." />
+  </Target>
+
+</Project>

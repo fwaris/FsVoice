@@ -2,8 +2,14 @@ module Tests
 
 open FsResponses
 open System
+open System.Buffers
 open System.IO
+open System.Net
+open System.Net.Sockets
+open System.Net.WebSockets
+open System.Text
 open System.Text.Json
+open System.Threading
 open System.Threading.Tasks
 open Xunit
 
@@ -23,6 +29,152 @@ let private firstArrayItem (element: JsonElement) : JsonElement = element.Enumer
 let private parseObject (json: string) : JsonElement =
     use document = JsonDocument.Parse json
     document.RootElement.Clone()
+
+let private freeLoopbackPort () =
+    use listener = new TcpListener(IPAddress.Loopback, 0)
+    listener.Start()
+    let endpoint = listener.LocalEndpoint :?> IPEndPoint
+    endpoint.Port
+
+let private websocketConfig endpoint =
+    { ResponseWebSocketConfig.create "test-api-key" with
+        endpoint = endpoint }
+
+let private withWebSocketServer handler client =
+    task {
+        let port = freeLoopbackPort ()
+        use listener = new HttpListener()
+        listener.Prefixes.Add $"http://127.0.0.1:{port}/ws/"
+        listener.Start()
+
+        let server =
+            task {
+                let! context = listener.GetContextAsync()
+
+                if not context.Request.IsWebSocketRequest then
+                    context.Response.StatusCode <- 400
+                    context.Response.Close()
+                else
+                    let! webSocketContext = context.AcceptWebSocketAsync null
+
+                    try
+                        do! handler webSocketContext.WebSocket
+                    finally
+                        webSocketContext.WebSocket.Dispose()
+            }
+
+        try
+            let config = Uri $"ws://127.0.0.1:{port}/ws/" |> websocketConfig
+            let! result = client config
+            do! server.WaitAsync(TimeSpan.FromSeconds 5.0)
+            return result
+        finally
+            listener.Stop()
+    }
+
+let private withWebSocketServerForConnections connectionCount handler client =
+    task {
+        let port = freeLoopbackPort ()
+        use listener = new HttpListener()
+        listener.Prefixes.Add $"http://127.0.0.1:{port}/ws/"
+        listener.Start()
+
+        let server =
+            task {
+                for connectionIndex in 1..connectionCount do
+                    let! context = listener.GetContextAsync()
+
+                    if not context.Request.IsWebSocketRequest then
+                        context.Response.StatusCode <- 400
+                        context.Response.Close()
+                    else
+                        let! webSocketContext = context.AcceptWebSocketAsync null
+
+                        try
+                            do! handler connectionIndex webSocketContext.WebSocket
+                        finally
+                            webSocketContext.WebSocket.Dispose()
+            }
+
+        try
+            let config = Uri $"ws://127.0.0.1:{port}/ws/" |> websocketConfig
+            let! result = client config
+            do! server.WaitAsync(TimeSpan.FromSeconds 5.0)
+            return result
+        finally
+            listener.Stop()
+    }
+
+let private receiveUtf8 (socket: WebSocket) cancellationToken =
+    task {
+        let buffer = ArrayPool<byte>.Shared.Rent 1024
+        use stream = new MemoryStream()
+        let mutable finished = false
+        let mutable closed = false
+
+        try
+            while not finished do
+                let! result = socket.ReceiveAsync(ArraySegment(buffer, 0, buffer.Length), cancellationToken)
+
+                if result.MessageType = WebSocketMessageType.Close then
+                    closed <- true
+                    finished <- true
+                else
+                    stream.Write(buffer, 0, result.Count)
+                    finished <- result.EndOfMessage
+
+            if closed then
+                return None
+            else
+                return Encoding.UTF8.GetString(stream.GetBuffer(), 0, int stream.Length) |> Some
+        finally
+            ArrayPool<byte>.Shared.Return buffer
+    }
+
+let private sendUtf8 (socket: WebSocket) (text: string) cancellationToken =
+    task {
+        let bytes = Encoding.UTF8.GetBytes text
+        do! socket.SendAsync(ArraySegment(bytes, 0, bytes.Length), WebSocketMessageType.Text, true, cancellationToken)
+    }
+
+let private sendFragmentedText (socket: WebSocket) (text: string) cancellationToken =
+    task {
+        let byteCount = Encoding.UTF8.GetByteCount text
+        let bytes = ArrayPool<byte>.Shared.Rent byteCount
+
+        try
+            let written = Encoding.UTF8.GetBytes(text, 0, text.Length, bytes, 0)
+            let splitAt = max 1 (written / 2)
+            do! socket.SendAsync(ArraySegment(bytes, 0, splitAt), WebSocketMessageType.Text, false, cancellationToken)
+
+            do!
+                socket.SendAsync(
+                    ArraySegment(bytes, splitAt, written - splitAt),
+                    WebSocketMessageType.Text,
+                    true,
+                    cancellationToken
+                )
+        finally
+            ArrayPool<byte>.Shared.Return bytes
+    }
+
+let private responseCompletedJson responseId text =
+    let encodedText = JsonSerializer.Serialize text
+
+    sprintf
+        """{"type":"response.completed","sequence_number":1,"response":{"id":"%s","object":"response","created_at":1710000000,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5","metadata":null,"output":[{"type":"message","id":"msg_%s","status":"completed","role":"assistant","content":[{"type":"output_text","text":%s,"annotations":null}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":null,"store":false,"temperature":1,"text":null,"tool_choice":"auto","tools":[],"top_p":1,"truncation":"auto","usage":null,"user":null}}"""
+        responseId
+        responseId
+        encodedText
+
+let private responseTextDeltaJson responseId text =
+    let encodedText = JsonSerializer.Serialize text
+
+    sprintf
+        """{"type":"response.output_text.delta","sequence_number":1,"response_id":"%s","item_id":"msg_%s","output_index":0,"content_index":0,"delta":%s}"""
+        responseId
+        responseId
+        encodedText
 
 let createRequest () =
     { Request.Default with
@@ -49,6 +201,7 @@ let ``response create websocket request omits http-only fields`` () =
     Assert.False(hasProperty "background" root)
     Assert.False(hasProperty "previous_response_id" root)
     Assert.False(hasProperty "instructions" root)
+    Assert.True(root.GetProperty("store").GetBoolean())
 
     let firstInput = root.GetProperty("input") |> firstArrayItem
     Assert.Equal("message", firstInput.GetProperty("type").GetString())
@@ -72,6 +225,7 @@ let ``websocket continuation request includes previous response and function out
 
     Assert.Equal("response.create", root.GetProperty("type").GetString())
     Assert.Equal("resp_123", root.GetProperty("previous_response_id").GetString())
+    Assert.True(root.GetProperty("store").GetBoolean())
     Assert.Equal("function_call_output", firstInput.GetProperty("type").GetString())
     Assert.Equal("call_123", firstInput.GetProperty("call_id").GetString())
 
@@ -88,6 +242,18 @@ let ``websocket request includes prompt cache controls when configured`` () =
     Assert.Equal("24h", root.GetProperty("prompt_cache_retention").GetString())
 
 [<Fact>]
+let ``websocket request serializes context management compaction`` () =
+    let request =
+        { WebSocketCreateRequest.ofText Models.gpt_5 "Say hello from WebSocket mode." with
+            context_management = Some [ ResponseContextManagement.Compaction {| compact_threshold = 200000 |} ] }
+
+    let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
+    let firstContext = root.GetProperty("context_management") |> firstArrayItem
+
+    Assert.Equal("compaction", firstContext.GetProperty("type").GetString())
+    Assert.Equal(200000, firstContext.GetProperty("compact_threshold").GetInt32())
+
+[<Fact>]
 let ``warmup request sets generate false`` () =
     let request =
         WebSocketCreateRequest.warmup
@@ -101,6 +267,7 @@ let ``warmup request sets generate false`` () =
     let root: JsonElement = request |> ResponsesWebSocket.serializeCreate |> parseObject
 
     Assert.False(root.GetProperty("generate").GetBoolean())
+    Assert.True(root.GetProperty("store").GetBoolean())
     Assert.Equal("You are a careful assistant.", root.GetProperty("instructions").GetString())
 
     let firstTool = root.GetProperty("tools") |> firstArrayItem
@@ -127,6 +294,636 @@ let ``client event wrapper serializes response create`` () =
     Assert.Equal("Say hello from typed client event.", firstContent.GetProperty("text").GetString())
 
 [<Fact>]
+let ``websocket readText reads single-frame text as one message`` () =
+    task {
+        let message =
+            """{"type":"response.output_text.delta","sequence_number":1,"response_id":"resp_123","item_id":"msg_123","output_index":0,"content_index":0,"delta":"hello"}"""
+
+        let! read =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        do! sendUtf8 socket message CancellationToken.None
+                        let! _ = receiveUtf8 socket CancellationToken.None
+
+                        if socket.State = WebSocketState.CloseReceived then
+                            do!
+                                socket.CloseOutputAsync(
+                                    WebSocketCloseStatus.NormalClosure,
+                                    "done",
+                                    CancellationToken.None
+                                )
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! read = ResponsesWebSocket.readText connection CancellationToken.None
+                            do! ResponsesWebSocket.close connection CancellationToken.None
+                            return read
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        match read with
+        | TextMessage text -> Assert.Equal(message, text)
+        | Closed close -> failwith $"Expected text message, got close: {close}"
+    }
+
+[<Fact>]
+let ``websocket readText reads fragmented text as one message`` () =
+    task {
+        let message =
+            """{"type":"response.output_text.delta","sequence_number":1,"response_id":"resp_123","item_id":"msg_123","output_index":0,"content_index":0,"delta":"hello"}"""
+
+        let! read =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        do! sendFragmentedText socket message CancellationToken.None
+                        let! _ = receiveUtf8 socket CancellationToken.None
+
+                        if socket.State = WebSocketState.CloseReceived then
+                            do!
+                                socket.CloseOutputAsync(
+                                    WebSocketCloseStatus.NormalClosure,
+                                    "done",
+                                    CancellationToken.None
+                                )
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! read = ResponsesWebSocket.readText connection CancellationToken.None
+                            do! ResponsesWebSocket.close connection CancellationToken.None
+                            return read
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        match read with
+        | TextMessage text -> Assert.Equal(message, text)
+        | Closed close -> failwith $"Expected text message, got close: {close}"
+    }
+
+[<Fact>]
+let ``websocket readText accumulates when receive buffer is smaller than message`` () =
+    task {
+        let message = String.replicate 50 "chunk-π-"
+
+        let! read =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        do! sendUtf8 socket message CancellationToken.None
+                        let! _ = receiveUtf8 socket CancellationToken.None
+
+                        if socket.State = WebSocketState.CloseReceived then
+                            do!
+                                socket.CloseOutputAsync(
+                                    WebSocketCloseStatus.NormalClosure,
+                                    "done",
+                                    CancellationToken.None
+                                )
+                    })
+                (fun config ->
+                    task {
+                        let config = { config with receiveBufferSize = 7 }
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! read = ResponsesWebSocket.readText connection CancellationToken.None
+                            do! ResponsesWebSocket.close connection CancellationToken.None
+                            return read
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        match read with
+        | TextMessage text -> Assert.Equal(message, text)
+        | Closed close -> failwith $"Expected text message, got close: {close}"
+    }
+
+[<Fact>]
+let ``websocket readText returns close frame`` () =
+    task {
+        let! read =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        do!
+                            socket.CloseOutputAsync(
+                                WebSocketCloseStatus.EndpointUnavailable,
+                                "server closed",
+                                CancellationToken.None
+                            )
+
+                        let! _ = receiveUtf8 socket CancellationToken.None
+                        ()
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! read = ResponsesWebSocket.readText connection CancellationToken.None
+                            do! ResponsesWebSocket.close connection CancellationToken.None
+                            return read
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        match read with
+        | Closed close ->
+            Assert.Equal(Some WebSocketCloseStatus.EndpointUnavailable, close.status)
+            Assert.Equal(Some "server closed", close.description)
+        | TextMessage text -> failwith $"Expected close frame, got text: {text}"
+    }
+
+[<Fact>]
+let ``websocket readText observes cancellation`` () =
+    task {
+        do!
+            withWebSocketServer (fun _ -> task { do! Task.Delay(TimeSpan.FromMilliseconds 250.0) }) (fun config ->
+                task {
+                    let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                    try
+                        use cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds 50.0)
+
+                        do!
+                            Assert.ThrowsAnyAsync<OperationCanceledException>(fun () ->
+                                ResponsesWebSocket.readText connection cancellation.Token :> Task)
+                            :> Task
+                    finally
+                        ResponsesWebSocket.dispose connection
+                })
+    }
+
+[<Fact>]
+let ``websocket connect surfaces failed connection`` () =
+    task {
+        let port = freeLoopbackPort ()
+        let config = Uri $"ws://127.0.0.1:{port}/ws/" |> websocketConfig
+        use cancellation = new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
+
+        let! ex =
+            Assert.ThrowsAnyAsync<Exception>(fun () -> ResponsesWebSocket.connect config cancellation.Token :> Task)
+
+        Assert.NotNull ex
+    }
+
+[<Fact>]
+let ``websocket createAndCollect fails when connection closes before terminal event`` () =
+    task {
+        let request = WebSocketCreateRequest.ofText Models.gpt_5 "Say hello."
+
+        let! message =
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        let! _ = receiveUtf8 socket CancellationToken.None
+
+                        do!
+                            socket.CloseOutputAsync(
+                                WebSocketCloseStatus.EndpointUnavailable,
+                                "server closed before terminal",
+                                CancellationToken.None
+                            )
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let! ex =
+                                Assert.ThrowsAsync<InvalidOperationException>(fun () ->
+                                    ResponsesWebSocket.createAndCollect connection request CancellationToken.None
+                                    :> Task)
+
+                            return ex.Message
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        Assert.Contains("closed before a terminal response event", message)
+    }
+
+[<Fact>]
+let ``websocket sendEvent serializes concurrent sends`` () =
+    task {
+        let messageCount = 20
+        let received = ResizeArray<string>()
+
+        do!
+            withWebSocketServer
+                (fun socket ->
+                    task {
+                        while received.Count < messageCount do
+                            let! message = receiveUtf8 socket CancellationToken.None
+
+                            match message with
+                            | Some text -> received.Add text
+                            | None -> ()
+
+                        do!
+                            socket.CloseOutputAsync(
+                                WebSocketCloseStatus.NormalClosure,
+                                "received",
+                                CancellationToken.None
+                            )
+                    })
+                (fun config ->
+                    task {
+                        let! connection = ResponsesWebSocket.connect config CancellationToken.None
+
+                        try
+                            let sends =
+                                [| for index in 1..messageCount ->
+                                       ResponsesWebSocket.sendEvent
+                                           connection
+                                           (ResponsesClientEvent.ofText Models.gpt_5 $"message {index}")
+                                           CancellationToken.None |]
+
+                            let! _ = Task.WhenAll sends
+                            do! ResponsesWebSocket.close connection CancellationToken.None
+                            ()
+                        finally
+                            ResponsesWebSocket.dispose connection
+                    })
+
+        let messages = received |> Seq.toList
+
+        Assert.Equal(messageCount, messages.Length)
+
+        messages
+        |> List.iter (fun json ->
+            let root = parseObject json
+            Assert.Equal("response.create", root.GetProperty("type").GetString()))
+    }
+
+[<Fact>]
+let ``responses transport prepare reuses persistent websocket`` () =
+    task {
+        let received = ResizeArray<string>()
+
+        let! events =
+            withWebSocketServerForConnections
+                1
+                (fun _ socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add text
+                        | None -> ()
+
+                        do!
+                            sendUtf8
+                                socket
+                                (responseCompletedJson "resp_prepared" "prepared persistent answer")
+                                CancellationToken.None
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = PersistentWebSocket }
+                            )
+
+                        do! transport.PrepareAsync CancellationToken.None
+
+                        return!
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "prepared request",
+                                CancellationToken.None
+                            )
+                    })
+
+        Assert.Single(received) |> ignore
+        Assert.Equal("prepared persistent answer", ResponseStream.outputText events)
+    }
+
+[<Fact>]
+let ``responses transport persistent retries request on fresh websocket`` () =
+    task {
+        let received = ResizeArray<int * string>()
+        let logs = ResizeArray<string>()
+
+        let! events =
+            withWebSocketServerForConnections
+                2
+                (fun connectionIndex socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add(connectionIndex, text)
+                        | None -> ()
+
+                        if connectionIndex = 1 then
+                            do!
+                                socket.CloseOutputAsync(
+                                    WebSocketCloseStatus.EndpointUnavailable,
+                                    "stale socket",
+                                    CancellationToken.None
+                                )
+                        else
+                            do!
+                                sendUtf8
+                                    socket
+                                    (responseCompletedJson "resp_persistent_retry" "persistent retry answer")
+                                    CancellationToken.None
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = PersistentWebSocket
+                                    report = fun message -> logs.Add message }
+                            )
+
+                        return!
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "retry persistent",
+                                CancellationToken.None
+                            )
+                    })
+
+        Assert.Equal<int list>([ 1; 2 ], received |> Seq.map fst |> Seq.toList)
+        Assert.Equal("persistent retry answer", ResponseStream.outputText events)
+        Assert.Contains(logs, fun log -> log.Contains("retrying", StringComparison.OrdinalIgnoreCase))
+    }
+
+[<Fact>]
+let ``responses transport retries when response stream goes idle`` () =
+    task {
+        let received = ResizeArray<int * string>()
+        let logs = ResizeArray<string>()
+
+        let! events =
+            withWebSocketServerForConnections
+                2
+                (fun connectionIndex socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add(connectionIndex, text)
+                        | None -> ()
+
+                        if connectionIndex = 1 then
+                            do!
+                                sendUtf8
+                                    socket
+                                    (responseTextDeltaJson "resp_goes_idle" "partial")
+                                    CancellationToken.None
+
+                            do! Task.Delay(TimeSpan.FromMilliseconds 300.0)
+                        else
+                            do!
+                                sendUtf8
+                                    socket
+                                    (responseCompletedJson "resp_idle_retry" "idle retry answer")
+                                    CancellationToken.None
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = PersistentWebSocket
+                                    responseEventIdleTimeout = Some(TimeSpan.FromMilliseconds 100.0)
+                                    report = fun message -> logs.Add message }
+                            )
+
+                        return!
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "retry after idle",
+                                CancellationToken.None
+                            )
+                    })
+
+        Assert.Equal<int list>([ 1; 2 ], received |> Seq.map fst |> Seq.toList)
+        Assert.Equal("idle retry answer", ResponseStream.outputText events)
+        Assert.Contains(logs, fun log -> log.Contains("receive-idle-timeout", StringComparison.Ordinal))
+        Assert.Contains(logs, fun log -> log.Contains("receive-idle-abort-drain", StringComparison.Ordinal))
+        Assert.Contains(logs, fun log -> log.Contains("retrying", StringComparison.OrdinalIgnoreCase))
+    }
+
+[<Fact>]
+let ``responses transport per request retries on fresh websocket`` () =
+    task {
+        let received = ResizeArray<int * string>()
+
+        let! events =
+            withWebSocketServerForConnections
+                2
+                (fun connectionIndex socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add(connectionIndex, text)
+                        | None -> ()
+
+                        if connectionIndex = 1 then
+                            do!
+                                socket.CloseOutputAsync(
+                                    WebSocketCloseStatus.EndpointUnavailable,
+                                    "per request attempt failed",
+                                    CancellationToken.None
+                                )
+                        else
+                            do!
+                                sendUtf8
+                                    socket
+                                    (responseCompletedJson "resp_per_request_retry" "per request retry answer")
+                                    CancellationToken.None
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = NewWebSocketPerRequest }
+                            )
+
+                        do! transport.PrepareAsync CancellationToken.None
+
+                        return!
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "retry per request",
+                                CancellationToken.None
+                            )
+                    })
+
+        Assert.Equal<int list>([ 1; 2 ], received |> Seq.map fst |> Seq.toList)
+        Assert.Equal("per request retry answer", ResponseStream.outputText events)
+    }
+
+[<Fact>]
+let ``responses transport persistent does not retry cancellation`` () =
+    task {
+        let received = ResizeArray<string>()
+
+        do!
+            withWebSocketServerForConnections
+                1
+                (fun _ socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add text
+                        | None -> ()
+
+                        do! Task.Delay(TimeSpan.FromMilliseconds 500.0)
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = PersistentWebSocket }
+                            )
+
+                        use cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds 100.0)
+
+                        do!
+                            Assert.ThrowsAnyAsync<OperationCanceledException>(fun () ->
+                                transport.CreateAndCollectAsync(
+                                    WebSocketCreateRequest.ofText Models.gpt_5 "cancel persistent",
+                                    cancellation.Token
+                                ))
+                            :> Task
+                    })
+
+        Assert.Single(received) |> ignore
+    }
+
+[<Fact>]
+let ``responses transport per request does not retry cancellation`` () =
+    task {
+        let received = ResizeArray<string>()
+
+        do!
+            withWebSocketServerForConnections
+                1
+                (fun _ socket ->
+                    task {
+                        let! message = receiveUtf8 socket CancellationToken.None
+
+                        match message with
+                        | Some text -> received.Add text
+                        | None -> ()
+
+                        do! Task.Delay(TimeSpan.FromMilliseconds 500.0)
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = NewWebSocketPerRequest }
+                            )
+
+                        use cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds 100.0)
+
+                        do!
+                            Assert.ThrowsAnyAsync<OperationCanceledException>(fun () ->
+                                transport.CreateAndCollectAsync(
+                                    WebSocketCreateRequest.ofText Models.gpt_5 "cancel per request",
+                                    cancellation.Token
+                                ))
+                            :> Task
+                    })
+
+        Assert.Single(received) |> ignore
+    }
+
+[<Fact>]
+let ``responses transport persistent serializes complete request cycles`` () =
+    task {
+        let received = ResizeArray<string>()
+
+        let firstRequestReceived =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let releaseFirstResponse =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let! firstText, secondText =
+            withWebSocketServerForConnections
+                1
+                (fun _ socket ->
+                    task {
+                        let! first = receiveUtf8 socket CancellationToken.None
+
+                        match first with
+                        | Some text -> received.Add text
+                        | None -> ()
+
+                        firstRequestReceived.TrySetResult() |> ignore
+                        do! releaseFirstResponse.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+                        do! sendUtf8 socket (responseCompletedJson "resp_first" "first answer") CancellationToken.None
+
+                        let! second = receiveUtf8 socket CancellationToken.None
+
+                        match second with
+                        | Some text -> received.Add text
+                        | None -> ()
+
+                        do!
+                            sendUtf8
+                                socket
+                                (responseCompletedJson "resp_second" "second answer")
+                                CancellationToken.None
+                    })
+                (fun config ->
+                    task {
+                        use transport =
+                            new ResponsesTransport(
+                                { ResponsesTransportOptions.create config with
+                                    mode = PersistentWebSocket }
+                            )
+
+                        let firstTask =
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "first request",
+                                CancellationToken.None
+                            )
+
+                        do! firstRequestReceived.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+                        let secondTask =
+                            transport.CreateAndCollectAsync(
+                                WebSocketCreateRequest.ofText Models.gpt_5 "second request",
+                                CancellationToken.None
+                            )
+
+                        do! Task.Delay 100
+                        Assert.Single(received) |> ignore
+
+                        releaseFirstResponse.TrySetResult() |> ignore
+
+                        let! firstEvents = firstTask
+                        let! secondEvents = secondTask
+
+                        return ResponseStream.outputText firstEvents, ResponseStream.outputText secondEvents
+                    })
+
+        Assert.Equal("first answer", firstText)
+        Assert.Equal("second answer", secondText)
+        Assert.Equal(2, received.Count)
+    }
+
+[<Fact>]
 let ``text delta event deserializes to typed event`` () =
     let json =
         @"{""type"":""response.output_text.delta"",""sequence_number"":7,""response_id"":""resp_123"",""item_id"":""msg_123"",""output_index"":0,""content_index"":0,""delta"":""hel""}"
@@ -150,6 +947,20 @@ let ``function call output item event deserializes to typed function call`` () =
             Assert.Equal("fc_123", call.id)
             Assert.Equal("call_123", call.call_id)
             Assert.Equal("lookup", call.name)
+        | other -> failwith $"Unexpected item: {other}"
+    | other -> failwith $"Unexpected event: {other}"
+
+[<Fact>]
+let ``compaction output item event deserializes to typed compaction`` () =
+    let json =
+        @"{""type"":""response.output_item.done"",""sequence_number"":2,""response_id"":""resp_123"",""output_index"":0,""item"":{""type"":""compaction"",""id"":""cmp_123"",""encrypted_content"":""encrypted-state""}}"
+
+    match ResponseStreamEvent.deserialize json with
+    | ResponseStreamEvent.OutputItemDone event ->
+        match event.item with
+        | IOitem.Compaction item ->
+            Assert.Equal(Some "cmp_123", item.id)
+            Assert.Equal("encrypted-state", item.encrypted_content)
         | other -> failwith $"Unexpected item: {other}"
     | other -> failwith $"Unexpected event: {other}"
 
@@ -284,6 +1095,22 @@ let ``legacy request message serialization still uses Responses item tags`` () =
     Assert.Equal("message", firstInput.GetProperty("type").GetString())
     Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_text")
     Assert.Contains(content, fun item -> item.GetProperty("type").GetString() = "input_image")
+
+[<Fact>]
+let ``http request serializes context management compaction`` () =
+    let request =
+        { createRequest () with
+            context_management = Some [ ResponseContextManagement.Compaction {| compact_threshold = 200000 |} ] }
+
+    let root: JsonElement =
+        request
+        |> fun req -> JsonSerializer.Serialize(req, Api.serOpts)
+        |> parseObject
+
+    let firstContext = root.GetProperty("context_management") |> firstArrayItem
+
+    Assert.Equal("compaction", firstContext.GetProperty("type").GetString())
+    Assert.Equal(200000, firstContext.GetProperty("compact_threshold").GetInt32())
 
 [<Fact(Skip = "Live OpenAI HTTP smoke test; enable manually when OPENAI_API_KEY is available.")>]
 let ``Create a response`` () =

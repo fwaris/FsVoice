@@ -52,4 +52,5 @@ module PdfRasterizer =
             { DoclingHybrid.defaults with
                 enableLayoutAnalysis = true }
 
-        DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)
+        DoclingHybrid.setRasterizerFactoryWithInfo "desktop-pdftoimage-v1" "Desktop PDFtoImage" (fun options ->
+            Rasterizer(options) :> IDoclingPageRasterizer)

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fsvoice
+description: FsVoice with bundled llama.cpp and externally managed runtime assets
+type: application
+version: 0.1.0
+appVersion: "1.0"

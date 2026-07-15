@@ -18,6 +18,18 @@ module RuntimeSettings =
     let AnswerMaxOutputTokens = "answer.maxOutputTokens"
 
     [<Literal>]
+    let AnswerReasoningEffort = "answer.reasoningEffort"
+
+    [<Literal>]
+    let AnswerToolCallLoopLimit = "answer.toolCallLoopLimit"
+
+    [<Literal>]
+    let MaxContextChunks = "answer.maxContextChunks"
+
+    [<Literal>]
+    let AudioDefaultToSpeaker = "audio.defaultToSpeaker"
+
+    [<Literal>]
     let UseLexicalFilter = "retrieval.useLexicalFilter"
 
     [<Literal>]
@@ -30,13 +42,54 @@ module RuntimeSettings =
     let UseLayoutAnalysis = "pdf.useLayoutAnalysis"
 
     [<Literal>]
-    let DefaultAnswerMaxOutputTokens = 2500
+    let UseOpticalParsing = "pdf.useOpticalParsing"
+
+    [<Literal>]
+    let AutoOpticalParsing = "pdf.autoOpticalParsing"
+
+    [<Literal>]
+    let DescribePdfVisuals = "pdf.describeVisuals"
+
+    [<Literal>]
+    let IosAudioRoutePolicy = "audio.iosRoutePolicy"
+
+    [<Literal>]
+    let DefaultIosAudioRoutePolicy = "speakerphone"
+
+    [<Literal>]
+    let DefaultAnswerMaxOutputTokens = 5000
 
     [<Literal>]
     let MinAnswerMaxOutputTokens = 128
 
     [<Literal>]
     let MaxAnswerMaxOutputTokens = 32000
+
+    [<Literal>]
+    let DefaultAnswerReasoningEffort = "low"
+
+    [<Literal>]
+    let DefaultAnswerToolCallLoopLimit = 8
+
+    let DefaultMaxContextChunks = FsVoice.Ctx.QaDefaults.maxContextChunks
+
+    [<Literal>]
+    let DefaultRealtimeOracleFunctionCallTimeoutMs = 45000
+
+    let DefaultOracleAnswerTransportMode =
+        FsVoice.Ctx.QaAnswerTransportMode.PersistentWebSocket
+
+    [<Literal>]
+    let MinAnswerToolCallLoopLimit = 1
+
+    [<Literal>]
+    let MaxAnswerToolCallLoopLimit = 8
+
+    [<Literal>]
+    let MinMaxContextChunks = 1
+
+    [<Literal>]
+    let MaxMaxContextChunks = 30
 
     let empty () : RuntimeSettings = ref Map.empty
 
@@ -75,6 +128,56 @@ module RuntimeSettings =
         |> int AnswerMaxOutputTokens DefaultAnswerMaxOutputTokens
         |> clamp MinAnswerMaxOutputTokens MaxAnswerMaxOutputTokens
 
+    let normalizeAnswerReasoningEffort value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "low" -> "low"
+        | "medium" -> "medium"
+        | "high" -> "high"
+        | _ -> DefaultAnswerReasoningEffort
+
+    let answerReasoningEffort values =
+        values
+        |> string AnswerReasoningEffort DefaultAnswerReasoningEffort
+        |> normalizeAnswerReasoningEffort
+        |> Text.notEmpty
+
+    let answerToolCallLoopLimit values =
+        values
+        |> int AnswerToolCallLoopLimit DefaultAnswerToolCallLoopLimit
+        |> clamp MinAnswerToolCallLoopLimit MaxAnswerToolCallLoopLimit
+
+    let maxContextChunks values =
+        values
+        |> int MaxContextChunks DefaultMaxContextChunks
+        |> clamp MinMaxContextChunks MaxMaxContextChunks
+
+    let normalizeIosAudioRoutePolicy value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "speaker"
+        | "speakerphone" -> "speakerphone"
+        | "receiver"
+        | "headset"
+        | "receiverorheadset"
+        | "receiver-or-headset" -> "receiverOrHeadset"
+        | _ -> DefaultIosAudioRoutePolicy
+
+    let iosAudioRoutePolicy values =
+        values
+        |> string IosAudioRoutePolicy DefaultIosAudioRoutePolicy
+        |> normalizeIosAudioRoutePolicy
+
+    let audioDefaultToSpeaker fallback values =
+        match values |> tryGet AudioDefaultToSpeaker with
+        | Some value ->
+            match System.Boolean.TryParse value with
+            | true, parsed -> parsed
+            | false, _ -> fallback
+        | None ->
+            values
+            |> tryGet IosAudioRoutePolicy
+            |> Option.map (fun value -> normalizeIosAudioRoutePolicy value = "speakerphone")
+            |> Option.defaultValue fallback
+
     let modelRoleKey role =
         $"model.{FsVoice.Ctx.ModelRole.storageName role}"
 
@@ -99,8 +202,12 @@ module RuntimeSettings =
           logChunks = bool LogChunks false values
           useLexicalFilter = bool UseLexicalFilter true values
           elaborateIndexKeywords = bool ElaborateIndexKeywords false values
-          useHybridPdfParsing = bool UseHybridPdfParsing true values
-          useLayoutAnalysis = bool UseLayoutAnalysis true values }
+          useHybridPdfParsing = true
+          useLayoutAnalysis = bool UseLayoutAnalysis true values
+          useOpticalParsing = bool UseOpticalParsing false values
+          useAutoOcrFallback = bool AutoOpticalParsing true values
+          describePdfVisuals = bool DescribePdfVisuals false values
+          answerToolCallLoopLimit = answerToolCallLoopLimit values }
 
     let composePlugIn
         (retrievalMode: RetrievalMode)
@@ -116,11 +223,26 @@ module RuntimeSettings =
                 definition
 
         let answerModel = FsVoice.Ctx.PlugInDefinition.model FsVoice.Ctx.Answer definition
+        let maxContextChunks = maxContextChunks values
+
+        let functionCallTimeoutMs =
+            if
+                definition.runtime.functionCallTimeoutMs = FsVoice.Ctx.PlugInRuntimeOptions.defaults.functionCallTimeoutMs
+            then
+                DefaultRealtimeOracleFunctionCallTimeoutMs
+            else
+                definition.runtime.functionCallTimeoutMs
 
         { definition with
+            runtime =
+                { definition.runtime with
+                    memoryCandidateChunks = maxContextChunks
+                    maxContextChunks = maxContextChunks
+                    functionCallTimeoutMs = functionCallTimeoutMs }
             models =
                 definition.models
                 |> Map.add
                     FsVoice.Ctx.Answer
                     { answerModel with
-                        maxOutputTokens = Some(answerMaxOutputTokens values) } }
+                        maxOutputTokens = Some(answerMaxOutputTokens values)
+                        reasoningEffort = answerReasoningEffort values |> Option.orElse answerModel.reasoningEffort } }

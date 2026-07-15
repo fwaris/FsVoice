@@ -8,6 +8,8 @@ open FsColbert
 open FsVoice.Retrieval
 
 module PdfRasterizer =
+    let private renderMode = PdfRenderMode.ForPrint
+
     let private bitmapToRgbImage (bitmap: Bitmap) =
         let width = bitmap.Width
         let height = bitmap.Height
@@ -36,7 +38,7 @@ module PdfRasterizer =
         canvas.DrawColor(Color.White)
 
         let destination = new Rect(0, 0, width, height)
-        page.Render(bitmap, destination, null, PdfRenderMode.ForDisplay)
+        page.Render(bitmap, destination, null, renderMode)
 
         { pageNo = pageNumber
           image = bitmapToRgbImage bitmap }
@@ -71,4 +73,7 @@ module PdfRasterizer =
                 enableOcr = false
                 enableLayoutAnalysis = true }
 
-        DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)
+        DoclingHybrid.setRasterizerFactoryWithInfo
+            "android-pdfrenderer-for-print-v1"
+            "Android PdfRenderer ForPrint"
+            (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)

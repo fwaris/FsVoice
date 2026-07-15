@@ -9,6 +9,7 @@
     <PackageLicenseExpression>MIT AND Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>FSharp;Voice;Retrieval;PDF;Docling;ONNX;AI</PackageTags>
+    <OnnxRuntimeFlavor Condition="'$(OnnxRuntimeFlavor)' == ''">Cpu</OnnxRuntimeFlavor>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,9 +37,23 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
-    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="RapidOcrNet" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cpu'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OnnxRuntimeFlavor)' == 'Cuda'">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" ExcludeAssets="all" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" />
+  </ItemGroup>
+
+  <Target Name="ValidateOnnxRuntimeFlavor" BeforeTargets="CollectPackageReferences">
+    <Error
+      Condition="'$(OnnxRuntimeFlavor)' != 'Cpu' and '$(OnnxRuntimeFlavor)' != 'Cuda'"
+      Text="OnnxRuntimeFlavor must be Cpu or Cuda (received '$(OnnxRuntimeFlavor)')." />
+  </Target>
 
 </Project>

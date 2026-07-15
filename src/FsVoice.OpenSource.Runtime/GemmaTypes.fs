@@ -1,0 +1,96 @@
+namespace FsVoice.OpenSource
+
+open System.Threading
+open System.Threading.Tasks
+
+type GemmaChatRole =
+    | System
+    | User
+    | Model
+    | Tool
+
+type GemmaChatMessage =
+    { Role: GemmaChatRole
+      Content: string
+      ToolName: string option }
+
+module GemmaChatMessage =
+    let system content =
+        { Role = GemmaChatRole.System
+          Content = content
+          ToolName = None }
+
+    let user content =
+        { Role = GemmaChatRole.User
+          Content = content
+          ToolName = None }
+
+    let model content =
+        { Role = GemmaChatRole.Model
+          Content = content
+          ToolName = None }
+
+    let tool name content =
+        { Role = GemmaChatRole.Tool
+          Content = content
+          ToolName = Some name }
+
+type GemmaToolParameter =
+    { Name: string
+      Description: string
+      Type: string
+      Required: bool }
+
+type GemmaToolDeclaration =
+    { Name: string
+      Description: string
+      Parameters: GemmaToolParameter array }
+
+type GemmaToolCall =
+    { Name: string
+      Arguments: Map<string, string>
+      RawText: string }
+
+type GemmaGenerationRequest =
+    { Messages: GemmaChatMessage array
+      Tools: GemmaToolDeclaration array
+      AddGenerationPrompt: bool
+      MaxNewTokens: int
+      Temperature: float
+      TopP: float
+      TopK: int }
+
+type GemmaGenerationResult =
+    { Text: string
+      Prompt: string
+      InputTokenCount: int
+      OutputTokenIds: int array
+      StopReason: string
+      TimingsMs: Map<string, float> }
+
+type GemmaParsedResponse =
+    { Thought: string option
+      Content: string }
+
+[<RequireQualifiedAccess>]
+type GemmaResponseParseError =
+    | EmptyContent
+    | UnclosedThoughtChannel
+    | UnexpectedThoughtChannelDelimiter
+    | RepeatedThoughtChannel
+    | UntaggedProcessText
+
+type GemmaRuntimeStatus =
+    { Ready: bool
+      ModelDir: string
+      Variant: string
+      ExecutionProvider: string
+      MissingFiles: string array
+      LoadedSessions: string array
+      Message: string }
+
+type IGemmaRuntime =
+    abstract Status: unit -> GemmaRuntimeStatus
+
+    abstract GenerateAsync:
+        request: GemmaGenerationRequest * cancellationToken: CancellationToken -> Task<GemmaGenerationResult>

@@ -1,6 +1,7 @@
 namespace Speak2Docs.WorkFlow
 
 open System
+open System.Diagnostics
 open System.IO
 open System.Threading
 open Speak2Docs
@@ -17,6 +18,7 @@ module OracleAgent =
           plugIn: FsVoice.Ctx.PlugInDefinition
           qaPlugIn: FsVoice.Ctx.IQaPlugIn
           plugInSettings: Map<string, string>
+          sourceIndexService: FsVoice.Ctx.ISourceIndexService
           session: FsVoice.Ctx.IQaOrchestrator option
           retrievalMode: Speak2Docs.RetrievalMode
           sources: KnowledgeSource list
@@ -31,54 +33,49 @@ module OracleAgent =
         | InternalDocumentIndex -> FsVoice.Ctx.RetrievalMode.InternalDocumentIndex
         | FsColbertWithFallback -> FsVoice.Ctx.RetrievalMode.FsColbertWithFallback
 
-    let private pdfParsingMode flags =
-        if flags.useHybridPdfParsing && flags.useLayoutAnalysis then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Hybrid
-        elif flags.useHybridPdfParsing then
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.HybridWithoutLayout
-        else
-            FsVoice.Retrieval.KnowledgeSources.PdfParsingMode.Legacy
-
     let private modelConfig role (plugIn: FsVoice.Ctx.PlugInDefinition) =
         FsVoice.Ctx.PlugInDefinition.model role plugIn
 
     let private createSession (st: State) flags : FsVoice.Ctx.IQaOrchestrator =
-        let clients: FsVoice.Ctx.QaModelClients =
-            if String.IsNullOrWhiteSpace st.apiKey then
-                FsVoice.Ctx.QaModelClients.none
-            else
-                let queryExpansion =
-                    createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
+        if String.IsNullOrWhiteSpace st.apiKey then
+            invalidOp "OpenAI API key is required for oracle QA Responses WebSocket answering."
 
-                { queryExpansion = Some queryExpansion
-                  answerGenerator = None }
+        let clients: FsVoice.Ctx.QaModelClients =
+            let queryExpansion =
+                createClient st.apiKey (modelConfig FsVoice.Ctx.QueryExpansion st.plugIn).modelId
+
+            { queryExpansion = Some queryExpansion
+              visualDescription =
+                if flags.describePdfVisuals && flags.useHybridPdfParsing && flags.useLayoutAnalysis then
+                    Some(createClient st.apiKey (modelConfig FsVoice.Ctx.VisualDescription st.plugIn).modelId)
+                else
+                    None }
 
         let storageRoot = st.storageRoot
         let answerModel = modelConfig FsVoice.Ctx.Answer st.plugIn
         let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
+        let answerWebSocketConfig = FsResponses.ResponseWebSocketConfig.create st.apiKey
 
         let options =
-            { FsVoice.Ctx.QaSessionOptions.create storageRoot with
+            { FsVoice.Ctx.QaSessionOptions.create storageRoot answerWebSocketConfig with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
-                answerTransport =
-                    if String.IsNullOrWhiteSpace st.apiKey then
-                        None
-                    else
-                        Some(FsVoice.Ctx.QaAnswerTransport.openAIResponsesWebSocket st.apiKey)
                 toolProviders = st.qaPlugIn.GetToolProviders()
                 plugInProfile = st.plugIn.profile
                 prompts = st.plugIn.prompts
                 modelRoles = st.plugIn.models
                 answerModelId = answerModel.modelId
+                answerTransportMode = Speak2Docs.RuntimeSettings.DefaultOracleAnswerTransportMode
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
-                pdfParsingMode = pdfParsingMode flags
+                sourceIngestionProfile = SourceFlags.ingestionProfile flags
+                sourceIndexService = Some st.sourceIndexService
                 enableQueryExpansion = st.plugIn.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.plugIn.runtime.memoryCandidateChunks
                 maxContextChunks = st.plugIn.runtime.maxContextChunks
                 autoWriteback = st.plugIn.runtime.autoWriteback
                 enableDurableMemory = false
+                answerToolCallLoopLimit = flags.answerToolCallLoopLimit
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -89,26 +86,7 @@ module OracleAgent =
 
     let private createContextProvider st flags mode sources : FsVoice.Ctx.IQaContextProvider =
         let qaMode = toQaMode mode
-
-        let keywordModel = modelConfig FsVoice.Ctx.Keyword st.plugIn
-
-        let options =
-            { FsVoice.Retrieval.FsColbertContextProviderOptions.create st.storageRoot qaMode sources with
-                queryExpansionClient = None
-                keywordGenerationClient = None
-                disposeKeywordGenerationClient = false
-                plugInProfile = st.plugIn.profile
-                plugInFingerprint = FsVoice.Ctx.PlugInDefinition.fingerprint st.plugIn
-                keywordModelId = keywordModel.modelId
-                elaborateIndexKeywords = flags.elaborateIndexKeywords
-                pdfParsingMode = pdfParsingMode flags
-                buildMissingIndexes = false
-                logExpansions = flags.logExpansions
-                logChunks = flags.logChunks
-                useLexicalFilter = flags.useLexicalFilter
-                report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
-
-        new FsVoice.Retrieval.FsColbertContextProvider(options) :> FsVoice.Ctx.IQaContextProvider
+        st.sourceIndexService.CreateContextProvider(SourceFlags.ingestionProfile flags, qaMode, sources)
 
     let private createPlugInContextProviders st =
         try
@@ -127,20 +105,31 @@ module OracleAgent =
         match session with
         | :? FsVoice.Ctx.IQaAnswerTransportPreparer as preparer ->
             async {
+                use preparationTimeout = new CancellationTokenSource()
+                preparationTimeout.CancelAfter(TimeSpan.FromMilliseconds(float st.plugIn.runtime.functionCallTimeoutMs))
+
                 try
-                    do! preparer.PrepareAnswerTransportAsync(CancellationToken.None) |> Async.AwaitTask
+                    do!
+                        preparer.PrepareAnswerTransportAsync(preparationTimeout.Token)
+                        |> Async.AwaitTask
+
                     st.bus.PostToAgent(Ag_Log "Answer Responses WebSocket prepared.")
                 with
-                | :? OperationCanceledException -> ()
-                | ex -> st.bus.PostToAgent(Ag_Log $"Answer Responses WebSocket preparation failed: {ex.Message}")
+                | :? OperationCanceledException ->
+                    st.bus.PostToAgent(
+                        Ag_Log
+                            $"Answer Responses WebSocket preparation timed out after {st.plugIn.runtime.functionCallTimeoutMs} ms; the next oracle request will connect on demand."
+                    )
+                | ex ->
+                    st.bus.PostToAgent(
+                        Ag_Log $"Answer Responses WebSocket preparation failed: {ex.GetType().Name}: {ex.Message}"
+                    )
             }
             |> Async.Start
         | _ -> ()
 
     let private configureSession st flags mode sources (session: FsVoice.Ctx.IQaOrchestrator) =
         async {
-            KnowledgeSources.configurePdfParser flags.useLayoutAnalysis
-
             let provider = createContextProvider st flags mode sources
             let providers = createPlugInContextProviders st @ [ provider ]
             let! errors = session.ConfigureAsync(providers, CancellationToken.None) |> Async.AwaitTask
@@ -159,7 +148,7 @@ module OracleAgent =
 
             st.bus.PostToAgent(
                 Ag_Log
-                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName}."
+                    $"QA session configured: mode={Speak2Docs.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName} pdfOptical:{flags.useOpticalParsing} pdfAutoOcr:{flags.useAutoOcrFallback} pdfVisuals:{flags.describePdfVisuals}."
             )
 
             startAnswerTransportPreparation st session
@@ -208,7 +197,20 @@ module OracleAgent =
                       realtimeJudgement = request.realtimeJudgement
                       deadline = Some request.deadline }
 
+                let sw = Stopwatch.StartNew()
+
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"QA request started: turn={request.snapshot.turnId}; question_chars={request.snapshot.text.Length}; timeoutMs={st.plugIn.runtime.functionCallTimeoutMs}; deadline={request.deadline:O}."
+                )
+
                 let! answer = session.AnswerAsync(qaRequest, request.cancellationToken) |> Async.AwaitTask
+                sw.Stop()
+
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"QA request returned: turn={request.snapshot.turnId}; elapsed={sw.Elapsed.TotalMilliseconds:F0}ms; answer_chars={answer.answer.Length}."
+                )
 
                 let chunks: SourceChunk list = answer.context
                 let inventory: KnowledgeSource list = answer.inventory
@@ -241,10 +243,11 @@ module OracleAgent =
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, Some candidate))
             with
             | :? OperationCanceledException ->
+                st.bus.PostToAgent(Ag_Log $"QA request canceled for turn {request.snapshot.turnId}.")
                 request.completion.TrySetCanceled request.cancellationToken |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
             | ex ->
-                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.Message}")
+                st.bus.PostToAgent(Ag_Log $"QA request failed: {ex.GetType().Name}: {ex.Message}")
                 request.completion.TrySetException ex |> ignore
                 st.bus.PostToAgent(Ag_ResponseReady(request.snapshot, None))
         }
@@ -287,7 +290,7 @@ module OracleAgent =
             | _ -> return st
         }
 
-    let start storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode sources flags bus =
+    let start storageRoot apiKey plugIn qaPlugIn plugInSettings sourceIndexService retrievalMode sources flags bus =
         let st0 =
             { bus = bus
               storageRoot = storageRoot
@@ -295,6 +298,7 @@ module OracleAgent =
               plugIn = FsVoice.Ctx.PlugInDefinition.sanitize plugIn
               qaPlugIn = qaPlugIn
               plugInSettings = plugInSettings
+              sourceIndexService = sourceIndexService
               session = None
               retrievalMode = retrievalMode
               sources = sources

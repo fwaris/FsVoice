@@ -64,6 +64,7 @@ type ModelRole =
     | Answer
     | Keyword
     | QueryExpansion
+    | VisualDescription
 
 [<CLIMutable>]
 type ModelRoleConfig =
@@ -136,8 +137,10 @@ module ModelRole =
         | Answer -> "Answer"
         | Keyword -> "Keyword"
         | QueryExpansion -> "QueryExpansion"
+        | VisualDescription -> "VisualDescription"
 
-    let all = [ Realtime; Transcriber; Answer; Keyword; QueryExpansion ]
+    let all =
+        [ Realtime; Transcriber; Answer; Keyword; QueryExpansion; VisualDescription ]
 
     let tryParse value =
         let normalized =
@@ -213,7 +216,7 @@ module PlugInRuntimeOptions =
           memoryCandidateChunks = 14
           maxContextChunks = 12
           realtimeMemoryTimeoutMs = 1200
-          functionCallTimeoutMs = 45000
+          functionCallTimeoutMs = 120000
           autoWriteback = true }
 
     let sanitize runtime =
@@ -412,6 +415,7 @@ Allowed direct actions:
 - handle short rapport, repetition, or simple clarification
 - ask a brief follow-up when the request is too vague to answer safely
 - answer simple conversational turns directly
+- never repeat the startup selected-document-count greeting after the opening greeting, unless the user explicitly asks what is selected
 
 Tool use:
 - For every user ask or question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
@@ -433,7 +437,7 @@ After QUERY_ORACLE returns:
         "Expect natural spoken question-answering conversation. Requests may involve a wide variety of questions or user asks"
 
     let answerSystem =
-        "You are FsVoice's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Treat the user's question as an instruction over the provided evidence. Prefer matched source chunks whose heading, leading text, or local context directly matches the requested topic or section. Treat incidental or deep mentions of the same words as weaker evidence unless the surrounding context clearly answers the request. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful."
+        "You are FsVoice's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Treat the user's question as an instruction over the provided evidence. Prefer matched source chunks whose heading, leading text, or local context directly matches the requested topic or section. Treat incidental or deep mentions of the same words as weaker evidence unless the surrounding context clearly answers the request. When speech recognition has obviously distorted a name or phrase, and the supplied evidence makes the intended question unambiguous, answer that intended question and briefly state the interpretation. Do not invent citations, source details, tool results, or live values. Do not expose analysis, reasoning, drafting notes, self-corrections, or descriptions of how you produced the answer. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful, and return only user-facing answer text."
 
     let answerUserTemplate =
         "User question:\n{{question}}\n\nTyped durable memory:\n{{typedMemory}}\n\nTool observations:\n{{toolObservations}}\n\nSelected source inventory:\n{{sourceInventory}}\n\nMatched source context:\n{{sourceContext}}\n\nReturn only the answer."
@@ -451,11 +455,12 @@ module PlugInDefinition =
           Transcriber, ModelRoleConfig.create "gpt-4o-mini-transcribe"
           Answer,
           { ModelRoleConfig.create "gpt-5.5" with
-              maxOutputTokens = Some 2500 }
+              maxOutputTokens = Some QaDefaults.answerMaxOutputTokens }
           Keyword,
-          { ModelRoleConfig.create "gpt-5-nano" with
+          { ModelRoleConfig.create QaDefaults.keywordModel with
               maxOutputTokens = Some 25000 }
-          QueryExpansion, ModelRoleConfig.create "gpt-5-nano" ]
+          QueryExpansion, ModelRoleConfig.create "gpt-5-nano"
+          VisualDescription, ModelRoleConfig.create "gpt-5-mini" ]
         |> Map.ofList
 
     let defaultPrompts =

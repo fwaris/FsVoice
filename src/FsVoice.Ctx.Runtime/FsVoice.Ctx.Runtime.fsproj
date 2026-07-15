@@ -5,7 +5,7 @@
     <RootNamespace>FsVoice.Ctx</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <PackageId>FsVoice.Ctx.Runtime</PackageId>
-    <Description>Oracle-style context runtime for grounded FsVoice answers, tools, blackboard, and durable memory.</Description>
+    <Description>Oracle-style context runtime for grounded FsVoice answers, tools, durable memory, and optional blackboard utilities.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>FSharp;Voice;Context;Oracle;AI</PackageTags>
   </PropertyGroup>
@@ -15,8 +15,13 @@
     <Compile Include="PlugIns.fs" />
     <Compile Include="DurableMemory.fs" />
     <Compile Include="MemoryService.fs" />
+    <Compile Include="QaSessionOptions.fs" />
     <Compile Include="Blackboard.fs" />
     <Compile Include="Tools.fs" />
+    <Compile Include="QaAnswerModel.fs" />
+    <Compile Include="QaResponseTools.fs" />
+    <Compile Include="QaResponses.fs" />
+    <Compile Include="QaResponsesAnswer.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>
 
@@ -28,7 +33,6 @@
     <ProjectReference Include="..\FsResponses\FsResponses.fsproj" />
     <ProjectReference Include="..\FsVoice.Core\FsVoice.Core.fsproj" />
     <ProjectReference Include="..\FsVoice.Ctx.Contracts\FsVoice.Ctx.Contracts.fsproj" />
-    <ProjectReference Include="..\FsVoice.Retrieval\FsVoice.Retrieval.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

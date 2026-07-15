@@ -20,7 +20,7 @@ You are solely responsible for the documents you add, the questions you ask, how
 
 You are responsible for ensuring that you have the right to use documents, files, and indexes you add to the app.
 
-Speak2Docs uses OpenAI as a third-party AI service for realtime transcription, voice answers, retrieval support, and optional keyword enrichment. Before a realtime connection sends personal data or document context to OpenAI, the app shows an in-app OpenAI data notice popup. If you acknowledge the notice, microphone audio, transcripts, prompts, and selected document passages may be sent to OpenAI under OpenAI's applicable terms, privacy policy, and API data-use controls. Dismissing the notice cancels the connection.
+Speak2Docs uses OpenAI as a third-party AI service for realtime transcription, voice answers, retrieval support, optional keyword enrichment, and optional PDF visual descriptions. Before a realtime connection sends personal data or document context to OpenAI, the app shows an in-app OpenAI data notice popup. If you acknowledge the notice, microphone audio, transcripts, prompts, selected document passages, and cropped PDF visual regions when Describe Visuals is enabled may be sent to OpenAI under OpenAI's applicable terms, privacy policy, and API data-use controls. Dismissing the notice cancels the connection.
 
 ## As-Is Service
 

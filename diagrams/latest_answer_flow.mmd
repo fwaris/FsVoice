@@ -1,0 +1,103 @@
+%% Latest answer flow for Speak2Docs / FsVoice QA.
+%% Focuses on the runtime path from QUERY_ORACLE through QaResponsesAnswerer
+%% and back to spoken output.
+
+flowchart TD
+    Start["Realtime model emits QUERY_ORACLE"] --> VoiceDispatch["VoiceAgent.dispatchToolCall"]
+    VoiceDispatch --> HaveTranscript{"Last finalized<br/>user transcript?"}
+    HaveTranscript -- "No" --> NoTranscript["Send function_call_output:<br/>no completed question"]
+    HaveTranscript -- "Yes" --> Pending["Create MemoryRequest<br/>and pending VoiceToolCall"]
+    Pending --> Await["Queue AwaitToolCall<br/>with function timeout"]
+    Pending --> MemoryRequested["Post Ag_MemoryRequested"]
+
+    subgraph Oracle["OracleAgent"]
+        MemoryRequested --> EnsureSession["ensureSession"]
+        EnsureSession --> SessionExists{"QA session exists<br/>and sources configured?"}
+        SessionExists -- "No" --> Configure["Create QaSession<br/>configure providers<br/>prepare Responses transport"]
+        SessionExists -- "Yes" --> Reuse["Reuse current QaSession"]
+        Configure --> QaTurn["Build QaTurnRequest"]
+        Reuse --> QaTurn
+        QaTurn --> AnswerAsync["QaSession.AnswerAsync"]
+    end
+
+    subgraph QaSession["QaSession.AnswerAsync"]
+        AnswerAsync --> Snapshot["Normalize question<br/>create TranscriptSnapshot"]
+        Snapshot --> BlackboardStart["Blackboard records:<br/>transcript, realtime judgement,<br/>recall decision"]
+        BlackboardStart --> Recall["Durable memory recall task"]
+        BlackboardStart --> Retrieve["Selected-source retrieval task"]
+        Recall --> Evidence["Add memory/source/tool evidence<br/>to blackboard"]
+        Retrieve --> Evidence
+        Evidence --> Prompt["Build AnswerPrompt:<br/>question, typed memory,<br/>source inventory/context,<br/>tool observations"]
+        Prompt --> TransportMode{"answerTransport<br/>configured?"}
+        TransportMode -- "No" --> ChatClient["Chat-client answer path<br/>with empty/token-limit retry handling"]
+        TransportMode -- "Yes" --> ResponsesAnswerer["QaResponsesAnswerer.AnswerAsync"]
+    end
+
+    subgraph Responses["QaResponsesAnswerer"]
+        ResponsesAnswerer --> ToolCatalog["Create response tool catalog<br/>include blackboard_search only after<br/>compaction or blackboard summary"]
+        ToolCatalog --> Bootstrap{"Reusable<br/>previous_response_id?"}
+        Bootstrap -- "Already present" --> BuildInput["Use current user item"]
+        Bootstrap -- "No history" --> Warmup["Warmup request:<br/>stable instructions + tools,<br/>generate=false, store=true"]
+        Warmup --> BuildInput
+        Bootstrap -- "No response id,<br/>local history exists" --> ReplayInput["Replay append-only<br/>local conversation history"]
+        ReplayInput --> CreateRequest
+        BuildInput --> CreateRequest["Responses create request:<br/>previous_response_id when available,<br/>stable context if needed,<br/>optional required initial tool call"]
+
+        CreateRequest --> ModelEvents["Run Responses WebSocket request"]
+        ModelEvents --> ToolCalls{"Function calls<br/>returned?"}
+        ToolCalls -- "No" --> OutputText["Normalize output text"]
+        ToolCalls -- "Yes" --> ToolBudget{"Tool rounds<br/>remaining?"}
+        ToolBudget -- "No" --> ToolFallback["Return latest tool observations<br/>as fallback answer"]
+        ToolBudget -- "Yes" --> InvokeTools["Invoke up to 8 response tools<br/>record observations to blackboard"]
+        InvokeTools --> Followup{"Final allowed<br/>tool round?"}
+        Followup -- "Yes" --> ToolFallback
+        Followup -- "No" --> ToolOutputs["Send function_call_output items<br/>with previous response id"]
+        ToolOutputs --> ModelEvents
+
+        OutputText --> MissingPrev{"previous_response_id<br/>not found?"}
+        MissingPrev -- "Yes" --> ClearPrev["Clear stored response id"]
+        ClearPrev --> ReplayHistory["Retry from local history"]
+        ReplayHistory --> CreateRequest
+        MissingPrev -- "No" --> ResultCheck{"Usable answer?"}
+        ToolFallback --> ResultCheck
+        ResultCheck -- "Token limit" --> TokenFallback["Return max-token guidance fallback"]
+        ResultCheck -- "Response error" --> EmptyFallback["Return oracle empty/error fallback"]
+        ResultCheck -- "Empty text" --> Retry["Retry once with larger<br/>max_output_tokens"]
+        Retry --> ModelEvents
+        ResultCheck -- "Answer text" --> ChainReusable{"Response chain<br/>reusable?"}
+        ChainReusable -- "Yes" --> AppendConversation["Append user + assistant items<br/>and store latest response id"]
+        ChainReusable -- "No" --> ResetConversation["Reset local chain around<br/>user + assistant answer"]
+        AppendConversation --> CompactCheck{"Compaction needed?"}
+        ResetConversation --> AnswerResult["AnswerModelResult:<br/>answer + tool observations"]
+        CompactCheck -- "No" --> AnswerResult
+        CompactCheck -- "Yes" --> ScheduleCompaction["Start background answer<br/>conversation compaction"]
+        ScheduleCompaction --> AnswerResult
+        TokenFallback --> AnswerResult
+        EmptyFallback --> AnswerResult
+    end
+
+    subgraph Background["Background maintenance"]
+        ScheduleCompaction --> CompactRequest["Offline compaction request<br/>summarize old response items"]
+        CompactRequest --> SummaryOk{"Summary text<br/>returned?"}
+        SummaryOk -- "No" --> KeepHistory["Keep existing response history"]
+        SummaryOk -- "Yes" --> RefreshRoot["Refresh response root with<br/>summary item + live tail"]
+        RefreshRoot --> VersionOk{"Conversation version<br/>still matches?"}
+        VersionOk -- "Yes" --> ApplyCompact["Apply compacted root<br/>mark compacted=true"]
+        VersionOk -- "No" --> RetryLater["Discard refresh<br/>schedule later if needed"]
+        ApplyCompact --> EnableBB["Future response tools may include<br/>blackboard_search"]
+    end
+
+    subgraph ReturnPath["Return to realtime speech"]
+        AnswerResult --> Writeback{"Durable memory<br/>writeback enabled and<br/>answer is not fallback?"}
+        Writeback -- "Yes" --> CommitMemory["Commit memory proposals"]
+        Writeback -- "No" --> SkipMemory["Skip durable writeback"]
+        CommitMemory --> FinalRecords
+        SkipMemory --> FinalRecords["Blackboard records:<br/>answer candidate + final answer<br/>schedule pruning"]
+        FinalRecords --> QaAnswer["Return QaAnswer"]
+        QaAnswer --> Candidate["OracleAgent builds OracleCandidate"]
+        Candidate --> CompleteCall["VoiceAgent.completeToolCall"]
+        CompleteCall --> FunctionOutput["Send realtime function_call_output"]
+        FunctionOutput --> Ack{"Realtime acknowledges<br/>function output?"}
+        Ack -- "Yes" --> Speak["response.create:<br/>speak oracle answer exactly"]
+        Speak --> Done["User hears answer"]
+    end

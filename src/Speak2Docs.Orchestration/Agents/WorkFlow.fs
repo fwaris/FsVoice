@@ -15,6 +15,7 @@ module StateMachine =
           plugIn: FsVoice.Ctx.PlugInDefinition
           qaPlugIn: FsVoice.Ctx.IQaPlugIn
           plugInSettings: Map<string, string>
+          sourceIndexService: FsVoice.Ctx.ISourceIndexService
           retrievalMode: RetrievalMode
           voiceConnection: VoiceConnection
           sources: KnowledgeSource list
@@ -30,6 +31,7 @@ module StateMachine =
                 ss.plugIn
                 ss.qaPlugIn
                 ss.plugInSettings
+                ss.sourceIndexService
                 ss.retrievalMode
                 ss.sources
                 ss.flags
@@ -68,7 +70,19 @@ module StateMachine =
 
     and private s_terminate ss _ = async { return F(s_terminate ss, []) }
 
-    let create toHost storageRoot apiKey plugIn qaPlugIn plugInSettings retrievalMode voiceConnection sources flags =
+    let create
+        toHost
+        storageRoot
+        apiKey
+        plugIn
+        qaPlugIn
+        plugInSettings
+        sourceIndexService
+        retrievalMode
+        voiceConnection
+        sources
+        flags
+        =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
         let ss =
@@ -79,6 +93,7 @@ module StateMachine =
               plugIn = plugIn
               qaPlugIn = qaPlugIn
               plugInSettings = plugInSettings
+              sourceIndexService = sourceIndexService
               retrievalMode = retrievalMode
               voiceConnection = voiceConnection
               sources = sources

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "required": ["mode", "cache", "azure", "s3", "local"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["local", "azureBlob", "s3"] },
+        "releaseId": { "type": "string" },
+        "manifestKey": { "type": "string" },
+        "manifestSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{0,64}$" },
+        "cache": {
+          "type": "object",
+          "required": ["hostPath", "retainReleases", "parallelDownloads", "maxRetries", "permissionMode"],
+          "properties": {
+            "hostPath": { "type": "string", "minLength": 1 },
+            "retainReleases": { "type": "integer", "minimum": 1 },
+            "parallelDownloads": { "type": "integer", "minimum": 1 },
+            "maxRetries": { "type": "integer", "minimum": 1 },
+            "permissionMode": { "type": "string", "enum": ["rootPreflight", "preprovisioned"] }
+          }
+        },
+        "azure": { "type": "object" },
+        "s3": { "type": "object" },
+        "local": { "type": "object" }
+      }
+    }
+  }
+}

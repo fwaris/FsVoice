@@ -9,6 +9,11 @@ obj/
 *.user
 temp/
 artifacts/
+served_runs/
+**/served_runs/
+models/
+voices/
+nuget.local/
 # Release signing material and store upload credentials.
 *.p12
 *.mobileprovision

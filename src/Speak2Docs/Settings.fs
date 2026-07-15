@@ -3,6 +3,7 @@ namespace Speak2Docs
 open System
 open System.IO
 open System.Text.Json
+open Microsoft.Maui.Devices
 open Microsoft.Maui.Storage
 
 module Settings =
@@ -84,11 +85,13 @@ module Settings =
         && Text.notEmpty dto.displayName |> Option.isSome
         && Text.notEmpty dto.storedPath |> Option.isSome
 
-    let private ofDto (dto: PdfDocumentDto) : PdfDocumentSource =
+    let private ofDto preserveInProgress (dto: PdfDocumentDto) : PdfDocumentSource =
         let status = statusFromString dto.status
 
         let status, selected, error =
             match status with
+            | Processing
+            | Queued when preserveInProgress -> status, false, Text.notEmpty dto.error
             | Processing
             | Queued -> Failed, false, Some "Processing was interrupted. Tap retry."
             | Ready -> Ready, dto.selected, Text.notEmpty dto.error
@@ -170,7 +173,7 @@ module Settings =
     let clearSuppressOpenAiDataDisclosureVersion () =
         Preferences.Default.Remove(C.SETTINGS_SUPPRESS_OPENAI_DATA_DISCLOSURE_VERSION)
 
-    let private deserializePdfLibrary json =
+    let private deserializePdfLibrary preserveInProgress json =
         if String.IsNullOrWhiteSpace json then
             None
         else
@@ -179,7 +182,7 @@ module Settings =
                 |> Option.ofObj
                 |> Option.bind (fun dtos ->
                     if dtos |> Array.forall isValidDto then
-                        Some(dtos |> Array.toList |> List.map ofDto)
+                        Some(dtos |> Array.toList |> List.map (ofDto preserveInProgress))
                     else
                         None)
             with _ ->
@@ -197,12 +200,12 @@ module Settings =
             with _ ->
                 Set.empty
 
-    let private tryReadPdfLibraryFile () =
+    let private tryReadPdfLibraryFile preserveInProgress =
         try
             let path = pdfLibraryPath ()
 
             if File.Exists path then
-                File.ReadAllText path |> deserializePdfLibrary
+                File.ReadAllText path |> deserializePdfLibrary preserveInProgress
             else
                 None
         with _ ->
@@ -300,13 +303,13 @@ module Settings =
         with _ ->
             []
 
-    let pdfLibrary () : PdfDocumentSource list =
-        match tryReadPdfLibraryFile () with
+    let private loadPdfLibrary preserveInProgress : PdfDocumentSource list =
+        match tryReadPdfLibraryFile preserveInProgress with
         | Some docs -> docs
         | None ->
             let json = Preferences.Default.Get(C.SETTINGS_PDF_LIBRARY, "")
 
-            match deserializePdfLibrary json with
+            match deserializePdfLibrary preserveInProgress json with
             | Some docs ->
                 tryWritePdfLibraryFile json |> ignore
                 docs
@@ -318,6 +321,10 @@ module Settings =
                     tryWritePdfLibraryFile json |> ignore
 
                 docs
+
+    let pdfLibrary () : PdfDocumentSource list = loadPdfLibrary false
+
+    let pdfLibraryForActiveSession () : PdfDocumentSource list = loadPdfLibrary true
 
     let setPdfLibrary (docs: PdfDocumentSource list) : Result<string, string> =
         let json = docs |> List.map toDto |> List.toArray |> JsonSerializer.Serialize
@@ -368,9 +375,29 @@ module Settings =
     let normalizeAnswerMaxOutputTokens value =
         value |> clamp C.MIN_ANSWER_MAX_OUTPUT_TOKENS C.MAX_ANSWER_MAX_OUTPUT_TOKENS
 
+    let normalizeAnswerToolCallLoopLimit value =
+        value
+        |> clamp C.MIN_ANSWER_TOOL_CALL_LOOP_LIMIT C.MAX_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+    let normalizeMaxContextChunks value =
+        value |> clamp C.MIN_MAX_CONTEXT_CHUNKS C.MAX_MAX_CONTEXT_CHUNKS
+
+    let normalizeAnswerReasoningEffort value =
+        RuntimeSettings.normalizeAnswerReasoningEffort value
+
     let private parseAnswerMaxOutputTokens fallback value =
         match Int32.TryParse(defaultArg (Option.ofObj value) "") with
         | true, parsed -> normalizeAnswerMaxOutputTokens parsed
+        | false, _ -> fallback
+
+    let private parseAnswerToolCallLoopLimit fallback value =
+        match Int32.TryParse(defaultArg (Option.ofObj value) "") with
+        | true, parsed -> normalizeAnswerToolCallLoopLimit parsed
+        | false, _ -> fallback
+
+    let private parseMaxContextChunks fallback value =
+        match Int32.TryParse(defaultArg (Option.ofObj value) "") with
+        | true, parsed -> normalizeMaxContextChunks parsed
         | false, _ -> fallback
 
     let private getScopedString (plugInId: string) (suffix: string) (fallback: string) =
@@ -392,6 +419,8 @@ module Settings =
         let fallback =
             match role with
             | FsVoice.Ctx.Answer -> C.DEFAULT_ORACLE_MODEL
+            | FsVoice.Ctx.Keyword -> C.DEFAULT_INDEX_ENRICHMENT_MODEL
+            | FsVoice.Ctx.VisualDescription -> C.DEFAULT_VISUAL_DESCRIPTION_MODEL
             | _ -> ""
 
         let value = value |> Text.notEmpty |> Option.defaultValue fallback
@@ -444,6 +473,35 @@ module Settings =
     let setActivityLogVerbosity value =
         Preferences.Default.Set(C.SETTINGS_ACTIVITY_LOG_LEVEL, ActivityLog.toStorageValue value)
 
+    let applyPlatformMigrations () =
+        if DeviceInfo.Current.Platform = DevicePlatform.iOS then
+            let migrated =
+                Preferences.Default.Get(C.SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED, false)
+
+            if not migrated then
+                Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, false)
+                Preferences.Default.Set(C.SETTINGS_IOS_RECEIVER_AUDIO_ROUTE_MIGRATED, true)
+
+            let speakerMigrated =
+                Preferences.Default.Get(C.SETTINGS_IOS_SPEAKER_AUDIO_ROUTE_MIGRATED, false)
+
+            if not speakerMigrated then
+                Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, true)
+                Preferences.Default.Set(C.SETTINGS_IOS_SPEAKER_AUDIO_ROUTE_MIGRATED, true)
+
+    let defaultAudioDefaultToSpeaker () =
+#if ANDROID || IOS
+        true
+#else
+        false
+#endif
+
+    let audioDefaultToSpeaker () =
+        Preferences.Default.Get(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, defaultAudioDefaultToSpeaker ())
+
+    let setAudioDefaultToSpeaker value =
+        Preferences.Default.Set(C.SETTINGS_AUDIO_DEFAULT_TO_SPEAKER, value)
+
     let answerMaxOutputTokens () =
         let fallback = C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
 
@@ -453,6 +511,35 @@ module Settings =
     let setAnswerMaxOutputTokens value =
         let tokens = value |> parseAnswerMaxOutputTokens C.DEFAULT_ANSWER_MAX_OUTPUT_TOKENS
         Preferences.Default.Set(C.SETTINGS_ANSWER_MAX_OUTPUT_TOKENS, tokens)
+
+    let answerReasoningEffort () =
+        Preferences.Default.Get(C.SETTINGS_ANSWER_REASONING_EFFORT, C.DEFAULT_ANSWER_REASONING_EFFORT)
+        |> normalizeAnswerReasoningEffort
+
+    let setAnswerReasoningEffort value =
+        Preferences.Default.Set(C.SETTINGS_ANSWER_REASONING_EFFORT, normalizeAnswerReasoningEffort value)
+
+    let answerToolCallLoopLimit () =
+        let fallback = C.DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+        Preferences.Default.Get(C.SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT, fallback)
+        |> normalizeAnswerToolCallLoopLimit
+
+    let setAnswerToolCallLoopLimit value =
+        let rounds =
+            value |> parseAnswerToolCallLoopLimit C.DEFAULT_ANSWER_TOOL_CALL_LOOP_LIMIT
+
+        Preferences.Default.Set(C.SETTINGS_ANSWER_TOOL_CALL_LOOP_LIMIT, rounds)
+
+    let maxContextChunks () =
+        let fallback = C.DEFAULT_MAX_CONTEXT_CHUNKS
+
+        Preferences.Default.Get(C.SETTINGS_MAX_CONTEXT_CHUNKS, fallback)
+        |> normalizeMaxContextChunks
+
+    let setMaxContextChunks value =
+        let chunks = value |> parseMaxContextChunks C.DEFAULT_MAX_CONTEXT_CHUNKS
+        Preferences.Default.Set(C.SETTINGS_MAX_CONTEXT_CHUNKS, chunks)
 
     let useLexicalFilter () =
         Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)
@@ -480,17 +567,34 @@ module Settings =
         Preferences.Default.Set(plugInScopedKey plugInId "Runtime.ElaborateIndexKeywords", value)
         setElaborateIndexKeywords value
 
-    let useHybridPdfParsing () =
-        Preferences.Default.Get(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
+    let useHybridPdfParsing () = true
 
-    let setUseHybridPdfParsing value =
-        Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, value)
+    let setUseHybridPdfParsing _ =
+        Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
 
     let useLayoutAnalysis () =
         Preferences.Default.Get(C.SETTINGS_USE_LAYOUT_ANALYSIS, true)
 
     let setUseLayoutAnalysis value =
         Preferences.Default.Set(C.SETTINGS_USE_LAYOUT_ANALYSIS, value)
+
+    let useOpticalParsing () =
+        Preferences.Default.Get(C.SETTINGS_USE_OPTICAL_PARSING, false)
+
+    let setUseOpticalParsing value =
+        Preferences.Default.Set(C.SETTINGS_USE_OPTICAL_PARSING, value)
+
+    let autoOpticalParsing () =
+        Preferences.Default.Get(C.SETTINGS_AUTO_OPTICAL_PARSING, true)
+
+    let setAutoOpticalParsing value =
+        Preferences.Default.Set(C.SETTINGS_AUTO_OPTICAL_PARSING, value)
+
+    let describePdfVisuals () =
+        Preferences.Default.Get(C.SETTINGS_DESCRIBE_PDF_VISUALS, false)
+
+    let setDescribePdfVisuals value =
+        Preferences.Default.Set(C.SETTINGS_DESCRIBE_PDF_VISUALS, value)
 
     let plugInSetting plugInId key fallback =
         getScopedString plugInId $"Settings.{key}" fallback

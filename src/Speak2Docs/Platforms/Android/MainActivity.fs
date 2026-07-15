@@ -6,6 +6,7 @@ open Microsoft.Maui
 
 [<Activity(Theme = "@style/Maui.SplashTheme",
            MainLauncher = true,
+           LaunchMode = LaunchMode.SingleTop,
            ConfigurationChanges =
                (ConfigChanges.ScreenSize
                 ||| ConfigChanges.Orientation

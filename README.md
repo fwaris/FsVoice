@@ -8,6 +8,37 @@ Despite these capabilities, most voice applications still feel like chat applica
 
 The following sections describe the various aspects of the FsVoice platform, culminating with a high-level description of the FsVoice-based [Speak2Docs](https://apps.apple.com/app/6771490875) mobile application that puts it all together.
 
+## Open-source FsVoice voice server
+
+FsVoice also includes a self-hosted voice server that runs the complete voice
+turn locally: Parakeet ONNX transcription, Silero VAD endpointing, Gemma GGUF
+through bundled llama.cpp, Pocket TTS synthesis, and FsColbert retrieval. It
+serves the browser test page and WebSocket/WebRTC clients on port `5067`.
+
+The server uses natural, server-side VAD rather than Start/End-turn controls.
+With barge-in enabled (the default), a confirmed new utterance stops current
+generation and playback before the next answer begins. Conversation history is
+kept as a rolling ten-turn window.
+
+Model weights, voice samples, and indexes are deliberately external to the
+image. For a workstation or A100 deployment, mount or point directly at the
+shared asset directories. In Kubernetes or automated deployments, the same
+image can bootstrap a pinned immutable asset release from Azure Blob Storage or
+Amazon S3 into a verified node-local cache before llama.cpp starts.
+
+Quick links:
+
+- [Docker and local deployment](docs/open-source-docker.md)
+- [Cloud asset manifests, publishing, cache bootstrap, and Helm](docs/open-source-assets.md)
+- [Docker Compose environment example](deploy/open-source/.env.example)
+- [Remote Azure Blob/S3 Compose example](deploy/open-source/.env.remote.example)
+- [Helm chart](deploy/open-source/helm/fsvoice)
+
+Gemma answer limits are configurable because the generation budget includes
+both private thinking and the public answer. The supplied defaults are 1,024
+tokens for deep requests, 768 for balanced requests, and 192 for direct fast
+requests; see the Docker guide for the corresponding environment overrides.
+
 
 ## 1. Exploiting the Realtime API
 The following sections describe what gpt-realtime provides, how FsVoice exploits those capabilities, and where FsVoice adds architectural support to fill the gaps.
@@ -39,7 +70,7 @@ Key benefits include:
 
 - **High cache hit rate**: Since *Responses* encourages append-only context, the chance of using cached tokens becomes much higher. The use of cached tokens significantly reduces not only latency but also cost. Cached tokens are about 1/10th the cost of regular tokens. A cache strategy should be a significant component of contemporary AI systems.
 
-To reduce context bloat and the potential dilution of recent information in long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. The raw context is still maintained for a while longer in a 'Blackboard' agentic memory system that the *Oracle* can consult via tool calls if required.
+To reduce context bloat and the potential dilution of recent information in long-running conversations, FsVoice periodically compacts the *Oracle* context. This is done offline so as not to impact the conversational flow. If the model needs more detail after compaction, it calls the available retrieval or memory tools again for the latest turn.
 
 ## 2. FsVoice Deployment Topologies
 The FsVoice platform affords several types of deployment topologies, from mobile and desktop to web. While a wide variety of configurations are possible, the salient ones are highlighted below:

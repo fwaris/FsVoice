@@ -1,0 +1,187 @@
+{{- $remoteAssets := ne .Values.assets.mode "local" }}
+{{- $rootPreflight := eq .Values.assets.cache.permissionMode "rootPreflight" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "fsvoice.fullname" . }}
+  labels:
+    {{- include "fsvoice.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "fsvoice.fullname" . }}-headless
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fsvoice.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "fsvoice.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      containers:
+        - name: fsvoice
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- if and $remoteAssets $rootPreflight }}
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"]
+            {{- else }}
+            runAsNonRoot: true
+            runAsUser: 1654
+            runAsGroup: 1654
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 5067
+              protocol: TCP
+            - name: webrtc-udp
+              containerPort: 50670
+              protocol: UDP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: FSVOICE_ASSET_MODE
+              value: {{ .Values.assets.mode | quote }}
+            - name: FSVOICE_ASSET_RELEASE_ID
+              value: {{ .Values.assets.releaseId | quote }}
+            - name: FSVOICE_ASSET_MANIFEST_KEY
+              value: {{ .Values.assets.manifestKey | quote }}
+            - name: FSVOICE_ASSET_MANIFEST_SHA256
+              value: {{ .Values.assets.manifestSha256 | quote }}
+            - name: FSVOICE_ASSET_CACHE_ROOT
+              value: /data/asset-cache
+            - name: FSVOICE_ASSET_CACHE_PERMISSION_MODE
+              value: {{ .Values.assets.cache.permissionMode | quote }}
+            - name: FSVOICE_ASSET_RETAIN_RELEASES
+              value: {{ .Values.assets.cache.retainReleases | quote }}
+            - name: FSVOICE_ASSET_PARALLEL_DOWNLOADS
+              value: {{ .Values.assets.cache.parallelDownloads | quote }}
+            - name: FSVOICE_ASSET_MAX_RETRIES
+              value: {{ .Values.assets.cache.maxRetries | quote }}
+            - name: FSVOICE_AZURE_ACCOUNT_URL
+              value: {{ .Values.assets.azure.accountUrl | quote }}
+            - name: FSVOICE_AZURE_CONTAINER
+              value: {{ .Values.assets.azure.container | quote }}
+            - name: FSVOICE_S3_BUCKET
+              value: {{ .Values.assets.s3.bucket | quote }}
+            - name: FSVOICE_S3_REGION
+              value: {{ .Values.assets.s3.region | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.assets.s3.region | quote }}
+            - name: OpenSourceVoice__WorkDir
+              value: /data/work
+            - name: OpenSourceVoice__MaxHistoryTurns
+              value: {{ .Values.runtime.maxHistoryTurns | quote }}
+            - name: OpenSourceVoice__Gemma__ReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.reasoningMaxNewTokens | quote }}
+            - name: OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.balancedReasoningMaxNewTokens | quote }}
+            - name: OpenSourceVoice__Gemma__FastReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.fastReasoningMaxNewTokens | quote }}
+            - name: OpenSourceVoice__Vad__AllowBargeIn
+              value: {{ .Values.runtime.allowBargeIn | quote }}
+            - name: OpenSourceVoice__Stt__ExecutionProvider
+              value: cuda
+            - name: OpenSourceVoice__Stt__Precision
+              value: {{ .Values.runtime.parakeetPrecision | quote }}
+            - name: OpenSourceVoice__Tts__ExecutionProvider
+              value: cpu
+            - name: OpenSourceVoice__Tts__Precision
+              value: {{ .Values.runtime.pocketTtsPrecision | quote }}
+            - name: LLAMA_CPP_CONTEXT_SIZE
+              value: {{ .Values.runtime.llama.contextSize | quote }}
+            - name: LLAMA_CPP_GPU_LAYERS
+              value: {{ .Values.runtime.llama.gpuLayers | quote }}
+            - name: LLAMA_CPP_PARALLEL
+              value: {{ .Values.runtime.llama.parallel | quote }}
+            - name: LLAMA_CPP_STARTUP_TIMEOUT_SECONDS
+              value: {{ .Values.runtime.llama.startupTimeoutSeconds | quote }}
+          {{- if or (ne .Values.assets.azure.sasToken "") (ne .Values.assets.s3.accessKeyId "") (ne .Values.assets.s3.secretAccessKey "") (ne .Values.assets.s3.sessionToken "") }}
+          envFrom:
+            - secretRef:
+                name: {{ include "fsvoice.assetsSecretName" . }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 360
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: work
+              mountPath: /data/work
+            {{- if $remoteAssets }}
+            - name: asset-cache
+              mountPath: /data/asset-cache
+            {{- else }}
+            - name: local-models
+              mountPath: /data/models
+              readOnly: true
+            - name: local-voices
+              mountPath: /data/voices
+              readOnly: true
+            - name: local-indexes
+              mountPath: /data/indexes
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: work
+          hostPath:
+            path: {{ .Values.work.hostPath | quote }}
+            type: DirectoryOrCreate
+        {{- if $remoteAssets }}
+        - name: asset-cache
+          hostPath:
+            path: {{ .Values.assets.cache.hostPath | quote }}
+            type: DirectoryOrCreate
+        {{- else }}
+        - name: local-models
+          hostPath:
+            path: {{ .Values.assets.local.modelsPath | quote }}
+            type: Directory
+        - name: local-voices
+          hostPath:
+            path: {{ .Values.assets.local.voicesPath | quote }}
+            type: Directory
+        - name: local-indexes
+          hostPath:
+            path: {{ .Values.assets.local.indexesPath | quote }}
+            type: Directory
+        {{- end }}

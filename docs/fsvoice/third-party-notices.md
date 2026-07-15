@@ -7,8 +7,24 @@ The app may also include or download local model assets used for document layout
 Notable bundled notice:
 
 - PP-DocLayout-M notice: `src/FsVoice.Retrieval/PackageNotices/PP-DocLayout-M-NOTICE.md`
+- RapidOCR PP-OCRv4 mobile model notice: `src/FsVoice.Retrieval.RapidOcrModels/THIRD-PARTY-NOTICES.md`
 
 Speak2Docs source code is licensed under MIT. Third-party packages retain their respective licenses.
+
+## Silero VAD
+
+The FsVoice open-source server can download and use the Silero VAD v6.2.1 ONNX
+model from `snakers4/silero-vad`. Silero VAD is licensed under the MIT License.
+The model and its license remain in the external shared models directory and are
+not committed to this repository or embedded in FsVoice packages.
+
+Source: https://github.com/snakers4/silero-vad/tree/v6.2.1
+
+## Cloud asset transport libraries
+
+The optional FsVoice cloud asset bootstrap uses Azure SDK for .NET packages
+(MIT License) and AWS SDK for .NET packages (Apache License 2.0). They transfer
+external runtime assets but do not embed model weights in the FsVoice image.
 
 ## Built-in sample document
 
@@ -18,4 +34,4 @@ Source: https://arxiv.org/abs/2508.03436
 
 PDF: https://arxiv.org/pdf/2508.03436
 
-The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text for offline retrieval inside the app.
+The PDF is redistributed unchanged. The local FsColbert index is generated from the PDF text and compact visual-description passages for offline retrieval inside the app.

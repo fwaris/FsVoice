@@ -19,15 +19,16 @@ Before Speak2Docs connects to OpenAI and sends personal data or document context
 
 - microphone audio and realtime transcripts,
 - prompts and questions you ask,
-- selected passages from the documents or indexes you choose.
+- selected passages from the documents or indexes you choose,
+- cropped PDF diagrams, charts, images, or sparse visual tables when the optional Describe Visuals PDF parsing setting is enabled.
 
-This data is sent to OpenAI to provide realtime transcription, voice answers, and retrieval support. Speak2Docs does not operate a separate developer backend for these requests; requests are authenticated with the OpenAI API key you provide. OpenAI handles API data under its applicable terms, privacy policy, and API data-use controls.
+This data is sent to OpenAI to provide realtime transcription, voice answers, retrieval support, and optional PDF visual-description indexing. Speak2Docs does not operate a separate developer backend for these requests; requests are authenticated with the OpenAI API key you provide. OpenAI handles API data under its applicable terms, privacy policy, and API data-use controls.
 
 You can dismiss the notice to cancel the connection. You can also choose not to show the notice again before connecting; this preference is stored locally and can be changed from Settings.
 
 ## Local Storage
 
-Documents, indexes, settings, cached keywords, and logs are stored in the app container on your device. Your OpenAI API key is stored using the platform secure storage mechanism. You can remove documents, indexes, and settings from inside the app or by deleting the app and its data from your device.
+Documents, indexes, settings, cached keywords, cached PDF visual descriptions, and logs are stored in the app container on your device. Your OpenAI API key is stored using the platform secure storage mechanism. You can remove documents, indexes, and settings from inside the app or by deleting the app and its data from your device.
 
 ## Accounts
 

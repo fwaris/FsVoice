@@ -75,7 +75,7 @@ type MemoryRelations =
 
 type MemoryRetrieval =
     { indexText: string
-      colbertDocIds: string list
+      semanticDocumentIds: string list
       indexedAt: DateTimeOffset option
       embeddingModel: string option }
 

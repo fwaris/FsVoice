@@ -1,23 +1,18 @@
 namespace Speak2Docs.Views
 
-open System
 open Fabulous.Maui
 open Speak2Docs
+open Speak2Docs.WorkFlow
 open Microsoft.Maui
 open Microsoft.Maui.Controls
 open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module SettingsView =
-    let private runtimeStatusRows =
-        [ "Platform contract", "FsVoice.Platform"
-          "Orchestration", "Speak2Docs.Orchestration"
-          "WebRTC bridge", "FsVoice.Hosting.AspNetCore" ]
-
     let private isRealtimeActive model =
         model.bundle.IsSome
         || model.pendingConnectionId.IsSome
-        || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+        || model.sessionState <> RealtimeDisconnected
 
     let private canEditSettings model =
         not model.isBusy && not (isRealtimeActive model)
@@ -42,24 +37,22 @@ module SettingsView =
         |> Map.tryFind role
         |> Option.defaultValue (FsVoice.Ctx.PlugInDefinition.model role model.activePlugIn).modelId
 
-    let private facetValue model (field: FsVoice.Ctx.PlugInSettingsField) =
-        model.plugInSettings
-        |> Map.tryFind field.key
-        |> Option.orElse field.defaultValue
+    let private reasoningEffortOptions = [ "Low"; "Medium"; "High" ]
+
+    let private reasoningEffortValues = [ "low"; "medium"; "high" ]
+
+    let private reasoningEffortIndex value =
+        let normalized = Settings.normalizeAnswerReasoningEffort value
+
+        reasoningEffortValues
+        |> List.tryFindIndex ((=) normalized)
+        |> Option.defaultValue 0
+
+    let private reasoningEffortChanged index =
+        reasoningEffortValues
+        |> List.tryItem index
         |> Option.defaultValue ""
-
-    let private parseBool (value: string) =
-        match Boolean.TryParse(value) with
-        | true, parsed -> parsed
-        | false, _ -> false
-
-    let private isBoolFacet (field: FsVoice.Ctx.PlugInSettingsField) =
-        match (defaultArg (Option.ofObj field.kind) "").Trim().ToLowerInvariant() with
-        | "bool"
-        | "boolean"
-        | "toggle"
-        | "switch" -> true
-        | _ -> false
+        |> AnswerReasoningEffortChanged
 
     let private sectionTitle text =
         Label(text)
@@ -97,7 +90,7 @@ module SettingsView =
     let private accountSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 2) {
+            ((Grid(columns, sectionRows 1) {
                 sectionTitle "Account"
 
                 ViewControls.formLabel "OpenAI key" 1
@@ -119,26 +112,19 @@ module SettingsView =
                     .isEnabled(canEdit)
                     .gridRow(1)
                     .gridColumn (2)
-
-                ViewControls.formLabel "PlugIn" 2
-
-                Label($"{model.activePlugIn.displayName} ({model.activePlugIn.id})")
-                    .font(size = 13.)
-                    .centerVertical()
-                    .gridRow(2)
-                    .gridColumn(1)
-                    .gridColumnSpan(2)
-                    .margin (2.)
             })
                 .padding (10.))
 
     let private modelsSection model canEdit =
         let roles = FsVoice.Ctx.ModelRole.all
-        let tokenRow = roles.Length + 1
+        let reasoningRow = roles.Length + 1
+        let tokenRow = roles.Length + 2
+        let toolLoopRow = roles.Length + 3
+        let contextChunksRow = roles.Length + 4
 
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows tokenRow) {
+            ((Grid(columns, sectionRows contextChunksRow) {
                 sectionTitle "Models"
 
                 for row, role in roles |> List.indexed do
@@ -154,12 +140,42 @@ module SettingsView =
                         .gridColumnSpan(2)
                         .margin (2.)
 
+                ViewControls.formLabel "Reasoning Level" reasoningRow
+
+                Picker(reasoningEffortOptions, reasoningEffortIndex model.answerReasoningEffort, reasoningEffortChanged)
+                    .title("Reasoning level")
+                    .isEnabled(canEdit)
+                    .gridRow(reasoningRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
                 ViewControls.formLabel "Max Answer Tokens" tokenRow
 
                 Entry(model.answerMaxOutputTokens, AnswerMaxOutputTokensChanged)
-                    .placeholder("2500")
+                    .placeholder("5000")
                     .isEnabled(canEdit)
                     .gridRow(tokenRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Max Tool Calls" toolLoopRow
+
+                Entry(model.answerToolCallLoopLimit, AnswerToolCallLoopLimitChanged)
+                    .placeholder("8")
+                    .isEnabled(canEdit)
+                    .gridRow(toolLoopRow)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Context Chunks" contextChunksRow
+
+                Entry(model.maxContextChunks, MaxContextChunksChanged)
+                    .placeholder(string C.DEFAULT_MAX_CONTEXT_CHUNKS)
+                    .isEnabled(canEdit)
+                    .gridRow(contextChunksRow)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
@@ -179,6 +195,29 @@ module SettingsView =
                     activityLogToggled
                     canEdit
                     (ActivityLog.displayName model.activityLogVerbosity))
+                    .gridRow(1)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+            })
+                .padding (10.))
+
+    let private audioSection model canEdit =
+        sectionBorder
+            model.appTheme
+            ((Grid(columns, sectionRows 1) {
+                sectionTitle "Audio"
+
+                ViewControls.formLabel "Default Speaker" 1
+
+                (switchWithText
+                    model.audioDefaultToSpeaker
+                    AudioDefaultToSpeakerToggled
+                    canEdit
+                    (if model.audioDefaultToSpeaker then
+                         "Speaker/headset"
+                     else
+                         "Receiver/headset"))
                     .gridRow(1)
                     .gridColumn(1)
                     .gridColumnSpan(2)
@@ -229,68 +268,77 @@ module SettingsView =
     let private pdfParsingSection model canEdit =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 3) {
+            ((Grid(columns, sectionRows 5) {
                 sectionTitle "PDF Parsing"
 
-                ViewControls.formLabel "PDF Parser" 1
+                ViewControls.formLabel "Optical Parsing" 1
 
                 (switchWithText
-                    model.useHybridPdfParsing
-                    UseHybridPdfParsingToggled
+                    model.useOpticalParsing
+                    UseOpticalParsingToggled
                     canEdit
-                    (if model.useHybridPdfParsing then "Hybrid" else "Legacy"))
+                    (if model.useOpticalParsing then
+                         "On - OCR sparse pages"
+                     else
+                         "Off"))
                     .gridRow(1)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Layout Analysis" 2
+                ViewControls.formLabel "Auto OCR Fallback" 2
 
                 (switchWithText
-                    model.useLayoutAnalysis
-                    UseLayoutAnalysisToggled
-                    (canEdit && model.useHybridPdfParsing)
-                    (if model.useLayoutAnalysis then "On - slower" else "Off"))
+                    model.autoOcrFallback
+                    AutoOcrFallbackToggled
+                    canEdit
+                    (if model.autoOcrFallback then
+                         "On - repair garbled text"
+                     else
+                         "Off"))
                     .gridRow(2)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Index Keywords" 3
+                ViewControls.formLabel "Layout Analysis" 3
+
+                (switchWithText
+                    model.useLayoutAnalysis
+                    UseLayoutAnalysisToggled
+                    canEdit
+                    (if model.useLayoutAnalysis then "On - slower" else "Off"))
+                    .gridRow(3)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+                ViewControls.formLabel "Enrich Keywords" 4
 
                 Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
                     .isEnabled(canEdit)
-                    .gridRow(3)
+                    .gridRow(4)
                     .gridColumn(1)
                     .centerVertical ()
-            })
-                .padding (10.))
 
-    let private runtimeSection appTheme =
-        sectionBorder
-            appTheme
-            ((Grid(columns, sectionRows runtimeStatusRows.Length) {
-                sectionTitle "Runtime"
+                ViewControls.formLabel "Describe Visuals" 5
 
-                for row, (label, assemblyName) in runtimeStatusRows |> List.indexed do
-                    let row = row + 1
-
-                    ViewControls.formLabel label row
-
-                    Label(assemblyName)
-                        .font(size = 13.)
-                        .centerVertical()
-                        .gridRow(row)
-                        .gridColumn(1)
-                        .gridColumnSpan(2)
-                        .margin (2.)
+                (switchWithText
+                    model.describePdfVisuals
+                    DescribePdfVisualsToggled
+                    (canEdit && model.useLayoutAnalysis)
+                    (if model.describePdfVisuals then "On - slower" else "Off"))
+                    .gridRow(5)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
             })
                 .padding (10.))
 
     let private linksSection model =
         sectionBorder
             model.appTheme
-            ((Grid(columns, sectionRows 5) {
+            ((Grid(columns, sectionRows 4) {
                 sectionTitle "Links"
 
                 ViewControls.formLabel "Terms" 1
@@ -320,16 +368,7 @@ module SettingsView =
                     .gridColumnSpan(2)
                     .margin (2.)
 
-                ViewControls.formLabel "Settings" 4
-
-                Button("Help", OpenAppLink SettingsHelp)
-                    .font(size = 13.)
-                    .gridRow(4)
-                    .gridColumn(1)
-                    .gridColumnSpan(2)
-                    .margin (2.)
-
-                ViewControls.formLabel "AI Data" 5
+                ViewControls.formLabel "AI Data" 4
 
                 Button(
                     (if model.openAiDisclosureSuppressed then
@@ -339,41 +378,10 @@ module SettingsView =
                     OpenAiDisclosure_Show ReviewOnly
                 )
                     .font(size = 13.)
-                    .gridRow(5)
+                    .gridRow(4)
                     .gridColumn(1)
                     .gridColumnSpan(2)
                     .margin (2.)
-            })
-                .padding (10.))
-
-    let private plugInSettingsSection model canEdit =
-        sectionBorder
-            model.appTheme
-            ((Grid(columns, sectionRows model.activePlugIn.settingsFacets.Length) {
-                sectionTitle "PlugIn Settings"
-
-                for row, field in model.activePlugIn.settingsFacets |> List.indexed do
-                    let row = row + 1
-
-                    ViewControls.formLabel field.label row
-
-                    if isBoolFacet field then
-                        Switch(
-                            parseBool (facetValue model field),
-                            fun value -> PlugInSettingChanged(field.key, string value)
-                        )
-                            .isEnabled(canEdit)
-                            .gridRow(row)
-                            .gridColumn(1)
-                            .centerVertical ()
-                    else
-                        Entry(facetValue model field, fun value -> PlugInSettingChanged(field.key, value))
-                            .placeholder(field.label)
-                            .isEnabled(canEdit)
-                            .gridRow(row)
-                            .gridColumn(1)
-                            .gridColumnSpan(2)
-                            .margin (2.)
             })
                 .padding (10.))
 
@@ -384,13 +392,10 @@ module SettingsView =
             accountSection model canEdit
             modelsSection model canEdit
             activitySection model canEdit
+            audioSection model canEdit
             retrievalSection model canEdit
             pdfParsingSection model canEdit
-            runtimeSection model.appTheme
             linksSection model
-
-            if not (List.isEmpty model.activePlugIn.settingsFacets) then
-                plugInSettingsSection model canEdit
         }
 
     let contentPage (model: Model) =

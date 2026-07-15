@@ -1,0 +1,63 @@
+%% Open-source FsVoice latency flow
+%% (browser/WebRTC -> Parakeet STT -> llama.cpp Gemma/tools -> Pocket TTS -> browser).
+
+flowchart TD
+    Start(["User finishes speaking"]) --> TurnEnd["Browser sends turn.end<br/><b>Start E2E response clock</b>"]
+
+    subgraph Ingress["1. Browser and WebRTC ingress"]
+        TurnEnd --> Control["Data-channel control delivery<br/>roughly network RTT / 2<br/><i>not measured</i>"]
+        Control --> Buffer["End TurnBuffer; copy Float32 audio<br/>queue RunTurnAsync<br/><i>expected small, not measured</i>"]
+        Buffer --> Persist["Persist input .f32 + .wav<br/><i>synchronous I/O, not measured</i>"]
+    end
+
+    subgraph STT["2. Speech to text"]
+        Persist --> Resample["Normalize 24 kHz mono audio<br/>Parakeet ONNX preprocessing<br/><i>included in STT timer</i>"]
+        Resample --> Asr["Parakeet TDT ONNX transcription<br/><b>duration recorded in details.json</b>"]
+        Asr --> Transcript["Parse / clean transcript; emit event<br/><i>expected small, not measured</i>"]
+    end
+
+    subgraph Reasoning["3. llama.cpp Gemma reasoning and optional tools"]
+        Transcript --> Think1["llama.cpp Gemma reasoning round 1<br/>prompt evaluation + token generation<br/><b>timings recorded per round</b>"]
+        Think1 --> ToolDecision{"Tool call?"}
+        ToolDecision -- "No" --> FinalText["Sanitize final text; emit event"]
+
+        ToolDecision -- "Yes" --> StartTool["Start tool invocation"]
+        StartTool --> Tool["Source inventory / FsColbert retrieval<br/><b>tool duration recorded</b>"]
+        StartTool --> Filler["Select filler and synthesize once<br/><b>runs while tool is active</b><br/>first-chunk latency not recorded"]
+        Tool --> Join["Wait for tool and filler<br/><b>cost = max(tool, filler), not sum</b>"]
+        Filler --> Join
+        Join --> ThinkN["llama.cpp Gemma follow-up reasoning<br/>repeat up to configured tool round limit<br/><b>timings recorded per round</b>"]
+        ThinkN --> MoreTools{"Another tool call?"}
+        MoreTools -- "Yes" --> StartTool
+        MoreTools -- "No" --> FinalText
+    end
+
+    subgraph TTS["4. Final speech synthesis"]
+        FinalText --> StreamingTts["Pocket TTS ONNX<br/>generate and emit incremental chunks<br/><b>first-answer-audio latency recorded</b>"]
+    end
+
+    subgraph Egress["5. Audio egress and playback"]
+        StreamingTts --> FirstChunk
+        FirstChunk --> Packetize["Resample to negotiated codec; encode Opus<br/>send 20 ms RTP frames in real time<br/><i>CPU + network + jitter buffer not measured</i>"]
+        Packetize --> Heard(["User hears first answer audio<br/><b>End response-latency clock</b>"])
+        Heard --> Playback["Continue real-time playback<br/><i>completion time is distinct from response latency</i>"]
+    end
+
+    Formula["<b>Time to first answer audio</b><br/>control + buffer/I/O + STT + reasoning round 1<br/>+ optional sum of max(tool, filler) and follow-up rounds<br/>+ TTS time to first chunk + egress"]
+    TurnEnd -. "critical-path definition" .-> Formula
+    Formula -.-> Heard
+
+    Findings["<b>Current instrumentation</b><br/>1. Parakeet owns transcription; Gemma receives text only.<br/>2. llama.cpp reports prompt/decode timing for every reasoning round.<br/>3. FsVoice records retrieval/tool time and response-to-first-answer-audio."]
+    Findings -.-> Formula
+
+    classDef measured fill:#d8f3dc,stroke:#2d6a4f,color:#081c15;
+    classDef partial fill:#fff3bf,stroke:#e67700,color:#3d2b00;
+    classDef unknown fill:#ffe3e3,stroke:#c92a2a,color:#3b0909;
+    classDef milestone fill:#dbeafe,stroke:#2563eb,color:#0b1f44;
+
+    class Asr,Playback measured;
+    class Resample,Transcript,Filler,StreamingTts partial;
+    class Control,Buffer,Persist,Think1,Tool,ThinkN,Packetize unknown;
+    class Start,TurnEnd,FirstChunk,Heard milestone;
+
+    Legend["Legend: green = observed artifact timing; yellow = partial/internal timing;<br/>red = not measured; blue = latency milestone"]

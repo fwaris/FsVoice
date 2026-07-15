@@ -21,11 +21,156 @@ type KnowledgeSource =
         | Markdown -> $"Markdown: {this.location}"
         | Json -> $"JSON: {this.location}"
 
+[<RequireQualifiedAccess>]
+type SourceContentRole =
+    | Unknown
+    | FrontMatter
+    | Abstract
+    | MainBody
+    | References
+    | Appendix
+    | SubmissionChecklist
+
+module SourceContentRole =
+    let displayName =
+        function
+        | SourceContentRole.Unknown -> "Unknown"
+        | SourceContentRole.FrontMatter -> "Front matter"
+        | SourceContentRole.Abstract -> "Abstract"
+        | SourceContentRole.MainBody -> "Main body"
+        | SourceContentRole.References -> "References"
+        | SourceContentRole.Appendix -> "Appendix"
+        | SourceContentRole.SubmissionChecklist -> "Submission checklist"
+
 type SourceChunk =
     { source: KnowledgeSource
       index: int
+      sectionPath: string list
+      contentRole: SourceContentRole
+      pageNumbers: int list
+      layoutLabels: string list
+      captions: string list
       text: string
       score: float32 }
+
+type PdfTextExtraction =
+    | LegacyText
+    | StructuredText of layoutAnalysis: bool
+
+type PdfOcrPolicy =
+    { repairCorruptText: bool
+      parseSparsePages: bool }
+
+module PdfOcrPolicy =
+    let defaults =
+        { repairCorruptText = true
+          parseSparsePages = false }
+
+type PdfIngestionProfile =
+    { textExtraction: PdfTextExtraction
+      ocr: PdfOcrPolicy
+      describeVisuals: bool }
+
+module PdfIngestionProfile =
+    let defaults =
+        { textExtraction = StructuredText true
+          ocr = PdfOcrPolicy.defaults
+          describeVisuals = false }
+
+    let fromLegacyFlags useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback describePdfVisuals =
+        { textExtraction =
+            if useHybridPdfParsing then
+                StructuredText useLayoutAnalysis
+            else
+                LegacyText
+          ocr =
+            { repairCorruptText = useAutoOcrFallback
+              parseSparsePages = useOpticalParsing }
+          describeVisuals = describePdfVisuals }
+
+type SourceIngestionProfile = { pdf: PdfIngestionProfile }
+
+module SourceIngestionProfile =
+    let defaults = { pdf = PdfIngestionProfile.defaults }
+
+    let fromLegacyFlags useHybridPdfParsing useLayoutAnalysis useOpticalParsing useAutoOcrFallback describePdfVisuals =
+        { pdf =
+            PdfIngestionProfile.fromLegacyFlags
+                useHybridPdfParsing
+                useLayoutAnalysis
+                useOpticalParsing
+                useAutoOcrFallback
+                describePdfVisuals }
+
+type SourcePreviewVectorSummary =
+    { tokenCount: int
+      embeddingDim: int
+      valueSample: float32 list }
+
+type SourcePreviewRecord =
+    { index: int
+      sectionPath: string list
+      contentRole: SourceContentRole
+      pageNumbers: int list
+      layoutLabels: string list
+      captions: string list
+      text: string
+      keywords: string list
+      terms: string list
+      vector: SourcePreviewVectorSummary }
+
+type SourcePreview =
+    { source: KnowledgeSource
+      totalChunks: int
+      sampledCount: int
+      records: SourcePreviewRecord list }
+
+module SourcePreview =
+    let mapRecords mapRecord preview =
+        { preview with
+            records = preview.records |> List.map mapRecord }
+
+module SourceRendering =
+    let private renderPageNumbers pages =
+        pages |> List.map string |> String.concat ", "
+
+    let renderContextWithLimit maxChunks (chunks: SourceChunk list) =
+        chunks
+        |> List.truncate (max 1 maxChunks)
+        |> List.mapi (fun index chunk ->
+            let metadata =
+                seq {
+                    yield $"source={chunk.source.DisplayName}"
+                    yield $"chunk={chunk.index}"
+
+                    if not (List.isEmpty chunk.pageNumbers) then
+                        yield $"pages={renderPageNumbers chunk.pageNumbers}"
+
+                    if chunk.contentRole <> SourceContentRole.Unknown then
+                        yield $"role={SourceContentRole.displayName chunk.contentRole}"
+
+                    if not (List.isEmpty chunk.sectionPath) then
+                        let sectionPath = String.concat " > " chunk.sectionPath
+                        yield $"section={sectionPath}"
+
+                    if not (List.isEmpty chunk.layoutLabels) then
+                        let layoutLabels = String.concat "," chunk.layoutLabels
+                        yield $"layout={layoutLabels}"
+                }
+                |> String.concat "; "
+
+            $"[{index + 1}] {metadata}\n{chunk.text}")
+        |> String.concat "\n\n"
+
+    let renderContext chunks = renderContextWithLimit 12 chunks
+
+    let renderInventory (sources: KnowledgeSource list) =
+        if List.isEmpty sources then
+            "No selected source context providers are loaded."
+        else
+            sources
+            |> List.mapi (fun index source -> $"[{index + 1}] {source.DisplayName}")
+            |> String.concat "\n"
 
 type QaContextRequest = { query: string; maxResults: int }
 
@@ -115,6 +260,17 @@ type IQaContextProvider =
     abstract LoadAsync: CancellationToken -> Task<string list>
     abstract RetrieveAsync: QaContextRequest * CancellationToken -> Task<SourceChunk list>
     abstract InventoryAsync: CancellationToken -> Task<string>
+
+type ISemanticIndexResourceProvider =
+    abstract SemanticIndexResource: obj option
+
+type ISourceIndexService =
+    abstract CreateContextProvider: SourceIngestionProfile * RetrievalMode * KnowledgeSource list -> IQaContextProvider
+
+    abstract PreviewAsync:
+        SourceIngestionProfile * KnowledgeSource * int * CancellationToken -> Task<Result<SourcePreview, string>>
+
+    abstract DeleteArtifactsAsync: KnowledgeSource * CancellationToken -> Task<Result<int * string list, exn>>
 
 type QaTurnRequest =
     { turnId: string
