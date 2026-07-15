@@ -120,3 +120,22 @@ On Linux, ensure UID 1654 can write to `FSVOICE_WORK_DIR`. All other mounts are
 read-only. To tune llama.cpp without rebuilding, set `LLAMA_CPP_CONTEXT_SIZE`,
 `LLAMA_CPP_GPU_LAYERS`, or whitespace-separated `LLAMA_CPP_EXTRA_ARGS` in
 `.env`.
+
+## Longer Gemma answers
+
+FsVoice sends a per-request generation cap to llama.cpp. The cap covers both
+Gemma's hidden thinking tokens and the spoken answer, so a 512-token cap could
+end an answer before it reached its public conclusion. The open-source defaults
+are now 1,024 tokens for deep requests, 768 for balanced requests, and 192 for
+fast direct requests. Override them without rebuilding through:
+
+~~~text
+OpenSourceVoice__Gemma__ReasoningMaxNewTokens=1024
+OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens=768
+OpenSourceVoice__Gemma__FastReasoningMaxNewTokens=192
+~~~
+
+Keep `LLAMA_CPP_CONTEXT_SIZE` larger than the full prompt plus the selected
+generation cap. The supplied 16,384-token context is sufficient for these
+defaults; increase it only if llama.cpp reports a context-size error for a
+larger custom cap or unusually large retrieved context.

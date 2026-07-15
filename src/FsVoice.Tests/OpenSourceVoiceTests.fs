@@ -232,13 +232,13 @@ let private runtimeOptions workDir =
     options
 
 [<Theory>]
-[<InlineData("Hello", "fast", 96, false)>]
-[<InlineData("What is 2 + 2?", "fast", 96, false)>]
-[<InlineData("Summarize the release notes", "balanced", 384, true)>]
-[<InlineData("What time will it be 47 minutes after 3:48 PM?", "deep", 512, true)>]
+[<InlineData("Hello", "fast", 192, false)>]
+[<InlineData("What is 2 + 2?", "fast", 192, false)>]
+[<InlineData("Summarize the release notes", "balanced", 768, true)>]
+[<InlineData("What time will it be 47 minutes after 3:48 PM?", "deep", 1024, true)>]
 [<InlineData("Mira has twice as many books as Jo. Jo has 7 fewer than 19. How many books does Mira have?",
              "deep",
-             512,
+             1024,
              true)>]
 let ``Adaptive reasoning assigns conservative token budgets`` transcript expectedDepth expectedTokens expectedThinking =
     let options = GemmaRuntimeOptions()
@@ -300,7 +300,7 @@ let ``Deterministic routing avoids the model tool-selection round`` () =
             |> Seq.toArray
 
         Assert.Single(reasoningRequests) |> ignore
-        Assert.Equal(96, reasoningRequests[0].MaxNewTokens)
+        Assert.Equal(192, reasoningRequests[0].MaxNewTokens)
 
         let systemPrompt =
             reasoningRequests[0].Messages
@@ -359,7 +359,7 @@ let ``Balanced reasoning applies the tested concise prompt and budget`` () =
             |> Array.find (fun message -> message.Role = GemmaChatRole.System)
             |> _.Content
 
-        Assert.Equal(384, reasoningRequest.MaxNewTokens)
+        Assert.Equal(768, reasoningRequest.MaxNewTokens)
         Assert.StartsWith("<|think|>", systemPrompt)
         Assert.Contains(ReasoningPolicy.balancedGuidance, systemPrompt)
         Assert.Equal("balanced", result.Details.GetProperty("reasoningPolicy").GetProperty("depth").GetString())

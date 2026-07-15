@@ -42,6 +42,9 @@ services:
       LLAMA_CPP_STARTUP_TIMEOUT_SECONDS: ${LLAMA_CPP_STARTUP_TIMEOUT_SECONDS:-900}
       OpenSourceVoice__WorkDir: /data/work
       OpenSourceVoice__MaxHistoryTurns: ${FSVOICE_MAX_HISTORY_TURNS:-10}
+      OpenSourceVoice__Gemma__ReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__ReasoningMaxNewTokens:-1024}
+      OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens:-768}
+      OpenSourceVoice__Gemma__FastReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__FastReasoningMaxNewTokens:-192}
       OpenSourceVoice__Gemma__LlamaCppEndpoint: http://127.0.0.1:8081
       OpenSourceVoice__Gemma__LlamaCppModel: ${FSVOICE_GEMMA_MODEL_FILE:-gemma-4-E2B_q4_0-it.gguf}
       OpenSourceVoice__Stt__Runtime: parakeet-tdt-onnx

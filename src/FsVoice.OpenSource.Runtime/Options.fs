@@ -8,10 +8,12 @@ type GemmaRuntimeOptions() =
     member val LlamaCppModel = "gemma-4-E2B_q4_0-it.gguf" with get, set
     member val LlamaCppRequestTimeoutSeconds = 180 with get, set
     member val LlamaCppHealthTimeoutSeconds = 3 with get, set
-    member val ReasoningMaxNewTokens = 512 with get, set
+    // This budget includes Gemma's hidden reasoning tokens as well as the spoken answer.
+    // Keep it large enough that a deep answer is not truncated after thinking.
+    member val ReasoningMaxNewTokens = 1024 with get, set
     member val AdaptiveReasoning = true with get, set
-    member val FastReasoningMaxNewTokens = 96 with get, set
-    member val BalancedReasoningMaxNewTokens = 384 with get, set
+    member val FastReasoningMaxNewTokens = 192 with get, set
+    member val BalancedReasoningMaxNewTokens = 768 with get, set
     member val ToolMaxRounds = 3 with get, set
     member val FastToolMaxRounds = 1 with get, set
     member val BalancedToolMaxRounds = 2 with get, set

@@ -41,6 +41,9 @@ services:
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       OpenSourceVoice__WorkDir: /data/work
       OpenSourceVoice__MaxHistoryTurns: ${FSVOICE_MAX_HISTORY_TURNS:-10}
+      OpenSourceVoice__Gemma__ReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__ReasoningMaxNewTokens:-1024}
+      OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens:-768}
+      OpenSourceVoice__Gemma__FastReasoningMaxNewTokens: ${OpenSourceVoice__Gemma__FastReasoningMaxNewTokens:-192}
       OpenSourceVoice__Vad__AllowBargeIn: ${FSVOICE_ALLOW_BARGE_IN:-true}
       OpenSourceVoice__Stt__ExecutionProvider: cuda
       OpenSourceVoice__Stt__Precision: ${FSVOICE_PARAKEET_PRECISION:-fp32}

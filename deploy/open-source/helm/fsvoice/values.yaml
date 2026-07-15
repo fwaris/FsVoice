@@ -56,6 +56,11 @@ assets:
 runtime:
   maxHistoryTurns: 10
   allowBargeIn: true
+  gemma:
+    # Each cap includes hidden thinking tokens and the answer spoken to the user.
+    reasoningMaxNewTokens: 1024
+    balancedReasoningMaxNewTokens: 768
+    fastReasoningMaxNewTokens: 192
   parakeetPrecision: fp32
   pocketTtsPrecision: int8
   llama:

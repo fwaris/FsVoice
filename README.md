@@ -8,6 +8,37 @@ Despite these capabilities, most voice applications still feel like chat applica
 
 The following sections describe the various aspects of the FsVoice platform, culminating with a high-level description of the FsVoice-based [Speak2Docs](https://apps.apple.com/app/6771490875) mobile application that puts it all together.
 
+## Open-source FsVoice voice server
+
+FsVoice also includes a self-hosted voice server that runs the complete voice
+turn locally: Parakeet ONNX transcription, Silero VAD endpointing, Gemma GGUF
+through bundled llama.cpp, Pocket TTS synthesis, and FsColbert retrieval. It
+serves the browser test page and WebSocket/WebRTC clients on port `5067`.
+
+The server uses natural, server-side VAD rather than Start/End-turn controls.
+With barge-in enabled (the default), a confirmed new utterance stops current
+generation and playback before the next answer begins. Conversation history is
+kept as a rolling ten-turn window.
+
+Model weights, voice samples, and indexes are deliberately external to the
+image. For a workstation or A100 deployment, mount or point directly at the
+shared asset directories. In Kubernetes or automated deployments, the same
+image can bootstrap a pinned immutable asset release from Azure Blob Storage or
+Amazon S3 into a verified node-local cache before llama.cpp starts.
+
+Quick links:
+
+- [Docker and local deployment](docs/open-source-docker.md)
+- [Cloud asset manifests, publishing, cache bootstrap, and Helm](docs/open-source-assets.md)
+- [Docker Compose environment example](deploy/open-source/.env.example)
+- [Remote Azure Blob/S3 Compose example](deploy/open-source/.env.remote.example)
+- [Helm chart](deploy/open-source/helm/fsvoice)
+
+Gemma answer limits are configurable because the generation budget includes
+both private thinking and the public answer. The supplied defaults are 1,024
+tokens for deep requests, 768 for balanced requests, and 192 for direct fast
+requests; see the Docker guide for the corresponding environment overrides.
+
 
 ## 1. Exploiting the Realtime API
 The following sections describe what gpt-realtime provides, how FsVoice exploits those capabilities, and where FsVoice adds architectural support to fill the gaps.

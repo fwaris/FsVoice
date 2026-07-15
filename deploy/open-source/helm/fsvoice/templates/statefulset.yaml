@@ -92,6 +92,12 @@ spec:
               value: /data/work
             - name: OpenSourceVoice__MaxHistoryTurns
               value: {{ .Values.runtime.maxHistoryTurns | quote }}
+            - name: OpenSourceVoice__Gemma__ReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.reasoningMaxNewTokens | quote }}
+            - name: OpenSourceVoice__Gemma__BalancedReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.balancedReasoningMaxNewTokens | quote }}
+            - name: OpenSourceVoice__Gemma__FastReasoningMaxNewTokens
+              value: {{ .Values.runtime.gemma.fastReasoningMaxNewTokens | quote }}
             - name: OpenSourceVoice__Vad__AllowBargeIn
               value: {{ .Values.runtime.allowBargeIn | quote }}
             - name: OpenSourceVoice__Stt__ExecutionProvider
