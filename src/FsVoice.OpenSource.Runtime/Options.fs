@@ -31,6 +31,9 @@ type SttRuntimeOptions() =
     member val Precision = "fp32" with get, set
     member val MaxAudioSeconds = 30.0 with get, set
     member val NumThreads = 4 with get, set
+    member val CudaDeviceId = 0 with get, set
+    // This limit is applied independently to the encoder and decoder CUDA arenas.
+    member val CudaArenaMemoryLimitMb = 6144 with get, set
     member val MaxTokensPerStep = 10 with get, set
 
 type VadRuntimeOptions() =

@@ -15,6 +15,50 @@ open Microsoft.ML.OnnxRuntime.Tensors
 module private ParakeetErrors =
     let invalidData (message: string) : 'T = raise (InvalidDataException message)
 
+module ParakeetCudaConfiguration =
+    [<Literal>]
+    let ArenaExtendStrategy = "kSameAsRequested"
+
+    [<Literal>]
+    let CudnnConvolutionAlgorithmSearch = "HEURISTIC"
+
+    [<Literal>]
+    let CudnnUseMaxWorkspace = "0"
+
+    let create (options: SttRuntimeOptions) : Map<string, string> =
+        if options.CudaDeviceId < 0 then
+            invalidArg (nameof options.CudaDeviceId) "OpenSourceVoice:Stt:CudaDeviceId must be zero or greater."
+
+        if options.CudaArenaMemoryLimitMb < 256 then
+            invalidArg
+                (nameof options.CudaArenaMemoryLimitMb)
+                "OpenSourceVoice:Stt:CudaArenaMemoryLimitMb must be at least 256 MB."
+
+        let memoryLimitBytes = int64 options.CudaArenaMemoryLimitMb * 1024L * 1024L
+
+        Map
+            [ "device_id", options.CudaDeviceId.ToString(CultureInfo.InvariantCulture)
+              "gpu_mem_limit", memoryLimitBytes.ToString(CultureInfo.InvariantCulture)
+              "arena_extend_strategy", ArenaExtendStrategy
+              "cudnn_conv_algo_search", CudnnConvolutionAlgorithmSearch
+              "cudnn_conv_use_max_workspace", CudnnUseMaxWorkspace
+              "do_copy_in_default_stream", "1"
+              "enable_cuda_graph", "0"
+              "use_tf32", "1" ]
+
+module ParakeetInferenceGate =
+    let private gate = new SemaphoreSlim(1, 1)
+
+    let run (cancellationToken: CancellationToken) (operation: unit -> Task<'T>) : Task<'T> =
+        task {
+            do! gate.WaitAsync(cancellationToken)
+
+            try
+                return! operation ()
+            finally
+                gate.Release() |> ignore
+        }
+
 [<RequireQualifiedAccess>]
 type private ParakeetPrecision =
     | Fp32
@@ -167,6 +211,12 @@ type ParakeetSttRuntime(options: SttRuntimeOptions, pathBase: string) =
     let maxAudioSeconds = max 0.1 options.MaxAudioSeconds
     let numThreads = max 1 options.NumThreads
     let maxTokensPerStep = max 1 options.MaxTokensPerStep
+
+    let cudaConfiguration =
+        match executionProvider with
+        | ParakeetExecutionProvider.Cpu -> Map.empty
+        | ParakeetExecutionProvider.Cuda -> ParakeetCudaConfiguration.create options
+
     let syncRoot = obj ()
     let mutable loaded: ParakeetLoadedSessions option = None
 
@@ -185,15 +235,7 @@ type ParakeetSttRuntime(options: SttRuntimeOptions, pathBase: string) =
         | ParakeetExecutionProvider.Cuda ->
             use cudaOptions = new OrtCUDAProviderOptions()
 
-            cudaOptions.UpdateOptions(
-                Dictionary<string, string>(
-                    dict
-                        [ "device_id", "0"
-                          "do_copy_in_default_stream", "1"
-                          "enable_cuda_graph", "0"
-                          "use_tf32", "1" ]
-                )
-            )
+            cudaOptions.UpdateOptions(cudaConfiguration |> Map.toSeq |> dict |> Dictionary<string, string>)
 
             sessionOptions.AppendExecutionProvider_CUDA(cudaOptions)
 
@@ -427,7 +469,13 @@ type ParakeetSttRuntime(options: SttRuntimeOptions, pathBase: string) =
                 if missing.Length = 0 then
                     let loadState = if loaded.IsSome then "loaded" else "load-on-first-use"
 
-                    $"Parakeet TDT ONNX is ready; model={modelDir}; precision={ParakeetPrecision.name precision}; provider={ParakeetExecutionProvider.name executionProvider}; sessions={loadState}."
+                    let cudaDetails =
+                        match executionProvider with
+                        | ParakeetExecutionProvider.Cpu -> ""
+                        | ParakeetExecutionProvider.Cuda ->
+                            $"; cuda_device={options.CudaDeviceId}; cuda_arena_limit_mb={options.CudaArenaMemoryLimitMb}; cuda_arena_strategy={ParakeetCudaConfiguration.ArenaExtendStrategy}; cuda_cudnn_search={ParakeetCudaConfiguration.CudnnConvolutionAlgorithmSearch}; cuda_max_workspace=false; process_wide_transcription_gate=1"
+
+                    $"Parakeet TDT ONNX is ready; model={modelDir}; precision={ParakeetPrecision.name precision}; provider={ParakeetExecutionProvider.name executionProvider}; sessions={loadState}{cudaDetails}."
                 else
                     let missingText = String.Join(", ", missing)
                     $"Parakeet TDT ONNX is not ready. Missing: {missingText}" }
@@ -451,10 +499,11 @@ type ParakeetSttRuntime(options: SttRuntimeOptions, pathBase: string) =
                 let waveform16k = AudioPcm.resampleBandLimited 24000 16000 truncated
 
                 let! transcript, message =
-                    Task.Run(
-                        Func<string * string>(fun () -> transcribe waveform16k cancellationToken),
-                        cancellationToken
-                    )
+                    ParakeetInferenceGate.run cancellationToken (fun () ->
+                        Task.Run(
+                            Func<string * string>(fun () -> transcribe waveform16k cancellationToken),
+                            cancellationToken
+                        ))
 
                 stopwatch.Stop()
 

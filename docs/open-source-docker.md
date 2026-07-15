@@ -139,3 +139,26 @@ Keep `LLAMA_CPP_CONTEXT_SIZE` larger than the full prompt plus the selected
 generation cap. The supplied 16,384-token context is sufficient for these
 defaults; increase it only if llama.cpp reports a context-size error for a
 larger custom cap or unusually large retrieved context.
+
+## Parakeet CUDA memory limits
+
+The Parakeet encoder and decoder-joint are separate ONNX Runtime CUDA sessions.
+FsVoice limits each session's CUDA arena to 6,144 MB, uses exact-request arena
+growth, selects cuDNN algorithms heuristically, and disables the optional
+maximum-workspace allocation. A process-wide gate also runs one Parakeet
+transcription at a time so concurrent voice sessions do not increase both
+arenas' high-water reservation.
+
+Override the per-session arena limit only after measuring your workload:
+
+~~~text
+FSVOICE_PARAKEET_CUDA_DEVICE_ID=0
+FSVOICE_PARAKEET_CUDA_ARENA_MEMORY_LIMIT_MB=6144
+~~~
+
+The arena limit is not an absolute process VRAM limit: model weights, CUDA, and
+cuDNN allocations can add to it. The service reports the active CUDA limit and
+serialized-transcription policy through `/api/status` in the STT status
+message. For the Windows A100 launcher, use
+`-ParakeetCudaArenaMemoryLimitMb 6144` and optionally
+`-ParakeetCudaDeviceId 0`.

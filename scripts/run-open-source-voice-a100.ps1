@@ -14,6 +14,10 @@ param(
     [ValidateSet("cpu", "cuda")]
     [string]$ParakeetExecutionProvider = "cuda",
     [int]$ParakeetNumThreads = 4,
+    [ValidateRange(0, 128)]
+    [int]$ParakeetCudaDeviceId = 0,
+    [ValidateRange(256, 65536)]
+    [int]$ParakeetCudaArenaMemoryLimitMb = 6144,
     [string]$VadModelPath = "",
     [ValidateSet("true", "false", "1", "0")]
     [string]$AllowBargeIn = "true",
@@ -264,6 +268,8 @@ $env:OpenSourceVoice__Stt__ModelDir = $parakeetDir
 $env:OpenSourceVoice__Stt__ExecutionProvider = $ParakeetExecutionProvider
 $env:OpenSourceVoice__Stt__Precision = $ParakeetPrecision
 $env:OpenSourceVoice__Stt__NumThreads = "$ParakeetNumThreads"
+$env:OpenSourceVoice__Stt__CudaDeviceId = "$ParakeetCudaDeviceId"
+$env:OpenSourceVoice__Stt__CudaArenaMemoryLimitMb = "$ParakeetCudaArenaMemoryLimitMb"
 $env:OpenSourceVoice__Tts__ModelDir = $pocketTtsDir
 $env:OpenSourceVoice__Tts__ExecutionProvider = "cpu"
 $env:OpenSourceVoice__Tts__VoiceSamplePath = $voicePath
@@ -304,6 +310,11 @@ Write-Host "SttRuntime: parakeet-tdt-onnx"
 Write-Host "SttModelDir: $parakeetDir"
 Write-Host "SttExecutionProvider: $ParakeetExecutionProvider"
 Write-Host "ParakeetPrecision: $ParakeetPrecision"
+if ($ParakeetExecutionProvider -eq "cuda") {
+    Write-Host "ParakeetCudaDeviceId: $ParakeetCudaDeviceId"
+    Write-Host "ParakeetCudaArenaMemoryLimitMb: $ParakeetCudaArenaMemoryLimitMb per encoder/decoder arena"
+    Write-Host "ParakeetInferenceConcurrency: 1 (process-wide)"
+}
 Write-Host "TtsRuntime: pocket-tts-onnx-v2"
 Write-Host "TtsModelDir: $pocketTtsDir"
 Write-Host "TtsExecutionProvider: cpu"

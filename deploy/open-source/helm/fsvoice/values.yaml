@@ -62,6 +62,9 @@ runtime:
     balancedReasoningMaxNewTokens: 768
     fastReasoningMaxNewTokens: 192
   parakeetPrecision: fp32
+  parakeetCudaDeviceId: 0
+  # Applied to each of Parakeet's encoder and decoder CUDA arenas.
+  parakeetCudaArenaMemoryLimitMb: 6144
   pocketTtsPrecision: int8
   llama:
     contextSize: 16384

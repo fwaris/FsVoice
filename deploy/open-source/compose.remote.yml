@@ -47,6 +47,8 @@ services:
       OpenSourceVoice__Vad__AllowBargeIn: ${FSVOICE_ALLOW_BARGE_IN:-true}
       OpenSourceVoice__Stt__ExecutionProvider: cuda
       OpenSourceVoice__Stt__Precision: ${FSVOICE_PARAKEET_PRECISION:-fp32}
+      OpenSourceVoice__Stt__CudaDeviceId: ${FSVOICE_PARAKEET_CUDA_DEVICE_ID:-0}
+      OpenSourceVoice__Stt__CudaArenaMemoryLimitMb: ${FSVOICE_PARAKEET_CUDA_ARENA_MEMORY_LIMIT_MB:-6144}
       OpenSourceVoice__Tts__ExecutionProvider: cpu
       OpenSourceVoice__Tts__Precision: ${FSVOICE_POCKET_TTS_PRECISION:-int8}
       LLAMA_CPP_CONTEXT_SIZE: ${LLAMA_CPP_CONTEXT_SIZE:-16384}

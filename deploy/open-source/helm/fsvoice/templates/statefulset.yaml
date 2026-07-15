@@ -104,6 +104,10 @@ spec:
               value: cuda
             - name: OpenSourceVoice__Stt__Precision
               value: {{ .Values.runtime.parakeetPrecision | quote }}
+            - name: OpenSourceVoice__Stt__CudaDeviceId
+              value: {{ .Values.runtime.parakeetCudaDeviceId | quote }}
+            - name: OpenSourceVoice__Stt__CudaArenaMemoryLimitMb
+              value: {{ .Values.runtime.parakeetCudaArenaMemoryLimitMb | quote }}
             - name: OpenSourceVoice__Tts__ExecutionProvider
               value: cpu
             - name: OpenSourceVoice__Tts__Precision

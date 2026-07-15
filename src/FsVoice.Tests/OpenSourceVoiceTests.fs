@@ -248,6 +248,54 @@ let ``Adaptive reasoning assigns conservative token budgets`` transcript expecte
     Assert.Equal(expectedTokens, decision.MaxNewTokens)
     Assert.Equal(expectedThinking, decision.EnableThinking)
 
+[<Fact>]
+let ``Parakeet CUDA configuration bounds each provider arena`` () =
+    let options = SttRuntimeOptions()
+    let configuration = ParakeetCudaConfiguration.create options
+
+    Assert.Equal("0", Map.find "device_id" configuration)
+    Assert.Equal("6442450944", Map.find "gpu_mem_limit" configuration)
+    Assert.Equal("kSameAsRequested", Map.find "arena_extend_strategy" configuration)
+    Assert.Equal("HEURISTIC", Map.find "cudnn_conv_algo_search" configuration)
+    Assert.Equal("0", Map.find "cudnn_conv_use_max_workspace" configuration)
+
+[<Fact>]
+let ``Parakeet inference gate serializes process-wide transcription work`` () =
+    task {
+        let firstEntered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let releaseFirst =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let secondEntered =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let first =
+            ParakeetInferenceGate.run CancellationToken.None (fun () ->
+                task {
+                    firstEntered.TrySetResult() |> ignore
+                    do! releaseFirst.Task
+                    return "first"
+                })
+
+        do! firstEntered.Task
+
+        let second =
+            ParakeetInferenceGate.run CancellationToken.None (fun () ->
+                task {
+                    secondEntered.TrySetResult() |> ignore
+                    return "second"
+                })
+
+        do! Task.Delay 50
+        Assert.False(secondEntered.Task.IsCompleted)
+        releaseFirst.TrySetResult() |> ignore
+
+        let! results = Task.WhenAll(first, second)
+        Assert.Equal<string array>([| "first"; "second" |], results)
+    }
+
 [<Theory>]
 [<InlineData("What time is it?", "get_current_time")>]
 [<InlineData("Show the runtime status", "get_agent_status")>]
