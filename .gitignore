@@ -32,3 +32,9 @@ release.env
 *.xcarchive
 artifacts/appstore/
 artifacts/playstore/
+
+# Generated FAA bundles do not need to be checked in.
+/bundles/faa/
+
+# Generated and downloaded data does not need to be checked in.
+/data/
